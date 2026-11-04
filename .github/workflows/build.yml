@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGLINA_BUILD_APP=ON -DGLINA_BUILD_PLUGIN=ON
+        run: cmake -S . -B build -A x64 -DGLINA_BUILD_APP=ON -DGLINA_BUILD_PLUGIN=ON
       - name: Build
         run: cmake --build build --config Release --target glina_tests glina GlinaApp GlinaPlugin_VST3 --parallel
       - name: Engine tests

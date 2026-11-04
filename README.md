@@ -26,10 +26,10 @@
 
 ## Сборка на Windows
 
-Нужно: Visual Studio 2022 (компонент «Desktop development with C++»), CMake ≥ 3.22, Git.
+Нужно: Visual Studio 2022 или 2026 (компонент «Desktop development with C++»), CMake ≥ 3.22, Git.
 
 ```bat
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGLINA_BUILD_APP=ON -DGLINA_BUILD_PLUGIN=ON
+cmake -S . -B build -A x64 -DGLINA_BUILD_APP=ON -DGLINA_BUILD_PLUGIN=ON
 cmake --build build --config Release --target GlinaApp GlinaPlugin_VST3 glina_tests
 build\Release\glina_tests.exe
 ```
