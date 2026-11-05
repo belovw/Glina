@@ -5,11 +5,17 @@ on:
     branches: ['**']
     tags: ['v*']          # pushing a tag like v0.2.0 also publishes a GitHub Release
     paths-ignore: ['**.md']
+  # GitHub → Actions → build → "Run workflow": enter a version (e.g. 0.2.0) to publish a release.
   workflow_dispatch:
+    inputs:
+      release:
+        description: 'Версия релиза, например 0.2.0 (пусто — просто сборка)'
+        required: false
+        default: ''
 
 # A newer push to the same branch cancels the build in progress.
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -54,7 +60,7 @@ jobs:
         run: build/glina_tests
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release != '')
     needs: windows
     runs-on: ubuntu-latest
     permissions:
@@ -65,9 +71,15 @@ jobs:
         with:
           name: Glina-windows-x64
           path: Glina
+      - name: Version
+        env:
+          INPUT_VER: ${{ inputs.release }}
+        run: |
+          VER="${INPUT_VER:-$GITHUB_REF_NAME}"
+          VER="${VER#v}"
+          echo "VER=$VER" >> "$GITHUB_ENV"
       - name: Package
         run: |
-          VER="${GITHUB_REF_NAME#v}"
           (cd Glina && zip -qr "../Glina-${VER}-windows-x64.zip" .)
           cp Glina/Glina.exe "Glina-${VER}-standalone.exe"
           ls -la
@@ -75,7 +87,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VER="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "v${VER}" --target "$GITHUB_SHA" \
             "Glina-${VER}-windows-x64.zip" "Glina-${VER}-standalone.exe" \
             --title "Glina ${VER}" --notes-file .github/release-notes-ru.md

@@ -28,12 +28,7 @@
 
 Готовые версии для Windows — на странице **Releases** репозитория: `Glina-…-standalone.exe` (только программа) или `Glina-…-windows-x64.zip` (программа + плагин + инструкция).
 
-Новый релиз: поставить тег версии и отправить его — GitHub сам соберёт и опубликует:
-
-```
-git tag v0.2.1
-git push origin v0.2.1
-```
+Новый релиз: GitHub → **Actions** → **build** → **Run workflow** → в поле версии ввести, например, `0.2.1` → **Run workflow**. Через ~20 минут релиз появится в Releases. (Или отправить тег: `git tag v0.2.1 && git push origin v0.2.1`.)
 
 ## Сборка на Windows
 
