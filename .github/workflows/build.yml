@@ -2,6 +2,8 @@ name: build
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']          # pushing a tag like v0.2.0 also publishes a GitHub Release
     paths-ignore: ['**.md']
   workflow_dispatch:
 
@@ -28,6 +30,7 @@ jobs:
           Copy-Item build\app\GlinaApp_artefacts\Release\Glina.exe out\
           Copy-Item -Recurse build\plugin\GlinaPlugin_artefacts\Release\VST3\Glina.vst3 out\
           Copy-Item build\Release\glina.exe out\glina-cli.exe
+          Copy-Item .github\INSTALL-ru.txt out\INSTALL-ru.txt
       - uses: actions/upload-artifact@v4
         with:
           name: Glina-windows-x64
@@ -49,3 +52,30 @@ jobs:
           cmake --build build --target glina_tests glina GlinaApp GlinaPlugin_VST3
       - name: Engine tests
         run: build/glina_tests
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Glina-windows-x64
+          path: Glina
+      - name: Package
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          (cd Glina && zip -qr "../Glina-${VER}-windows-x64.zip" .)
+          cp Glina/Glina.exe "Glina-${VER}-standalone.exe"
+          ls -la
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "Glina-${VER}-windows-x64.zip" "Glina-${VER}-standalone.exe" \
+            --title "Glina ${VER}" --notes-file .github/release-notes-ru.md

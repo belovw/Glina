@@ -24,6 +24,17 @@
 
 Синтез — PSOLA по периодам голоса: форманты сохраняются сами, шипящие не обрабатываются. Рендер 3 минут вокала ≈ 0,4 с, поэтому правка слышна почти сразу.
 
+## Скачать
+
+Готовые версии для Windows — на странице **Releases** репозитория: `Glina-…-standalone.exe` (только программа) или `Glina-…-windows-x64.zip` (программа + плагин + инструкция).
+
+Новый релиз: поставить тег версии и отправить его — GitHub сам соберёт и опубликует:
+
+```
+git tag v0.2.1
+git push origin v0.2.1
+```
+
 ## Сборка на Windows
 
 Нужно: Visual Studio 2022 или 2026 (компонент «Desktop development with C++»), CMake ≥ 3.22, Git.
@@ -40,7 +51,7 @@ JUCE 9.0.5 и ARA SDK скачиваются автоматически при �
 - `build\app\GlinaApp_artefacts\Release\Glina.exe`
 - `build\plugin\GlinaPlugin_artefacts\Release\VST3\Glina.vst3` → скопировать в `C:\Program Files\Common Files\VST3`
 
-**Без Visual Studio:** выложите папку в GitHub-репозиторий. Файл `.github/workflows/build.yml` сам соберёт Windows-версию, а готовые `Glina.exe` и `Glina.vst3` появятся в Actions → последний запуск → Artifacts.
+**Без Visual Studio:** каждый push в GitHub собирает Windows-версию сам (`.github/workflows/build.yml`); промежуточные сборки лежат в Actions → запуск → Artifacts, версии с тегом — в Releases.
 
 ## Linux
 

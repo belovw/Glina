@@ -13,6 +13,10 @@ option(GLINA_BUILD_TESTS "Build engine tests" ON)
 option(GLINA_BUILD_PLUGIN "Build the VST3/ARA2 plugin (needs JUCE + ARA SDK)" OFF)
 option(GLINA_BUILD_APP "Build the standalone editor (needs JUCE)" OFF)
 
+# Static C++ runtime on Windows: Glina.exe and Glina.vst3 run without the
+# Visual C++ Redistributable being installed.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 if(MSVC)
   # Sources are UTF-8 (Russian UI strings); M_PI etc. from <cmath>.
   add_compile_options(/utf-8)
