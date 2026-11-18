@@ -32,12 +32,19 @@ public:
     void setPlayheadSec(double) override;
     bool isBypassed() const override { return mod_ != nullptr && mod_->bypass.load(); }
     void setBypassed(bool b) override { if (mod_ != nullptr) mod_->bypass.store(b); }
+    // REAPER ignores ARA start/stop requests: space & Home go back to REAPER instead.
+    bool handlesTransportKeys() const override { return false; }
+    std::vector<GridLine> hostGrid(double t0, double t1) const override;
+    bool hasHostTempo() const override;
 
 private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override { changes.sendChangeMessage(); }
     void willDestroyPlaybackRegion(juce::ARAPlaybackRegion*) override { setRegion(nullptr); }
     void willDestroyAudioModification(juce::ARAAudioModification*) override { setRegion(nullptr); }
     ARA::PlugIn::HostPlaybackController* playback() const;
+    juce::ARAMusicalContext* musicalContext() const;
+    double toSong(double clipSec) const;
+    double fromSong(double songSec) const;
 
     GlinaDocumentController* dc_;
     GlinaProcessor& proc_;

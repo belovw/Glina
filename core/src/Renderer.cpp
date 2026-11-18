@@ -1,4 +1,5 @@
 #include "glina/Renderer.h"
+#include "glina/Editing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -74,12 +75,22 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         double bo = ao + (bi - ai) * std::max(0.05, ed.stretch);
         bo = std::max(bo, ao + 0.1 * (bi - ai));
         m.in_.push_back(ai); m.out_.push_back(ao);
+        // Only the steady middle of a note is stretched: the attack and the
+        // transition into the next note keep their timing, so transients stay crisp.
+        const double din = bi - ai, dout = bo - ao;
+        const double att = std::min(0.040 * sr, 0.30 * din), rel = std::min(0.030 * sr, 0.20 * din);
+        if (std::abs(dout - din) > 1 && dout - att - rel > 0.15 * (din - att - rel)) {
+            m.in_.push_back(ai + att); m.out_.push_back(ao + att);
+            m.in_.push_back(bi - rel); m.out_.push_back(bo - rel);
+        }
         m.in_.push_back(bi); m.out_.push_back(bo);
         lastIn = bi; lastOut = bo;
     }
     const double end = std::max((double)a.numSamples, lastIn + 1);
     m.in_.push_back(end);
-    m.out_.push_back(lastOut + (end - lastIn));
+    // The clip keeps its length (in a DAW the item does not grow): the tail after
+    // the last note absorbs any change, unless notes were pushed past the end.
+    m.out_.push_back(e.keepLength ? std::max(end, lastOut + 0.1 * (end - lastIn)) : lastOut + (end - lastIn));
     if (m.identity_) { m.in_ = {0, end}; m.out_ = {0, end}; }
     return m;
 }
@@ -134,13 +145,33 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         c.gainDb[k] += (float)ed.gainDb;
     }
 
-    // Smooth piecewise-constant offsets across adjacent notes within a voiced run.
+    // Pitch-offset transitions between adjacent notes within a voiced run: a
+    // raised-cosine ramp centred on the boundary, as wide as the later note's
+    // smoothness asks (0 = instant step ... 1 = long glide), never wider than
+    // half of either neighbouring note. Formant changes use a fixed short blend.
     const int half = std::max(1, (int)std::lround(e.transitionMs / hopMs / 4.0));
+    const std::vector<float> raw = offset;
+    auto noteAt = [&](int k) { return a.noteOfFrame.empty() ? -1 : a.noteOfFrame[(size_t)k]; };
     for (int k = 0; k < nf;) {
         if (a.frames[k].f0 <= 0) { ++k; continue; }
         int en = k;
         while (en < nf && a.frames[en].f0 > 0) ++en;
-        smoothRange(offset, k, en, half);
+        for (int b = k + 1; b < en; ++b) {
+            if (noteAt(b) == noteAt(b - 1)) continue;
+            int segL = b - 1, segR = b;
+            while (segL - 1 >= k && noteAt(segL - 1) == noteAt(b - 1)) --segL;
+            while (segR + 1 < en && noteAt(segR + 1) == noteAt(b)) ++segR;
+            const int r = noteAt(b) >= 0 ? noteAt(b) : noteAt(b - 1);
+            const double smooth = (r >= 0 && r < (int)e.notes.size()) ? e.notes[(size_t)r].transition : 0.5;
+            const double widthFrames = transitionWidthMs(smooth, e.transitionMs) / hopMs;
+            const int h = (int)std::floor(std::min({0.5 * widthFrames, 0.5 * (b - segL), 0.5 * (segR + 1 - b)}));
+            if (h <= 0) continue; // hard step
+            const float vL = raw[(size_t)b - 1], vR = raw[(size_t)b];
+            for (int j = b - h; j < b + h; ++j) {
+                const double t = (j - (b - h) + 0.5) / (2.0 * h);
+                offset[(size_t)j] = (float)(vL + (vR - vL) * (0.5 - 0.5 * std::cos(M_PI * t)));
+            }
+        }
         smoothRange(formant, k, en, half);
         k = en;
     }
@@ -150,6 +181,23 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         if (a.frames[k].f0 > 0) {
             c.pitchSemis[k] = offset[k] + shape[k];
             c.formantSemis[k] = formant[k];
+        }
+    }
+
+    // Pencil: drawn pitch replaces the computed curve, blended in over ~30 ms at
+    // the ends of each drawn stretch so it joins the rest without a jump.
+    for (const DrawRun& r : e.draw) {
+        const int len = (int)r.delta.size();
+        const double blend = std::max(1.0, 30.0 / hopMs);
+        for (int q = 0; q < len; ++q) {
+            const int k = r.start + q;
+            if (k < 0 || k >= nf || a.frames[k].f0 <= 0 || std::isnan(r.delta[(size_t)q])) continue;
+            const int ni = noteAt(k);
+            const double noteOff = (ni >= 0 && ni < (int)e.notes.size()) ? e.notes[(size_t)ni].pitchOffset : 0.0;
+            const double drawn = noteOff + r.delta[(size_t)q];
+            const double edgeDist = std::min(q, len - 1 - q) + 1.0;
+            const double w = edgeDist >= blend ? 1.0 : 0.5 - 0.5 * std::cos(M_PI * edgeDist / blend);
+            c.pitchSemis[k] = (float)((1.0 - w) * c.pitchSemis[k] + w * drawn);
         }
     }
     return c;

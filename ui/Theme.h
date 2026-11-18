@@ -12,7 +12,8 @@ const juce::Colour bg { 0xff131519 }, panel { 0xff1a1d23 }, panelLine { 0xff2a2e
     keyWhite { 0xffd8dade }, keyBlack { 0xff2a2d33 }, text { 0xffc9ccd3 }, dim { 0xff7d828c },
     pitchOrig { 0x80a0a6b0 }, pitchEdit { 0xfff2f4f8 }, playhead { 0xff4fb3ff },
     inTune { 0xff57c785 }, nearTune { 0xffe8c547 }, offTune { 0xffe8803d }, select { 0xffffffff },
-    sibilant { 0xffb36bd6 }, breath { 0xff5c7a99 }, accent { 0xff4fb3ff }, warn { 0xffe8803d };
+    sibilant { 0xffb36bd6 }, breath { 0xff5c7a99 }, accent { 0xff4fb3ff }, warn { 0xffe8803d },
+    drawn { 0xffffa53d };
 inline juce::Colour voice(int i)
 {
     static const juce::uint32 c[] = {0xff3fd0c9, 0xffb18cff, 0xffff7eb6, 0xff7cc4ff};

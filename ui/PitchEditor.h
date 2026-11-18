@@ -47,6 +47,7 @@ private:
     double outSec(double inSec) const;
     double inSec(double outSec) const;
     double editedCentre(int note) const;
+    std::vector<ClipHost::GridLine> gridLines(double t0, double t1) const;
     juce::String keyLabel(int tonic, bool minor) const;
 
     // ---- actions --------------------------------------------------------------------
@@ -59,6 +60,8 @@ private:
     void splitAt(int note, double outSecond);
     void joinSelected();
     void selectAll();
+    void erasePencilInSelection();
+    void setPencil(bool on);
     void selectStep(int dir, bool extend);
     void togglePlay();
     void toggleBypass();
@@ -90,6 +93,8 @@ private:
     juce::Slider corrPitch_, corrDrift_;
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
+    bool pencil_ = false;
+    juce::TextButton pencilBtn_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchEditor)
 };

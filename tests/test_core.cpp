@@ -5,6 +5,7 @@
 #include "glina/Tuning.h"
 #include "glina/Document.h"
 #include "glina/Notes.h"
+#include "glina/Editing.h"
 
 #include <cmath>
 #include <cstdio>
@@ -149,6 +150,7 @@ static void testStretch(const test::SynthResult& s, const Analysis& a, double sr
 {
     std::printf("[stretch] time-stretch x1.25 keeps pitch\n");
     EditSet e;
+    e.keepLength = false; // global time stretch: the take gets longer
     e.notes.resize(a.notes.size());
     for (size_t i = 0; i < a.notes.size(); ++i) {
         e.notes[i].timeOffsetSec = a.notes[i].startSec * 0.25;
@@ -271,6 +273,179 @@ static void testDocumentIO(const Analysis& a)
     CHECK(!deserialize("garbage", r), "garbage accepted");
 }
 
+// Output time (s) of the analysed onset nearest to `want` in a re-analysis.
+static double onsetNear(const Analysis& b, double want)
+{
+    double best = 1e9;
+    for (const Note& n : b.notes) if (std::abs(n.startSec - want) < std::abs(best - want)) best = n.startSec;
+    return best;
+}
+
+static void testBoundaryBlocks(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[boundary] 5 selected notes, drag the edge between the 2nd and 3rd: two blocks\n");
+    if (a.notes.size() < 7) { CHECK(false, "need 7 notes"); return; }
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    const auto base = noteTimes(a, e);
+    const std::set<int> sel = {0, 1, 2, 3, 4};
+    const double applied = moveBoundary(e, a, 1, 0.08, sel);
+    const auto t = noteTimes(a, e);
+    std::printf("  applied %.3f s; note1 end %+.3f, note2 start %+.3f, note0 start %+.4f, note4 end %+.4f, note5 %+.4f\n",
+                applied, t[1].outEnd - base[1].outEnd, t[2].outStart - base[2].outStart, t[0].outStart - base[0].outStart,
+                t[4].outEnd - base[4].outEnd, t[5].outStart - base[5].outStart);
+    CHECK(std::abs(applied - 0.08) < 1e-9, "dt clamped to %.3f", applied);
+    CHECK(std::abs(t[1].outEnd - base[1].outEnd - 0.08) < 1e-6, "boundary did not move");
+    CHECK(std::abs(t[2].outStart - base[2].outStart - 0.08) < 1e-6, "gap at the boundary changed length");
+    CHECK(std::abs(t[0].outStart - base[0].outStart) < 1e-6, "left block start moved");
+    CHECK(std::abs(t[4].outEnd - base[4].outEnd) < 1e-6, "right block end moved");
+    for (int i = 5; i < (int)t.size(); ++i)
+        CHECK(std::abs(t[i].outStart - base[i].outStart) < 1e-6 && std::abs(t[i].outEnd - base[i].outEnd) < 1e-6,
+              "note %d outside the blocks moved", i);
+    for (int i = 1; i <= 4; ++i) {
+        if (i == 2) continue;
+        CHECK(std::abs((t[i].outStart - t[i - 1].outEnd) - (base[i].outStart - base[i - 1].outEnd)) < 1e-6,
+              "gap before note %d changed", i);
+    }
+    const double kL = (t[0].outEnd - t[0].outStart) / (base[0].outEnd - base[0].outStart);
+    const double kL1 = (t[1].outEnd - t[1].outStart) / (base[1].outEnd - base[1].outStart);
+    CHECK(std::abs(kL - kL1) < 1e-6 && kL > 1, "left block not stretched as one (%.3f vs %.3f)", kL, kL1);
+
+    const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
+    CHECK(y.size() == s.audio.size(), "clip length changed %zu -> %zu", s.audio.size(), y.size());
+    const Analysis b = analyze(y.data(), y.size(), sr);
+    const double on2 = onsetNear(b, t[2].outStart), on6 = onsetNear(b, t[6].outStart);
+    std::printf("  rendered: note 3 onset %+.1f ms from target, note 7 onset %+.1f ms (should stay)\n",
+                (on2 - t[2].outStart) * 1000, (on6 - base[6].outStart) * 1000);
+    CHECK(std::abs(on2 - t[2].outStart) < 0.015, "note 3 onset off by %.1f ms", (on2 - t[2].outStart) * 1000);
+    CHECK(std::abs(on6 - base[6].outStart) < 0.015, "note 7 moved by %.1f ms", (on6 - base[6].outStart) * 1000);
+}
+
+static void testMoveNote(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[move] move one note +50 ms: neighbours absorb, the rest stays\n");
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    const auto base = noteTimes(a, e);
+    const double applied = moveNotes(e, a, {3}, 0.05);
+    const auto t = noteTimes(a, e);
+    CHECK(std::abs(applied - 0.05) < 1e-9, "clamped to %.3f", applied);
+    CHECK(std::abs(t[3].outStart - base[3].outStart - 0.05) < 1e-6, "note did not move");
+    CHECK(std::abs(t[2].outEnd - base[2].outEnd - 0.05) < 1e-6 && std::abs(t[2].outStart - base[2].outStart) < 1e-6,
+          "previous note should lengthen at its end only");
+    CHECK(std::abs(t[4].outStart - base[4].outStart - 0.05) < 1e-6 && std::abs(t[4].outEnd - base[4].outEnd) < 1e-6,
+          "next note should shorten at its start only");
+    const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
+    const Analysis b = analyze(y.data(), y.size(), sr);
+    const double on3 = onsetNear(b, t[3].outStart);
+    std::printf("  rendered note 4 onset %+.1f ms from target\n", (on3 - t[3].outStart) * 1000);
+    CHECK(std::abs(on3 - t[3].outStart) < 0.015, "moved note onset off by %.1f ms", (on3 - t[3].outStart) * 1000);
+    // Clamping: pushing a note far into its neighbour stops at the neighbour's minimum length.
+    EditSet f;
+    f.notes.resize(a.notes.size());
+    const double big = moveNotes(f, a, {3}, 10.0);
+    CHECK(big < 10.0 && big > 0, "huge move not clamped (%.3f)", big);
+}
+
+static void testAttackKept(const Analysis& a)
+{
+    std::printf("[attack] stretching a note leaves its attack and tail untouched\n");
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    const int i = 4;
+    const double dur = a.notes[i].endSec - a.notes[i].startSec;
+    setNoteDuration(e, a, i, dur * 1.6);
+    const TimeMap m = TimeMap::build(a, e);
+    const double sr = a.sampleRate, ai = a.notes[i].startSec * sr, bi = a.notes[i].endSec * sr;
+    const double attackSlope = (m.inToOut(ai + 0.02 * sr) - m.inToOut(ai)) / (0.02 * sr);
+    const double tailSlope = (m.inToOut(bi) - m.inToOut(bi - 0.015 * sr)) / (0.015 * sr);
+    const double midSlope = (m.inToOut(0.5 * (ai + bi) + 0.01 * sr) - m.inToOut(0.5 * (ai + bi))) / (0.01 * sr);
+    std::printf("  slopes: attack %.3f, middle %.3f, tail %.3f\n", attackSlope, midSlope, tailSlope);
+    CHECK(std::abs(attackSlope - 1) < 1e-6, "attack stretched (%.3f)", attackSlope);
+    CHECK(std::abs(tailSlope - 1) < 1e-6, "tail stretched (%.3f)", tailSlope);
+    CHECK(midSlope > 1.6, "middle not stretched enough (%.3f)", midSlope);
+}
+
+static void testTransitions(const Analysis& a)
+{
+    std::printf("[transition] smoothness 0 = step, 1 = long glide\n");
+    int pair = -1;
+    for (int i = 0; i + 1 < (int)a.notes.size(); ++i)
+        if (a.notes[(size_t)i + 1].startFrame == a.notes[(size_t)i].endFrame) { pair = i; break; }
+    if (pair < 0) { std::printf("  (no contiguous notes, skipped)\n"); return; }
+    auto rampFrames = [&](double smooth) {
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        e.notes[(size_t)pair].pitchOffset = 1.0;
+        e.notes[(size_t)pair + 1].pitchOffset = -1.0;
+        e.notes[(size_t)pair + 1].transition = smooth;
+        const auto c = editedPitchCurve(a, e);
+        int n = 0;
+        // Only around this boundary: the neighbouring boundaries keep their default smoothness.
+        const int b = a.notes[(size_t)pair + 1].startFrame;
+        const int reach = std::min(b - a.notes[(size_t)pair].startFrame, a.notes[(size_t)pair + 1].endFrame - b) / 2;
+        for (int k = b - reach; k < b + reach; ++k) {
+            if (a.frames[(size_t)k].f0 <= 0) continue;
+            const double d = c[(size_t)k] - a.frames[(size_t)k].midi; // the applied offset
+            const double frac = (1.0 - d) / 2.0;
+            if (frac > 0.1 && frac < 0.9) ++n;
+        }
+        return n;
+    };
+    const int r0 = rampFrames(0.0), r5 = rampFrames(0.5), r1 = rampFrames(1.0);
+    std::printf("  frames in the ramp: smoothness 0 -> %d, 0.5 -> %d, 1 -> %d\n", r0, r5, r1);
+    CHECK(r0 == 0, "step has %d ramp frames", r0);
+    CHECK(r5 >= 3 && r5 <= 12, "natural ramp %d frames", r5);
+    CHECK(r1 > r5 * 2, "glide not longer (%d)", r1);
+}
+
+static void testPencil(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[pencil] drawn pitch is rendered and moves with its note\n");
+    const int i = 4;
+    const Note& n = a.notes[(size_t)i];
+    const int f0 = n.startFrame + (n.endFrame - n.startFrame) / 4, f1 = n.endFrame - (n.endFrame - n.startFrame) / 4;
+    const float target = (float)(n.centerMidi + 0.5);
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    drawPitch(e, a, f0, std::vector<float>((size_t)(f1 - f0), target));
+    CHECK(e.draw.size() == 1, "draw runs %zu", e.draw.size());
+    auto measure = [&](const EditSet& ed) {
+        const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, ed);
+        const Analysis b = analyze(y.data(), y.size(), sr);
+        double sum = 0; int c = 0;
+        for (int f = f0 + 8; f < f1 - 8; ++f) if (b.frames[(size_t)f].f0 > 0) { sum += b.frames[(size_t)f].midi; ++c; }
+        return c ? sum / c : 0.0;
+    };
+    const double got = measure(e);
+    std::printf("  drawn %.2f, rendered %.2f (%+.1f cents)\n", target, got, (got - target) * 100);
+    CHECK(std::abs(got - target) < 0.06, "pencil pitch off by %.1f cents", (got - target) * 100);
+    e.notes[(size_t)i].pitchOffset = 1.0;
+    const double moved = measure(e);
+    std::printf("  note +1 st: rendered %.2f (want %.2f)\n", moved, target + 1.0);
+    CHECK(std::abs(moved - target - 1.0) < 0.06, "drawing did not follow the note (%.2f)", moved);
+    eraseDrawn(e, 0, (int)a.frames.size());
+    CHECK(e.draw.empty(), "erase left %zu runs", e.draw.size());
+}
+
+static void testDocumentV2(const Analysis& a)
+{
+    std::printf("[document v2] smoothness + pencil round trip, v1 still loads\n");
+    Document d;
+    conform(d, a);
+    d.edits.notes[2].transition = 0.85;
+    drawPitch(d.edits, a, a.notes[3].startFrame + 5, std::vector<float>(20, (float)a.notes[3].centerMidi + 0.3f));
+    Document r;
+    CHECK(deserialize(serialize(d), r), "v2 parse failed");
+    CHECK(serialize(r) == serialize(d), "v2 round trip differs");
+    CHECK(r.edits.draw.size() == d.edits.draw.size(), "draw runs lost");
+    const std::string v1 = "glina-document 1\nkey -1 0 0\nlead 0\nglobal 0 0 0 45 40\nspans 0\nnotes 1\n"
+                           "n 0.5 1 1 0 0 0 1\nend\n";
+    Document o;
+    CHECK(deserialize(v1, o) && o.edits.notes.size() == 1 && o.edits.notes[0].pitchOffset == 0.5 &&
+              o.edits.notes[0].transition == 0.5, "v1 document did not load");
+}
+
 int main()
 {
     testSines();
@@ -288,6 +463,12 @@ int main()
         testSplitJoin(s, a, sr);
         testHarmony(s, a, sr);
         testDocumentIO(a);
+        testBoundaryBlocks(s, a, sr);
+        testMoveNote(s, a, sr);
+        testAttackKept(a);
+        testTransitions(a);
+        testPencil(s, a, sr);
+        testDocumentV2(a);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

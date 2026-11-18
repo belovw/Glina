@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Glina VERSION 0.2.0 LANGUAGES C CXX)
+project(Glina VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,7 +32,8 @@ add_library(glina_core STATIC
   core/src/Tuning.cpp
   core/src/Notes.cpp
   core/src/Harmony.cpp
-  core/src/Document.cpp)
+  core/src/Document.cpp
+  core/src/Editing.cpp)
 target_include_directories(glina_core PUBLIC core/include)
 find_package(Threads REQUIRED)
 target_link_libraries(glina_core PUBLIC Threads::Threads)

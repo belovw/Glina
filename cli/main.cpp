@@ -143,6 +143,7 @@ int main(int argc, char** argv)
         edits = makeTranspose(a, optD(opt, "semitones", 0.0), optD(opt, "formant", 0.0));
     } else if (cmd == "stretch") {
         const double fct = optD(opt, "factor", 1.0);
+        edits.keepLength = false; // the whole take gets longer/shorter
         edits.notes.resize(a.notes.size());
         for (size_t i = 0; i < a.notes.size(); ++i) {
             edits.notes[i].timeOffsetSec = a.notes[i].startSec * (fct - 1.0);

@@ -68,6 +68,20 @@ public:
     virtual void setPlayheadSec(double) {}
     virtual bool isBypassed() const { return false; }     // A/B: hear the original
     virtual void setBypassed(bool) {}
+    // Space / Home handled by the editor (standalone). A DAW host returns false:
+    // the keys are passed on to the DAW so its own transport shortcuts work.
+    virtual bool handlesTransportKeys() const { return canControlTransport(); }
+
+    // ---- musical grid ---------------------------------------------------------
+    struct GridLine {
+        double sec = 0;   // clip output time
+        int bar = 1;      // 1-based
+        int beat = 1;     // 1-based within the bar
+    };
+    // Bars/beats between t0 and t1 (clip output time) from the host's tempo map;
+    // empty if the host has none (the editor then uses the document's tempo, or seconds).
+    virtual std::vector<GridLine> hostGrid(double /*t0*/, double /*t1*/) const { return {}; }
+    virtual bool hasHostTempo() const { return false; }
 
     // Fired (asynchronously) when analysis/render finished or the clip changed.
     juce::ChangeBroadcaster changes;

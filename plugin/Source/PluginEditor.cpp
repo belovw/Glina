@@ -1,5 +1,7 @@
 #include "PluginEditor.h"
 
+#include <ARA_Library/Utilities/ARATimelineConversion.h>
+
 namespace glina::plugin {
 
 using ui::T;
@@ -68,6 +70,63 @@ ARA::PlugIn::HostPlaybackController* PluginClip::playback() const
 }
 
 bool PluginClip::canControlTransport() const { return region_ != nullptr && playback() != nullptr; }
+
+// ---- tempo map from the DAW (ARA musical context) -------------------------------------
+juce::ARAMusicalContext* PluginClip::musicalContext() const
+{
+    if (region_ == nullptr) return nullptr;
+    auto* seq = region_->getRegionSequence();
+    return seq != nullptr ? seq->getMusicalContext() : nullptr;
+}
+
+double PluginClip::toSong(double t) const
+{
+    const double md = region_->getDurationInAudioModificationTime();
+    const double ratio = md > 0 ? region_->getDurationInPlaybackTime() / md : 1.0;
+    return region_->getStartInPlaybackTime() + (t - region_->getStartInAudioModificationTime()) * ratio;
+}
+
+double PluginClip::fromSong(double song) const
+{
+    const double pd = region_->getDurationInPlaybackTime();
+    const double ratio = pd > 0 ? region_->getDurationInAudioModificationTime() / pd : 1.0;
+    return region_->getStartInAudioModificationTime() + (song - region_->getStartInPlaybackTime()) * ratio;
+}
+
+bool PluginClip::hasHostTempo() const
+{
+    auto* mc = musicalContext();
+    if (mc == nullptr) return false;
+    const ARA::PlugIn::HostContentReader<ARA::kARAContentTypeTempoEntries> tempo(mc);
+    const ARA::PlugIn::HostContentReader<ARA::kARAContentTypeBarSignatures> bars(mc);
+    return tempo && bars;
+}
+
+std::vector<ui::ClipHost::GridLine> PluginClip::hostGrid(double t0, double t1) const
+{
+    std::vector<GridLine> out;
+    auto* mc = musicalContext();
+    if (mc == nullptr || t1 <= t0) return out;
+    const ARA::PlugIn::HostContentReader<ARA::kARAContentTypeTempoEntries> tempoReader(mc);
+    const ARA::PlugIn::HostContentReader<ARA::kARAContentTypeBarSignatures> barReader(mc);
+    if (!tempoReader || !barReader) return out;
+    const ARA::TempoConverter<decltype(tempoReader)> tempo(tempoReader);
+    const ARA::BarSignaturesConverter<decltype(barReader)> bars(barReader);
+
+    const double beat0 = bars.getBeatForQuarter(tempo.getQuarterForTime(toSong(t0)));
+    const double beat1 = bars.getBeatForQuarter(tempo.getQuarterForTime(toSong(t1)));
+    if (!(beat1 > beat0) || beat1 - beat0 > 20000) return out;
+    for (long b = (long)std::floor(beat0); b <= (long)std::ceil(beat1); ++b) {
+        const auto q = bars.getQuarterForBeat((double)b);
+        const auto sig = bars.getBarSignatureForQuarter(q);
+        GridLine l;
+        l.sec = fromSong(tempo.getTimeForQuarter(q));
+        l.bar = bars.getBarIndexForQuarter(q) + 1;
+        l.beat = (int)std::lround(bars.getBeatDistanceFromBarStartForQuarter(q)) % std::max(1, (int)sig.numerator) + 1;
+        out.push_back(l);
+    }
+    return out;
+}
 
 void PluginClip::setPlaying(bool p)
 {

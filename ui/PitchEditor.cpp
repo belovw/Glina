@@ -1,6 +1,7 @@
 #include "PitchEditor.h"
 
 #include "glina/Notes.h"
+#include "glina/Editing.h"
 #include "glina/PitchDetector.h"
 #include "glina/Tuning.h"
 
@@ -52,7 +53,9 @@ public:
         static const char* text =
             "МЫШЬ\n"
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
-            "  Тянуть ноту вбок — сдвиг во времени;  тянуть край ноты — длительность\n"
+            "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
+            "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
+            "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
             "  Клик по линейке — позиция воспроизведения;  правая кнопка — меню ноты\n"
@@ -65,7 +68,7 @@ public:
             "  Del — сбросить правки нот        ← / → — соседняя нота (Shift — добавить)\n"
             "  Ctrl+A — все ноты    Esc — снять выделение\n"
             "  Ctrl+Z / Ctrl+Shift+Z — отмена / повтор\n"
-            "  Пробел — пуск/стоп    B — сравнить с оригиналом (A/B)\n"
+            "  Пробел — пуск/стоп (в плагине — транспорт DAW)    B — сравнить с оригиналом (A/B)\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -152,22 +155,7 @@ public:
             }
         }
 
-        // Ruler + seconds grid (output time).
-        g.setColour(col::panel);
-        g.fillRect(0.f, 0.f, (float)getWidth(), kRulerH);
-        const double step = ed.pps_ >= 60 ? 1.0 : ed.pps_ >= 15 ? 5.0 : ed.pps_ >= 5 ? 10.0 : 30.0;
-        g.setFont(juce::FontOptions(10.5f));
-        for (double t = std::floor(ed.scroll_ / step) * step; xOf(t) < c.getRight(); t += step) {
-            const float x = xOf(t);
-            if (x < c.getX()) continue;
-            g.setColour(col::grid);
-            g.drawVerticalLine((int)x, c.getY(), c.getBottom());
-            g.setColour(col::dim);
-            g.drawVerticalLine((int)x, kRulerH - 6, kRulerH);
-            const int sec = (int)std::lround(t);
-            g.drawText(juce::String(sec / 60) + ":" + juce::String(sec % 60).paddedLeft('0', 2),
-                       juce::Rectangle<float>(x + 3, 0, 60, kRulerH - 2), juce::Justification::centredLeft);
-        }
+        drawRuler(g);
 
         if (ed.host_ == nullptr || A == nullptr || d == nullptr) {
             g.setColour(col::dim);
@@ -207,6 +195,57 @@ public:
             }
         }
         drawStatus(g);
+    }
+
+    // Ruler + grid (output time): bars/beats when a tempo is known, otherwise seconds.
+    void drawRuler(juce::Graphics& g)
+    {
+        const auto c = canvas();
+        g.setColour(col::panel);
+        g.fillRect(0.f, 0.f, (float)getWidth(), kRulerH);
+        g.setFont(juce::FontOptions(10.5f));
+        const double t0 = secOf(c.getX()), t1 = secOf(c.getRight());
+        const auto lines = ed.gridLines(t0, t1);
+        if (!lines.empty()) {
+            // Spacing in pixels decides what is drawn and labelled.
+            double beatPx = 1e9, barPx = 1e9;
+            for (size_t k = 1; k < lines.size(); ++k) {
+                const double dx = (lines[k].sec - lines[k - 1].sec) * ed.pps_;
+                beatPx = std::min(beatPx, dx);
+            }
+            int beatsPerBar = 1;
+            for (const auto& l : lines) beatsPerBar = std::max(beatsPerBar, l.beat);
+            barPx = beatPx * beatsPerBar;
+            const int labelEvery = std::max(1, (int)std::ceil(44.0 / std::max(1.0, barPx)));
+            for (const auto& l : lines) {
+                const float x = xOf(l.sec);
+                if (x < c.getX() || x > c.getRight()) continue;
+                const bool bar = l.beat == 1;
+                if (!bar && beatPx < 7) continue;
+                g.setColour(bar ? col::grid.brighter(0.25f) : col::grid.withAlpha(0.55f));
+                g.drawVerticalLine((int)x, c.getY(), c.getBottom());
+                g.setColour(col::dim);
+                g.drawVerticalLine((int)x, bar ? kRulerH - 8.f : kRulerH - 4.f, kRulerH);
+                juce::String label;
+                if (bar && ((l.bar - 1) % labelEvery == 0)) label = juce::String(l.bar);
+                else if (!bar && beatPx >= 34) label = juce::String(l.bar) + "." + juce::String(l.beat);
+                if (label.isNotEmpty())
+                    g.drawText(label, juce::Rectangle<float>(x + 3, 0, 50, kRulerH - 2), juce::Justification::centredLeft);
+            }
+            return;
+        }
+        const double step = ed.pps_ >= 60 ? 1.0 : ed.pps_ >= 15 ? 5.0 : ed.pps_ >= 5 ? 10.0 : 30.0;
+        for (double t = std::floor(ed.scroll_ / step) * step; xOf(t) < c.getRight(); t += step) {
+            const float x = xOf(t);
+            if (x < c.getX()) continue;
+            g.setColour(col::grid);
+            g.drawVerticalLine((int)x, c.getY(), c.getBottom());
+            g.setColour(col::dim);
+            g.drawVerticalLine((int)x, kRulerH - 6, kRulerH);
+            const int sec = (int)std::lround(t);
+            g.drawText(juce::String(sec / 60) + ":" + juce::String(sec % 60).paddedLeft('0', 2),
+                       juce::Rectangle<float>(x + 3, 0, 60, kRulerH - 2), juce::Justification::centredLeft);
+        }
     }
 
     void drawStatus(juce::Graphics& g)
@@ -317,8 +356,14 @@ public:
             g.strokePath(p, juce::PathStrokeType(w));
         };
         draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f);
-        if (ed.curve_.size() == A.frames.size())
+        if (ed.curve_.size() == A.frames.size()) {
             draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f);
+            // Pencil-drawn stretches on top, in their own colour.
+            if (const Document* d = ed.doc(); d != nullptr && !d->edits.draw.empty()) {
+                const std::vector<float> dense = drawnDense(d->edits, nf);
+                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f);
+            }
+        }
     }
 
     void drawHarmonies(juce::Graphics& g, const Analysis& A)
@@ -367,6 +412,7 @@ public:
     void mouseMove(const juce::MouseEvent& e) override
     {
         lastMouse = e.position;
+        if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
         const int i = hitNote(e.position);
         if (i < 0) setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
         else setMouseCursor(zoneOf(i, e.position) == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
@@ -383,6 +429,13 @@ public:
         if (e.position.y < kRulerH && e.position.x > kKeysW) {
             gesture = G::Ruler;
             if (ed.host_->canControlTransport()) ed.host_->setPlayheadSec(std::max(0.0, secOf(e.position.x)));
+            return;
+        }
+        if (ed.pencil_ && canvas().contains(e.position)) {
+            gesture = (e.mods.isAltDown() || e.mods.isPopupMenu()) ? G::Erase : G::Draw;
+            before = *ed.doc();
+            lastDraw = drawPoint(e.position, e.mods.isShiftDown());
+            strokeTo(lastDraw);
             return;
         }
         const int i = hitNote(e.position);
@@ -437,6 +490,13 @@ public:
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Pitch : G::Move;
                 break;
+            case G::Draw:
+            case G::Erase: {
+                const auto p = drawPoint(e.position, e.mods.isShiftDown());
+                strokeTo(p);
+                lastDraw = p;
+                return;
+            }
             case G::None:
                 return;
             case G::Pitch:
@@ -454,19 +514,15 @@ public:
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
         } else if (gesture == G::Move) {
-            for (auto& [k, s0] : start) d->edits.notes[(size_t)k].timeOffsetSec = s0.timeOffsetSec + dt;
+            // The note(s) travel with their consonant; neighbours absorb, the rest stays put.
+            d->edits = before.edits;
+            std::set<int> moved = ed.selection_;
+            moved.insert(pressed);
+            moveNotes(d->edits, *ed.eff_, moved, dt);
         } else {
-            const Note& n = ed.eff_->notes[(size_t)pressed];
-            const double dur = std::max(1e-3, n.endSec - n.startSec);
-            const NoteEdit& s0 = start[pressed];
-            NoteEdit& ne = d->edits.notes[(size_t)pressed];
-            if (gesture == G::StretchR) {
-                ne.stretch = std::max(0.1, (dur * s0.stretch + dt) / dur);
-            } else {
-                const double newDur = std::max(0.1 * dur, dur * s0.stretch - dt);
-                ne.timeOffsetSec = s0.timeOffsetSec + (dur * s0.stretch - newDur);
-                ne.stretch = newDur / dur;
-            }
+            // An edge is a boundary between two notes (or two blocks of selected notes).
+            d->edits = before.edits;
+            moveBoundary(d->edits, *ed.eff_, gesture == G::StretchR ? pressed : pressed - 1, dt, ed.selection_);
         }
         changed = true;
         ed.refreshCurves();
@@ -478,6 +534,11 @@ public:
         const G g0 = gesture;
         gesture = G::None;
         marquee = {};
+        if (g0 == G::Draw || g0 == G::Erase) {
+            if (changed) ed.commit(before);
+            changed = false;
+            return;
+        }
         if (g0 == G::Pending && pressed >= 0 && e.mods.isAltDown() && !changed) {
             ed.splitAt(pressed, secOf(e.position.x));
         } else if (changed) {
@@ -535,6 +596,7 @@ public:
         m.addItem(4, T("Склеить выделенные\tJ"), any);
         m.addItem(5, T("Дрейф убрать / вернуть\tD"), true);
         m.addItem(6, T("Вибрато 100 / 50 / 0 %\tV"), true);
+        m.addItem(7, T("Стереть карандаш в выделенных"), any && ed.doc() != nullptr && !ed.doc()->edits.draw.empty());
         Document* d = ed.doc();
         if (d != nullptr && !d->voices.empty() && any) {
             m.addSeparator();
@@ -555,6 +617,7 @@ public:
             else if (r == 4) ed.joinSelected();
             else if (r == 5) ed.toggleDrift();
             else if (r == 6) ed.cycleVibrato();
+            else if (r == 7) ed.erasePencilInSelection();
             else if (r >= 10 && r < 30) {
                 const int j = r % 10;
                 const bool on = r < 20;
@@ -568,8 +631,43 @@ public:
         });
     }
 
+    // ---- pencil ---------------------------------------------------------------------
+    struct DrawPt { int frame = 0; float midi = 0; };
+    DrawPt drawPoint(juce::Point<float> p, bool snap) const
+    {
+        const Analysis& A = *ed.eff_;
+        const double hopSec = (double)A.hop / A.sampleRate;
+        DrawPt d;
+        d.frame = (int)std::lround(ed.inSec(secOf(p.x)) / hopSec);
+        double m = ed.hi_ - (p.y - canvas().getY()) / semi();
+        if (snap) m = std::round(m);
+        d.midi = (float)m;
+        return d;
+    }
+    // Draw (or erase) a straight segment from the previous point to `p`.
+    void strokeTo(DrawPt p)
+    {
+        Document* d = ed.doc();
+        if (d == nullptr || ed.eff_ == nullptr) return;
+        const int a = std::min(lastDraw.frame, p.frame), b = std::max(lastDraw.frame, p.frame);
+        if (gesture == G::Erase) {
+            eraseDrawn(d->edits, a, b + 1);
+        } else {
+            std::vector<float> v((size_t)(b - a + 1));
+            for (int f = a; f <= b; ++f) {
+                const double t = b > a ? (double)(f - lastDraw.frame) / (p.frame - lastDraw.frame) : 1.0;
+                v[(size_t)(f - a)] = (float)(lastDraw.midi + (p.midi - lastDraw.midi) * std::clamp(t, 0.0, 1.0));
+            }
+            drawPitch(d->edits, *ed.eff_, a, v);
+        }
+        changed = true;
+        ed.refreshCurves();
+        repaint();
+    }
+
     PitchEditor& ed;
-    enum class G { None, Pending, Pitch, Move, StretchL, StretchR, Marquee, Ruler };
+    enum class G { None, Pending, Pitch, Move, StretchL, StretchR, Marquee, Ruler, Draw, Erase };
+    DrawPt lastDraw;
     G gesture = G::None;
     int pressed = -1;
     bool changed = false;
@@ -613,14 +711,29 @@ public:
             for (int i : sel(ed)) d.edits.notes[(size_t)i].formantShift = v; });
         setup(gain, "Громкость", -30, 12, 0.1, " дБ", [this, sel](Document& d, double v) {
             for (int i : sel(ed)) d.edits.notes[(size_t)i].gainDb = v; });
+        // Duration moves the note's end boundary: the next note absorbs it, the rest stays.
         setup(length, "Длительность", 25, 400, 1, " %", [this, sel](Document& d, double v) {
-            for (int i : sel(ed)) d.edits.notes[(size_t)i].stretch = v / 100.0; });
+            if (ed.eff_ == nullptr) return;
+            for (int i : sel(ed)) {
+                const Note& n = ed.eff_->notes[(size_t)i];
+                setNoteDuration(d.edits, *ed.eff_, i, (n.endSec - n.startSec) * v / 100.0);
+            }
+        });
+        setup(smooth, "Плавность перехода в ноту", 0, 100, 1, " %", [this, sel](Document& d, double v) {
+            for (int i : sel(ed)) d.edits.notes[(size_t)i].transition = v / 100.0; });
+        smooth.slider.setTooltip(T("0 — мгновенный скачок высоты, 50 — естественно, 100 — длинное глиссандо"));
 
         setup(sib, "Шипящие", -30, 12, 0.5, " дБ", [](Document& d, double v) { d.edits.sibilantGainDb = v; });
         setup(breath, "Дыхание", -40, 12, 0.5, " дБ", [](Document& d, double v) { d.edits.breathGainDb = v; });
         setup(gform, "Форманта (всё)", -12, 12, 0.1, " пт", [](Document& d, double v) { d.edits.globalFormantShift = v; });
-        setup(trans, "Переходы", 5, 200, 1, " мс", [](Document& d, double v) { d.edits.transitionMs = v; });
+        setup(smoothAll, "Плавность переходов (все)", 0, 100, 1, " %", [](Document& d, double v) {
+            for (auto& n : d.edits.notes) n.transition = v / 100.0; });
         setup(lead, "Основной голос", -40, 12, 0.5, " дБ", [](Document& d, double v) { d.leadGainDb = v; });
+        setup(tempo, "Темп (0 — секунды)", 0, 300, 0.01, " BPM", [](Document& d, double v) { d.tempoBpm = v; });
+        setup(beats, "Долей в такте", 1, 12, 1, "", [](Document& d, double v) { d.beatsPerBar = (int)v; });
+        setup(barStart, "Начало 1-го такта", -4, 30, 0.001, " с", [](Document& d, double v) { d.barOffsetSec = v; });
+        tempo.slider.setDoubleClickReturnValue(true, 0.0);
+        beats.slider.setDoubleClickReturnValue(true, 4.0);
     }
 
     void setup(EditSlider& s, const char* name, double lo, double hi, double step, const char* suffix,
@@ -659,8 +772,10 @@ public:
         Document* d = ed.doc();
         const bool ready = d != nullptr && ed.eff_ != nullptr;
         const bool notes = ready && !ed.selection_.empty();
-        for (auto* s : {&drift, &vib, &formant, &gain, &length}) { s->slider.setVisible(notes); s->label.setVisible(notes); }
-        for (auto* s : {&sib, &breath, &gform, &trans, &lead}) { s->slider.setVisible(ready && !notes); s->label.setVisible(ready && !notes); }
+        for (auto* s : {&drift, &vib, &formant, &gain, &length, &smooth}) { s->slider.setVisible(notes); s->label.setVisible(notes); }
+        for (auto* s : {&sib, &breath, &gform, &smoothAll, &lead}) { s->slider.setVisible(ready && !notes); s->label.setVisible(ready && !notes); }
+        const bool ownTempo = ready && !notes && ed.host_ != nullptr && !ed.host_->hasHostTempo();
+        for (auto* s : {&tempo, &beats, &barStart}) { s->slider.setVisible(ownTempo); s->label.setVisible(ownTempo); }
         for (auto* b : {&dn1, &dn10, &up10, &up1, &snap, &reset}) b->setVisible(notes);
         info.setVisible(ready);
         if (!ready) { title.setText(T("Нет данных"), juce::dontSendNotification); return; }
@@ -687,14 +802,18 @@ public:
             set(formant, e.formantShift);
             set(gain, e.gainDb);
             set(length, e.stretch * 100);
+            set(smooth, e.transition * 100);
         } else {
             title.setText(T("Весь клип"), juce::dontSendNotification);
             info.setText(T("Выделите ноты, чтобы править их"), juce::dontSendNotification);
             set(sib, d->edits.sibilantGainDb);
             set(breath, d->edits.breathGainDb);
             set(gform, d->edits.globalFormantShift);
-            set(trans, d->edits.transitionMs);
+            set(smoothAll, d->edits.notes.empty() ? 50.0 : d->edits.notes.front().transition * 100);
             set(lead, d->leadGainDb);
+            set(tempo, d->tempoBpm);
+            set(beats, d->beatsPerBar);
+            set(barStart, d->barOffsetSec);
         }
     }
 
@@ -730,13 +849,15 @@ public:
             s.slider.setBounds(r.removeFromTop(24));
             r.removeFromTop(4);
         };
-        for (auto* s : {&drift, &vib, &formant, &gain, &length, &sib, &breath, &gform, &trans, &lead}) place(*s);
+        for (auto* s : {&drift, &vib, &formant, &gain, &length, &smooth, &sib, &breath, &gform, &smoothAll, &lead, &tempo,
+                        &beats, &barStart})
+            place(*s);
     }
 
     PitchEditor& ed;
     juce::Label title, info;
     juce::TextButton dn1, dn10, up10, up1, snap, reset;
-    EditSlider drift, vib, formant, gain, length, sib, breath, gform, trans, lead;
+    EditSlider drift, vib, formant, gain, length, smooth, sib, breath, gform, smoothAll, lead, tempo, beats, barStart;
 };
 
 // =====================================================================================
@@ -990,6 +1111,9 @@ PitchEditor::PitchEditor()
         splitAt(i, outSec(0.5 * (n.startSec + n.endSec)));
     });
     button(joinBtn_, "Склеить", "Склеить выделенные соседние ноты (J)", [this] { joinSelected(); });
+    button(pencilBtn_, "Карандаш", "Рисовать высоту (P). Shift — по полутонам, Alt или правая кнопка — стирать", [this] {
+        setPencil(!pencil_);
+    });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
     button(harmBtn_, "Гармонии", "Показать/скрыть панель гармоний (H)", [this] {
         showHarmonies_ = !showHarmonies_;
@@ -1247,8 +1371,53 @@ void PitchEditor::applyCorrection()
 
 void PitchEditor::resetNotes()
 {
-    if (selection_.empty()) return;
-    edit([&](Document& d) { for (int i : selection_) d.edits.notes[(size_t)i] = NoteEdit{}; });
+    if (selection_.empty() || eff_ == nullptr) return;
+    edit([&](Document& d) {
+        for (int i : selection_) {
+            d.edits.notes[(size_t)i] = NoteEdit{};
+            eraseDrawn(d.edits, eff_->notes[(size_t)i].startFrame, eff_->notes[(size_t)i].endFrame);
+        }
+    });
+}
+
+void PitchEditor::erasePencilInSelection()
+{
+    if (selection_.empty() || eff_ == nullptr) return;
+    edit([&](Document& d) {
+        for (int i : selection_) eraseDrawn(d.edits, eff_->notes[(size_t)i].startFrame, eff_->notes[(size_t)i].endFrame);
+    });
+}
+
+void PitchEditor::setPencil(bool on)
+{
+    pencil_ = on;
+    pencilBtn_.setToggleState(on, juce::dontSendNotification);
+    updateToolbar();
+    roll_->repaint();
+}
+
+std::vector<ClipHost::GridLine> PitchEditor::gridLines(double t0, double t1) const
+{
+    std::vector<ClipHost::GridLine> out;
+    if (host_ == nullptr || t1 <= t0) return out;
+    out = host_->hostGrid(t0, t1);
+    if (!out.empty() || host_->hasHostTempo()) return out;
+    const Document* d = doc();
+    if (d == nullptr || d->tempoBpm < 20) return out;
+    const double beat = 60.0 / d->tempoBpm;
+    const int bpb = std::max(1, d->beatsPerBar);
+    const long first = (long)std::floor((t0 - d->barOffsetSec) / beat) - 1;
+    const long last = (long)std::ceil((t1 - d->barOffsetSec) / beat) + 1;
+    if (last - first > 20000) return out; // zoomed far out: fall back to seconds
+    for (long b = first; b <= last; ++b) {
+        const long bar = b >= 0 ? b / bpb : -((-b + bpb - 1) / bpb);
+        ClipHost::GridLine l;
+        l.sec = d->barOffsetSec + (double)b * beat;
+        l.bar = (int)bar + 1;
+        l.beat = (int)(b - bar * bpb) + 1;
+        out.push_back(l);
+    }
+    return out;
 }
 
 void PitchEditor::toggleDrift()
@@ -1348,7 +1517,9 @@ void PitchEditor::showHelp(bool show)
 void PitchEditor::updateToolbar()
 {
     const bool ready = host_ != nullptr && eff_ != nullptr;
-    playBtn_.setVisible(host_ != nullptr && host_->canControlTransport());
+    playBtn_.setVisible(host_ != nullptr && host_->handlesTransportKeys());
+    pencilBtn_.setEnabled(ready);
+    pencilBtn_.setColour(juce::TextButton::buttonColourId, pencil_ ? col::drawn.darker(0.45f) : juce::Colour(0xff252930));
     playBtn_.setButtonText(host_ != nullptr && host_->isPlaying() ? T("■") : T("▶"));
     undoBtn_.setEnabled(ready && host_->history().canUndo());
     redoBtn_.setEnabled(ready && host_->history().canRedo());
@@ -1390,6 +1561,7 @@ void PitchEditor::resized()
     put(applyBtn_, 86, 12);
     put(splitBtn_, 82);
     put(joinBtn_, 74, 12);
+    put(pencilBtn_, 84, 12);
     put(abBtn_, 44);
     put(harmBtn_, 84);
     put(fitBtn_, 44);
@@ -1413,13 +1585,19 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     if (code == juce::KeyPress::F1Key || (ch == '?' && !cmd)) { showHelp(!help_->isVisible()); return true; }
     if (code == juce::KeyPress::escapeKey) {
         if (help_->isVisible()) showHelp(false);
+        else if (pencil_) setPencil(false);
         else { selection_.clear(); refresh(); }
         return true;
     }
     if (cmd && (code == 'Z' || code == 'z')) { if (mods.isShiftDown()) redo(); else undo(); return true; }
     if (cmd && (code == 'Y' || code == 'y')) { redo(); return true; }
     if (cmd && (code == 'A' || code == 'a')) { selectAll(); return true; }
-    if (code == juce::KeyPress::spaceKey) { togglePlay(); return host_ != nullptr && host_->canControlTransport(); }
+    if (code == juce::KeyPress::spaceKey) {
+        // In a DAW the key goes back to the host, so its own transport shortcut works.
+        if (host_ == nullptr || !host_->handlesTransportKeys()) return false;
+        togglePlay();
+        return true;
+    }
     if (cmd) return false;
 
     if (code == juce::KeyPress::upKey || code == juce::KeyPress::downKey) {
@@ -1432,9 +1610,10 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { resetNotes(); return true; }
     if (code == juce::KeyPress::homeKey) {
-        if (host_ != nullptr && host_->canControlTransport()) host_->setPlayheadSec(0);
         scroll_ = 0;
         roll_->repaint();
+        if (host_ == nullptr || !host_->handlesTransportKeys()) return false; // the DAW moves its cursor too
+        host_->setPlayheadSec(0);
         return true;
     }
     switch (ch) {
@@ -1442,6 +1621,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         case 'd': toggleDrift(); return true;
         case 'v': cycleVibrato(); return true;
         case 'j': joinSelected(); return true;
+        case 'p': setPencil(!pencil_); return true;
         case 'b': toggleBypass(); return true;
         case 'h': showHarmonies_ = !showHarmonies_; resized(); updateToolbar(); return true;
         case '0': fitView(); return true;

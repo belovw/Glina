@@ -83,9 +83,10 @@ std::string serialize(const Document& d)
     o.imbue(std::locale::classic());
     o << std::setprecision(10);
     const EditSet& e = d.edits;
-    o << "glina-document 1\n";
+    o << "glina-document 2\n";
     o << "key " << d.keyTonic << ' ' << (int)d.keyMinor << ' ' << (int)d.chromatic << '\n';
     o << "lead " << d.leadGainDb << '\n';
+    o << "tempo " << d.tempoBpm << ' ' << d.beatsPerBar << ' ' << d.barOffsetSec << '\n';
     o << "global " << e.sibilantGainDb << ' ' << e.breathGainDb << ' ' << e.globalFormantShift << ' '
       << e.transitionMs << ' ' << e.edgeTaperMs << '\n';
     o << "spans " << e.spans.size();
@@ -94,7 +95,14 @@ std::string serialize(const Document& d)
     o << "notes " << e.notes.size() << '\n';
     for (const auto& n : e.notes)
         o << "n " << n.pitchOffset << ' ' << n.driftAmount << ' ' << n.vibratoAmount << ' ' << n.formantShift << ' '
-          << n.gainDb << ' ' << n.timeOffsetSec << ' ' << n.stretch << '\n';
+          << n.gainDb << ' ' << n.timeOffsetSec << ' ' << n.stretch << ' ' << n.transition << '\n';
+    o << std::setprecision(6);
+    for (const auto& r : e.draw) {
+        o << "draw " << r.start << ' ' << r.delta.size();
+        for (float v : r.delta) o << ' ' << v;
+        o << '\n';
+    }
+    o << std::setprecision(10);
     for (const auto& v : d.voices) {
         o << "voice " << (int)v.enabled << ' ' << (int)v.diatonic << ' ' << v.degrees << ' ' << v.semitones << ' '
           << v.formantShift << ' ' << v.gainDb << ' ' << v.pan << ' ' << v.delayMs << ' ' << v.detuneCents << ' '
@@ -113,7 +121,7 @@ bool deserialize(const std::string& text, Document& out)
     in.imbue(std::locale::classic());
     std::string tag;
     int version = 0;
-    if (!(in >> tag >> version) || tag != "glina-document" || version != 1) return false;
+    if (!(in >> tag >> version) || tag != "glina-document" || version < 1 || version > 2) return false;
     Document d;
     while (in >> tag) {
         if (tag == "end") { out = std::move(d); return true; }
@@ -123,6 +131,9 @@ bool deserialize(const std::string& text, Document& out)
             d.keyMinor = mn != 0; d.chromatic = ch != 0;
         } else if (tag == "lead") {
             in >> d.leadGainDb;
+        } else if (tag == "tempo") {
+            in >> d.tempoBpm >> d.beatsPerBar >> d.barOffsetSec;
+            d.beatsPerBar = std::clamp(d.beatsPerBar, 1, 16);
         } else if (tag == "global") {
             EditSet& e = d.edits;
             in >> e.sibilantGainDb >> e.breathGainDb >> e.globalFormantShift >> e.transitionMs >> e.edgeTaperMs;
@@ -141,7 +152,16 @@ bool deserialize(const std::string& text, Document& out)
             NoteEdit n;
             in >> n.pitchOffset >> n.driftAmount >> n.vibratoAmount >> n.formantShift >> n.gainDb >> n.timeOffsetSec >>
                 n.stretch;
+            if (version >= 2) in >> n.transition;
             d.edits.notes.push_back(n);
+        } else if (tag == "draw") {
+            DrawRun r;
+            size_t c = 0;
+            in >> r.start >> c;
+            if (c > 10000000) return false;
+            r.delta.resize(c);
+            for (float& v : r.delta) in >> v;
+            d.edits.draw.push_back(std::move(r));
         } else if (tag == "voice") {
             HarmonyVoice v;
             int en = 0, dia = 0, cons = 0;

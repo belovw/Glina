@@ -84,6 +84,15 @@ struct NoteEdit {
     double gainDb = 0;
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier
+    double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide
+};
+
+// A pencil-drawn stretch of pitch over analysis frames [start, start + delta.size()).
+// Stored relative to (original pitch + the note's pitch offset), so the drawing
+// travels with its note when the note is moved up or down. NaN = not drawn.
+struct DrawRun {
+    int start = 0;
+    std::vector<float> delta;
 };
 
 // A user-defined note boundary (frames, [start, end)). Used when the user splits
@@ -96,12 +105,14 @@ struct NoteSpan {
 struct EditSet {
     std::vector<NoteEdit> notes;      // one per (effective) note (may be empty = no edits)
     std::vector<NoteSpan> spans;      // user note layout; empty = analysis default
+    std::vector<DrawRun> draw;        // pencil-drawn pitch, sorted, non-overlapping
     double sibilantGainDb = 0;        // s / sh / t level
     double breathGainDb = 0;          // breath / noise level
     double unassignedGainDb = 0;      // voiced frames that belong to no note (harmonies mute them)
     double globalFormantShift = 0;    // semitones, added to every note
-    double transitionMs = 45;         // pitch-offset crossfade between adjacent notes
+    double transitionMs = 45;         // ramp width of a note transition at smoothness 0.5
     double edgeTaperMs = 40;          // drift/vibrato edits fade in over note edges
+    bool keepLength = true;           // the take keeps its length: the tail after the last note absorbs time edits
 };
 
 } // namespace glina

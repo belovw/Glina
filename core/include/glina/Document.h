@@ -19,6 +19,10 @@ struct Document {
     bool keyMinor = false;
     bool chromatic = false;  // correct to semitones instead of the scale
     double leadGainDb = 0;   // lead level in the mix (harmonies have their own)
+    // Musical grid for the standalone app (a DAW host supplies its own tempo map).
+    double tempoBpm = 0;     // 0 = show seconds
+    int beatsPerBar = 4;
+    double barOffsetSec = 0; // where bar 1 starts
 
     Key key(const Analysis& a) const;
     // Correction target for a pitch: nearest scale note (or semitone in chromatic mode).

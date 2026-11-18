@@ -4,6 +4,7 @@
 
 #include "../ui/PitchEditor.h"
 #include "Session.h"
+#include "glina/Editing.h"
 
 namespace glina::app {
 
@@ -442,6 +443,17 @@ private:
             d.edits.notes[i].driftAmount = 0.6;
         }
         if (a->notes.size() > 3) d.edits.notes[3].pitchOffset += 2.0;
+        // Pencil: a gentle wave drawn over the middle of note 6.
+        if (a->notes.size() > 5) {
+            const Note& n = a->notes[5];
+            const int f0 = n.startFrame + (n.endFrame - n.startFrame) / 5, f1 = n.endFrame - (n.endFrame - n.startFrame) / 5;
+            std::vector<float> wave((size_t)(f1 - f0));
+            const double c = d.target(n.centerMidi, *a) - 0.0;
+            for (size_t k = 0; k < wave.size(); ++k) wave[k] = (float)(c + 0.35 * std::sin(k * 0.12));
+            drawPitch(d.edits, *a, f0, wave);
+        }
+        d.tempoBpm = 96;
+        d.beatsPerBar = 4;
         HarmonyVoice v1; v1.degrees = 2; v1.pan = -0.45; v1.seed = 7919;
         HarmonyVoice v2; v2.degrees = -3; v2.pan = 0.45; v2.seed = 15838; v2.formantShift = -0.4;
         d.voices = {v1, v2};
