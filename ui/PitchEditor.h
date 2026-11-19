@@ -98,7 +98,7 @@ private:
     bool showHarmonies_ = true;
     bool pencil_ = false;
     juce::TextButton pencilBtn_, gridBtn_;
-    int gridDiv_ = 4;          // grid lines per beat: 1, 2, 4, 8 or 16
+    int gridDenom_ = 4;        // grid = note value 1/N of a whole note: 1, 2, 4, 8 or 16
     double lastPh_ = -2;       // last playhead seen by the timer (-2 = none)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchEditor)

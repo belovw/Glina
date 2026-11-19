@@ -91,7 +91,7 @@ void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>&
     }
 }
 
-double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel)
+double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge)
 {
     const int n = (int)a.notes.size();
     if (n == 0 || left < -1 || left > n - 1 || dt == 0) return 0;
@@ -108,13 +108,13 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     const bool touching = left >= 0 && left + 1 < n &&
                           std::abs(base[(size_t)left + 1].outStart - base[(size_t)left].outEnd) < 0.005;
 
+    const bool moveLeft = left >= 0 && (touching || !startEdge);
+    const bool moveRight = left + 1 < n && (touching || startEdge || left < 0);
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
-        if (left >= 0) // left block: start fixed, end follows the boundary
+        if (moveLeft) // left block: start fixed, end follows the boundary
             layBlock(t, base, e, L0, left, base[(size_t)L0].outStart, base[(size_t)left].outEnd + d);
-        if (left + 1 < n && touching) // right block: end fixed; its start (and the consonant before it) follows
-            layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
-        else if (left + 1 < n && left < 0) // dragging the start of the first note
+        if (moveRight) // right block: end fixed; its start (and the consonant before it) follows
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };

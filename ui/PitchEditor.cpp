@@ -221,13 +221,20 @@ public:
             barPx = beatPx * beatsPerBar;
             const int labelEvery = std::max(1, (int)std::ceil(44.0 / std::max(1.0, barPx)));
             // Eighths / sixteenths: extra lines between the beats (beat = -1 marks them).
+            // Grid = note value as a fraction of a whole note: 1/4 = beats, 1/8 and 1/16 add
+            // lines between beats, 1/2 keeps every second beat, 1/1 keeps bars only.
+            const int denom = ed.gridDenom_;
+            const int perBeat = denom >= 8 ? denom / 4 : 1;
             std::vector<ClipHost::GridLine> all;
             for (size_t k = 0; k < lines.size(); ++k) {
-                all.push_back(lines[k]);
-                if (k + 1 >= lines.size() || ed.gridDiv_ <= 1) continue;
-                for (int j = 1; j < ed.gridDiv_; ++j) {
-                    ClipHost::GridLine s = lines[k];
-                    s.sec = lines[k].sec + (lines[k + 1].sec - lines[k].sec) * j / ed.gridDiv_;
+                const auto& L = lines[k];
+                const bool keep = denom == 4 || denom >= 8 || (denom == 2 && (L.beat - 1) % 2 == 0) ||
+                                  (denom == 1 && L.beat == 1);
+                if (keep) all.push_back(L);
+                if (k + 1 >= lines.size() || perBeat <= 1 || !keep) continue;
+                for (int j = 1; j < perBeat; ++j) {
+                    ClipHost::GridLine s = L;
+                    s.sec = L.sec + (lines[k + 1].sec - L.sec) * j / perBeat;
                     s.beat = -1;
                     all.push_back(s);
                 }
@@ -236,7 +243,7 @@ public:
                 const float x = xOf(l.sec);
                 if (x < c.getX() || x > c.getRight()) continue;
                 if (l.beat < 0) { // subdivision
-                    if (beatPx / ed.gridDiv_ < 6) continue;
+                    if (beatPx / perBeat < 6) continue;
                     g.setColour(col::grid.brighter(0.2f).withAlpha(0.6f));
                     g.drawVerticalLine((int)x, c.getY(), c.getBottom());
                     continue;
@@ -543,7 +550,8 @@ public:
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
-            moveBoundary(d->edits, *ed.eff_, gesture == G::StretchR ? pressed : pressed - 1, dt, ed.selection_);
+            moveBoundary(d->edits, *ed.eff_, gesture == G::StretchR ? pressed : pressed - 1, dt, ed.selection_,
+                         gesture == G::StretchL);
         }
         changed = true;
         ed.refreshCurves();
@@ -1442,9 +1450,9 @@ void PitchEditor::cycleGrid()
 {
     static const int order[] = {4, 8, 16, 2, 1};
     int k = 0;
-    for (int i = 0; i < 5; ++i) if (order[i] == gridDiv_) k = (i + 1) % 5;
-    gridDiv_ = order[k];
-    gridBtn_.setButtonText(T("Сетка ") + (gridDiv_ == 1 ? juce::String("1/1") : "1/" + juce::String(gridDiv_)));
+    for (int i = 0; i < 5; ++i) if (order[i] == gridDenom_) k = (i + 1) % 5;
+    gridDenom_ = order[k];
+    gridBtn_.setButtonText(T("Сетка 1/") + juce::String(gridDenom_));
     roll_->repaint();
 }
 

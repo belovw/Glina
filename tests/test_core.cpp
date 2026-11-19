@@ -452,17 +452,24 @@ static void testConsonant(const test::SynthResult& s, const Analysis& a, double 
         if (a.noteOfFrame[(size_t)k] == 3 && a.frames[(size_t)k].f0 > 0)
             worst = std::max(worst, std::abs(curve[(size_t)k] - a.frames[(size_t)k].midi));
     CHECK(worst < 1e-6, "consonant pitch changed by %.3f st", worst);
-    // Gap rule: notes that do not touch keep the neighbour in place.
+    // Gap rule: notes that do not touch. Dragging the end of note 2 moves only its end;
+    // dragging the start of note 3 moves only its start; neighbours stay in place.
     EditSet g;
     g.notes.resize(a.notes.size());
-    const auto gt = noteTimes(a, g);
-    const double gap = gt[1].outStart - gt[0].outEnd;
-    if (gap > 0.01) {
-        const auto before2 = noteTimes(a, g);
-        moveBoundary(g, a, 0, 0.02, {});
-        const auto t2 = noteTimes(a, g);
-        CHECK(std::abs(t2[1].outStart - before2[1].outStart) < 1e-6, "unlinked neighbour moved");
-    }
+    g.notes[2].stretch = 0.9; // shortens note 2: opens a gap between notes 2 and 3
+    const auto g0 = noteTimes(a, g);
+    const double gap = g0[3].outStart - g0[2].outEnd;
+    CHECK(gap > 0.04, "test setup: no gap (%.3f)", gap);
+    EditSet ge = g;
+    moveBoundary(ge, a, 2, 0.02, {}, false);
+    const auto ge_t = noteTimes(a, ge);
+    CHECK(std::abs(ge_t[2].outEnd - g0[2].outEnd - 0.02) < 1e-6, "end edge did not move");
+    CHECK(std::abs(ge_t[3].outStart - g0[3].outStart) < 1e-6, "end drag moved the next note");
+    EditSet gs = g;
+    moveBoundary(gs, a, 2, 0.02, {}, true);
+    const auto gs_t = noteTimes(a, gs);
+    CHECK(std::abs(gs_t[3].outStart - g0[3].outStart - 0.02) < 1e-6, "start edge did not move");
+    CHECK(std::abs(gs_t[2].outEnd - g0[2].outEnd) < 1e-6, "start drag moved the previous note");
     std::printf("  checked gap %.1f ms\n", gap * 1000);
 }
 

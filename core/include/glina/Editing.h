@@ -25,7 +25,10 @@ void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>&
 // the far ends of both blocks stay put, the blocks stretch/compress
 // proportionally, and the consonants/pauses between notes keep their length.
 // `dt` is clamped so no note becomes shorter than ~30 ms. Returns the dt applied.
-double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& selection);
+// Where the notes do not touch (a gap), only the note whose edge is dragged moves:
+// `startEdge` = the start of note left+1 (else the end of note `left`).
+double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& selection,
+                    bool startEdge = false);
 
 // Move notes (each contiguous run of `notes`) by `dt` seconds together with
 // the consonant before them; the neighbouring notes absorb the change.
