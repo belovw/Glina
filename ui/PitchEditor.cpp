@@ -535,7 +535,7 @@ public:
         if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
         const int th = hitThread(e.position);
         if (th != hoverThread) { hoverThread = th; repaint(); }
-        if (th >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
+        if (th >= 0) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; } // thread: hand
         const int i = hitNote(e.position);
         if (i < 0) setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
         else setMouseCursor(zoneOf(i, e.position) == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor

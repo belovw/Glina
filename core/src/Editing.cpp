@@ -131,13 +131,15 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
     const double clipLen = (double)a.numSamples / a.sampleRate;
     auto moved = [&](int i) { return i >= 0 && i < n && notes.count(i) > 0; };
 
+    // Notes that touch (no gap between them) are linked: the neighbour follows the move.
+    // Where there is a gap, the neighbour stays put and the moved note just moves in the gap.
+    auto touch = [&](int i) { return i >= 0 && i + 1 < n && std::abs(base[(size_t)i + 1].outStart - base[(size_t)i].outEnd) < 0.005; };
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         for (int i = 0; i < n; ++i) {
             if (moved(i)) { t[(size_t)i].outStart += d; t[(size_t)i].outEnd += d; continue; }
-            // Neighbours absorb: the gap next to a moved note travels with it.
-            if (moved(i - 1)) t[(size_t)i].outStart += d;
-            if (moved(i + 1)) t[(size_t)i].outEnd += d;
+            if (moved(i - 1) && touch(i - 1)) t[(size_t)i].outStart += d;
+            if (moved(i + 1) && touch(i)) t[(size_t)i].outEnd += d;
         }
         return t;
     };

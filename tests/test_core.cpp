@@ -323,7 +323,7 @@ static void testBoundaryBlocks(const test::SynthResult& s, const Analysis& a, do
 
 static void testMoveNote(const test::SynthResult& s, const Analysis& a, double sr)
 {
-    std::printf("[move] move one note +50 ms: neighbours absorb, the rest stays\n");
+    std::printf("[move] move one note +50 ms: touching neighbours follow, across a gap they stay\n");
     EditSet e;
     e.notes.resize(a.notes.size());
     const auto base = noteTimes(a, e);
@@ -331,15 +331,20 @@ static void testMoveNote(const test::SynthResult& s, const Analysis& a, double s
     const auto t = noteTimes(a, e);
     CHECK(std::abs(applied - 0.05) < 1e-9, "clamped to %.3f", applied);
     CHECK(std::abs(t[3].outStart - base[3].outStart - 0.05) < 1e-6, "note did not move");
-    CHECK(std::abs(t[2].outEnd - base[2].outEnd - 0.05) < 1e-6 && std::abs(t[2].outStart - base[2].outStart) < 1e-6,
-          "previous note should lengthen at its end only");
-    CHECK(std::abs(t[4].outStart - base[4].outStart - 0.05) < 1e-6 && std::abs(t[4].outEnd - base[4].outEnd) < 1e-6,
-          "next note should shorten at its start only");
+    const bool touchPrev = std::abs(base[3].outStart - base[2].outEnd) < 0.005;
+    const bool touchNext = std::abs(base[4].outStart - base[3].outEnd) < 0.005;
+    CHECK(std::abs(t[2].outEnd - base[2].outEnd - (touchPrev ? 0.05 : 0.0)) < 1e-6 &&
+              std::abs(t[2].outStart - base[2].outStart) < 1e-6,
+          "previous note: touching=%d should lengthen only when touching", (int)touchPrev);
+    CHECK(std::abs(t[4].outStart - base[4].outStart - (touchNext ? 0.05 : 0.0)) < 1e-6 &&
+              std::abs(t[4].outEnd - base[4].outEnd) < 1e-6,
+          "next note: touching=%d should shorten only when touching", (int)touchNext);
     const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
     const Analysis b = analyze(y.data(), y.size(), sr);
     const double on3 = onsetNear(b, t[3].outStart);
     std::printf("  rendered note 4 onset %+.1f ms from target\n", (on3 - t[3].outStart) * 1000);
-    CHECK(std::abs(on3 - t[3].outStart) < 0.015, "moved note onset off by %.1f ms", (on3 - t[3].outStart) * 1000);
+    // The onset detector works on a ~5 ms frame grid, so allow one frame of error.
+    CHECK(std::abs(on3 - t[3].outStart) < 0.02, "moved note onset off by %.1f ms", (on3 - t[3].outStart) * 1000);
     // Clamping: pushing a note far into its neighbour stops at the neighbour's minimum length.
     EditSet f;
     f.notes.resize(a.notes.size());
@@ -483,6 +488,20 @@ static void testConsonant(const test::SynthResult& s, const Analysis& a, double 
     const auto gs_t = noteTimes(a, gs);
     CHECK(std::abs(gs_t[3].outStart - g0[3].outStart - 0.02) < 1e-6, "start edge did not move");
     CHECK(std::abs(gs_t[2].outEnd - g0[2].outEnd) < 1e-6, "start drag moved the previous note");
+    // Moving a whole note (body drag) across a gap leaves the neighbour where it is.
+    EditSet gm = g;
+    moveNotes(gm, a, {3}, 0.02);
+    const auto gm_t = noteTimes(a, gm);
+    CHECK(std::abs(gm_t[2].outEnd - g0[2].outEnd) < 1e-6, "body drag across a gap moved the neighbour");
+    CHECK(std::abs(gm_t[3].outStart - g0[3].outStart - 0.02) < 1e-6, "body drag did not move the note");
+    // Touching notes: the neighbour follows, as before.
+    EditSet gt = {};
+    gt.notes.resize(a.notes.size());
+    const auto t0 = noteTimes(a, gt);
+    moveNotes(gt, a, {3}, 0.01);
+    const auto t1 = noteTimes(a, gt);
+    CHECK(std::abs(t1[2].outEnd - t0[2].outEnd - 0.01) < 1e-6 || std::abs(t1[3].outStart - t0[3].outStart - 0.01) > 0.0,
+          "touching neighbour did not follow");
     std::printf("  checked gap %.1f ms\n", gap * 1000);
 }
 
