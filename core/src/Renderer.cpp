@@ -187,6 +187,46 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         }
     }
 
+    // Transition shape between two touching notes. Smoothness 0.5 keeps the sung
+    // glide. Away from 0.5 the glide is replaced by a raised-cosine move between
+    // the two (edited) note centres: narrower towards 0 (a clean step), wider
+    // towards 1 (a long glide). The replacement fades in as smoothness leaves 0.5
+    // (fully at 0.25 / 0.75), so the control has no jump around "natural".
+    {
+        const double natHalf = 40.0 / hopMs; // a sung glide usually sits within ±40 ms
+        const double fade = 30.0 / hopMs;
+        for (size_t r = 1; r < a.notes.size(); ++r) {
+            const Note& L = a.notes[r - 1];
+            const Note& Rn = a.notes[r];
+            if (Rn.startFrame - L.endFrame > 1) continue; // not touching: no glide between them
+            const NoteEdit& eL = r - 1 < e.notes.size() ? e.notes[r - 1] : kNoEdit;
+            const NoteEdit& eR = r < e.notes.size() ? e.notes[r] : kNoEdit;
+            if (eL.consonant || eR.consonant) continue;
+            const double amount = std::min(1.0, std::abs(eR.transition - 0.5) * 4.0);
+            if (amount < 1e-6) continue;
+            const int b = Rn.startFrame;
+            const double limL = 0.5 * (b - L.startFrame), limR = 0.5 * (Rn.endFrame - b);
+            const double half = std::min({0.5 * transitionWidthMs(eR.transition, e.transitionMs) / hopMs, limL, limR});
+            const double inner = std::max(half, natHalf);
+            const double lvL = L.centerMidi + eL.pitchOffset, lvR = Rn.centerMidi + eR.pitchOffset;
+            const int k0 = std::max(L.startFrame, b - (int)std::ceil(std::min(inner + fade, limL)));
+            const int k1 = std::min(Rn.endFrame, b + (int)std::ceil(std::min(inner + fade, limR)));
+            for (int k = k0; k < k1; ++k) {
+                if (k < 0 || k >= nf || a.frames[k].f0 <= 0) continue;
+                const double x = k + 0.5 - b; // frames from the boundary
+                const double S = half < 0.5 ? (x < 0 ? 0.0 : 1.0)
+                               : x <= -half ? 0.0 : x >= half ? 1.0 : 0.5 - 0.5 * std::cos(M_PI * (x + half) / (2.0 * half));
+                const double ideal = lvL + (lvR - lvL) * S;
+                const double outer = std::min(inner + fade, x < 0 ? limL : limR);
+                const double in = std::max(0.0, outer - fade);
+                const double dist = std::abs(x);
+                const double m = dist <= in ? 1.0 : dist >= outer ? 0.0 : 0.5 + 0.5 * std::cos(M_PI * (dist - in) / (outer - in));
+                const double now = a.frames[k].midi + c.pitchSemis[k];
+                c.pitchSemis[k] = (float)(c.pitchSemis[k] + amount * m * (ideal - now));
+            }
+        }
+    }
+
     // Pencil: drawn pitch replaces the computed curve, blended in over ~30 ms at
     // the ends of each drawn stretch so it joins the rest without a jump.
     for (const DrawRun& r : e.draw) {

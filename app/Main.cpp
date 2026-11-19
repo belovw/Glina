@@ -418,7 +418,7 @@ private:
                 const juce::String text = tmp.loadFileAsString();
                 check(deserialize(text.fromFirstOccurrenceOf("glina-document", true, false).toStdString(), loaded) &&
                           serialize(loaded) == serialize(s.document()), "project reloads identically");
-                const juce::File wav = tmp.withFileExtension(".wav");
+                const juce::File wav = tmp.getSiblingFile("glina_selftest_mix.wav"); // never the input file
                 check(s.exportMix(wav, err) && wav.getSize() > 1000, "mix exports");
                 std::printf(failures_ == 0 ? "SELFTEST OK\n" : "SELFTEST: %d failure(s)\n", failures_);
                 std::fflush(stdout);
@@ -452,6 +452,8 @@ private:
             for (size_t k = 0; k < wave.size(); ++k) wave[k] = (float)(c + 0.35 * std::sin(k * 0.12));
             drawPitch(d.edits, *a, f0, wave);
         }
+        // A smoother transition into every note after the fourth (thread shown in colour).
+        for (size_t i = 4; i < a->notes.size(); ++i) d.edits.notes[i].transition = 0.85;
         // A consonant: passed through unprocessed (drawn grey).
         if (a->notes.size() > 2) setConsonant(d.edits, *a, 2, true);
         d.tempoBpm = 96;

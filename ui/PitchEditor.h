@@ -58,6 +58,7 @@ private:
     void toggleDrift();
     void cycleVibrato();
     void toggleConsonant();
+    void syncInspector();
     void cycleGrid();
     void showLocator();
     void splitAt(int note, double outSecond);

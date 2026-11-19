@@ -368,35 +368,48 @@ static void testAttackKept(const Analysis& a)
 
 static void testTransitions(const Analysis& a)
 {
-    std::printf("[transition] smoothness 0 = step, 1 = long glide\n");
+    std::printf("[transition] the sung glide between two notes: 0 = step, 0.5 = as sung, 1 = long glide\n");
     int pair = -1;
     for (int i = 0; i + 1 < (int)a.notes.size(); ++i)
-        if (a.notes[(size_t)i + 1].startFrame == a.notes[(size_t)i].endFrame) { pair = i; break; }
-    if (pair < 0) { std::printf("  (no contiguous notes, skipped)\n"); return; }
-    auto rampFrames = [&](double smooth) {
+        if (a.notes[(size_t)i + 1].startFrame - a.notes[(size_t)i].endFrame <= 1 &&
+            std::abs(a.notes[(size_t)i + 1].centerMidi - a.notes[(size_t)i].centerMidi) >= 1.5) { pair = i; break; }
+    if (pair < 0) { std::printf("  (no contiguous notes with a pitch change, skipped)\n"); return; }
+    const Note& L = a.notes[(size_t)pair];
+    const Note& R = a.notes[(size_t)pair + 1];
+    const int b = R.startFrame;
+    const int reach = std::min(b - L.startFrame, R.endFrame - b) / 2;
+    auto curveFor = [&](double smooth, double offL = 0, double offR = 0) {
         EditSet e;
         e.notes.resize(a.notes.size());
-        e.notes[(size_t)pair].pitchOffset = 1.0;
-        e.notes[(size_t)pair + 1].pitchOffset = -1.0;
+        e.notes[(size_t)pair].pitchOffset = offL;
+        e.notes[(size_t)pair + 1].pitchOffset = offR;
         e.notes[(size_t)pair + 1].transition = smooth;
-        const auto c = editedPitchCurve(a, e);
+        return editedPitchCurve(a, e);
+    };
+    // Frames between 10 % and 90 % of the way from one note to the next.
+    auto rampFrames = [&](const std::vector<double>& c, double offL = 0, double offR = 0) {
+        const double lvL = L.centerMidi + offL, lvR = R.centerMidi + offR;
         int n = 0;
-        // Only around this boundary: the neighbouring boundaries keep their default smoothness.
-        const int b = a.notes[(size_t)pair + 1].startFrame;
-        const int reach = std::min(b - a.notes[(size_t)pair].startFrame, a.notes[(size_t)pair + 1].endFrame - b) / 2;
         for (int k = b - reach; k < b + reach; ++k) {
             if (a.frames[(size_t)k].f0 <= 0) continue;
-            const double d = c[(size_t)k] - a.frames[(size_t)k].midi; // the applied offset
-            const double frac = (1.0 - d) / 2.0;
+            const double frac = (c[(size_t)k] - lvL) / (lvR - lvL);
             if (frac > 0.1 && frac < 0.9) ++n;
         }
         return n;
     };
-    const int r0 = rampFrames(0.0), r5 = rampFrames(0.5), r1 = rampFrames(1.0);
-    std::printf("  frames in the ramp: smoothness 0 -> %d, 0.5 -> %d, 1 -> %d\n", r0, r5, r1);
-    CHECK(r0 == 0, "step has %d ramp frames", r0);
-    CHECK(r5 >= 3 && r5 <= 12, "natural ramp %d frames", r5);
-    CHECK(r1 > r5 * 2, "glide not longer (%d)", r1);
+    // 0.5 = untouched: exactly the sung curve.
+    const auto c5 = curveFor(0.5);
+    double worst = 0;
+    for (int k = b - reach; k < b + reach; ++k)
+        if (a.frames[(size_t)k].f0 > 0) worst = std::max(worst, std::abs(c5[(size_t)k] - a.frames[(size_t)k].midi));
+    CHECK(worst < 1e-6, "smoothness 0.5 changed the sung curve by %.3f st", worst);
+    const int r0 = rampFrames(curveFor(0.0)), r5 = rampFrames(c5), r1 = rampFrames(curveFor(1.0));
+    const int q1 = rampFrames(curveFor(1.0, 1.0, -1.0), 1.0, -1.0);
+    std::printf("  frames in the move: smoothness 0 -> %d, 0.5 (as sung) -> %d, 1 -> %d; 1 with edited notes -> %d\n",
+                r0, r5, r1, q1);
+    CHECK(r0 <= 1, "step still has %d frames in the move", r0);
+    CHECK(r1 > std::max(r5, 4) + 4, "glide not longer than sung (%d vs %d)", r1, r5);
+    CHECK(q1 > std::max(r5, 4) + 4, "glide between edited notes too short (%d)", q1);
 }
 
 static void testPencil(const test::SynthResult& s, const Analysis& a, double sr)

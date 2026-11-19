@@ -59,7 +59,7 @@ public:
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
-            "  Кружок над началом ноты — тянуть вбок: плавность перехода (Shift — тоньше, двойной клик — 50 %)\n"
+            "  Нитка между нотами — тянуть вбок: вправо плавнее, влево резче (Shift — тоньше, двойной клик — как спето)\n"
             "  Клик по линейке — позиция воспроизведения;  правая кнопка — меню ноты\n"
             "  Колесо — прокрутка;  Ctrl+колесо — масштаб;  Shift+колесо — по высоте\n"
             "\n"
@@ -178,6 +178,7 @@ public:
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
             drawCurves(g, *A);
+            drawThreads(g, *d);
             if (!marquee.isEmpty()) {
                 g.setColour(col::accent.withAlpha(0.12f));
                 g.fillRect(marquee);
@@ -350,15 +351,6 @@ public:
             g.setColour(sel ? col::select : fill.withAlpha(0.9f));
             g.strokePath(p, juce::PathStrokeType(sel ? 1.6f : 1.f));
 
-            if (box.getWidth() > 8) { // transition handle
-                const auto h = smoothHandle(i);
-                g.setColour(sel ? col::select : col::dim.withAlpha(0.85f));
-                g.fillEllipse(h.x - 3.5f, h.y - 3.5f, 7.f, 7.f);
-                if (e.transition != 0.5) {
-                    g.setColour(col::accent);
-                    g.fillEllipse(h.x - 1.5f, h.y - 1.5f, 3.f, 3.f);
-                }
-            }
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
                 e.vibratoAmount != 1) {
                 g.setColour(col::text.withAlpha(0.8f));
@@ -447,31 +439,108 @@ public:
     }
 
     // ---- mouse ---------------------------------------------------------------------
-    // Transition handle: a dot above the start of each note. Dragging it sideways sets
-    // the smoothness of the pitch move into that note.
-    juce::Point<float> smoothHandle(int i) const
+    // Transition thread: between two touching notes, an S-curve from the left note's
+    // centre to the right note's centre, as wide as the transition. Dragging it
+    // sideways sets the smoothness of the move into the right note (note i).
+    struct Thread { float xb = 0, yL = 0, yR = 0, half = 0; };
+    bool hasThread(int i) const
     {
-        const auto b = noteRect(i);
-        return {b.getX(), b.getY() - 7.f};
+        const Document* d = ed.doc();
+        if (ed.eff_ == nullptr || d == nullptr || i < 1 || i >= (int)ed.eff_->notes.size()) return false;
+        const Note& L = ed.eff_->notes[(size_t)i - 1];
+        const Note& R = ed.eff_->notes[(size_t)i];
+        if (R.startFrame - L.endFrame > 1) return false; // a gap: no glide to shape
+        if ((size_t)i >= d->edits.notes.size() || d->edits.notes[(size_t)i].consonant ||
+            d->edits.notes[(size_t)i - 1].consonant) return false;
+        const auto bL = noteRect(i - 1), bR = noteRect(i);
+        return bL.getWidth() > 6 && bR.getWidth() > 6 && std::abs(bL.getCentreY() - bR.getCentreY()) >= semi() * 0.5f;
     }
-
-    int hitSmooth(juce::Point<float> p) const
+    Thread threadOf(int i) const
+    {
+        const auto bL = noteRect(i - 1), bR = noteRect(i);
+        Thread t;
+        t.xb = bR.getX();
+        t.yL = bL.getCentreY();
+        t.yR = bR.getCentreY();
+        const auto& ne = ed.doc()->edits;
+        const double ms = transitionWidthMs(ne.notes[(size_t)i].transition, ne.transitionMs);
+        t.half = (float)std::min<double>(0.5 * ms / 1000.0 * ed.pps_, 0.5 * std::min(bL.getWidth(), bR.getWidth()));
+        return t;
+    }
+    juce::Point<float> threadHandle(int i) const
+    {
+        const auto t = threadOf(i);
+        return {t.xb, 0.5f * (t.yL + t.yR)};
+    }
+    int hitThread(juce::Point<float> p) const
     {
         if (ed.eff_ == nullptr || ed.doc() == nullptr) return -1;
-        for (int i = 0; i < (int)ed.eff_->notes.size(); ++i)
-            if (smoothHandle(i).getDistanceFrom(p) <= 6.5f) return i;
+        const float s = semi();
+        for (int i = 1; i < (int)ed.eff_->notes.size(); ++i) {
+            if (!hasThread(i)) continue;
+            if (threadHandle(i).getDistanceFrom(p) <= 7.f) return i;
+            // Anywhere on the part of the thread between the two notes (outside their boxes).
+            const auto t = threadOf(i);
+            const float top = std::min(t.yL, t.yR) + s * 0.5f, bottom = std::max(t.yL, t.yR) - s * 0.5f;
+            if (bottom > top && p.y > top && p.y < bottom && std::abs(p.x - t.xb) <= std::max(5.f, t.half)) return i;
+        }
         return -1;
+    }
+
+    void drawThreads(juce::Graphics& g, const Document& d)
+    {
+        const auto c = canvas();
+        for (int i = 1; i < (int)ed.eff_->notes.size(); ++i) {
+            if (!hasThread(i)) continue;
+            const auto t = threadOf(i);
+            if (t.xb + t.half < c.getX() || t.xb - t.half > c.getRight()) continue;
+            const double sm = d.edits.notes[(size_t)i].transition;
+            const bool active = i == hoverThread || (gesture == G::Smooth && pressed == i);
+            juce::Path p;
+            const float x0 = t.xb - std::max(0.5f, t.half), x1 = t.xb + std::max(0.5f, t.half);
+            p.startNewSubPath(x0, t.yL);
+            const int steps = 16;
+            for (int k = 1; k <= steps; ++k) {
+                const float u = (float)k / steps;
+                const float w = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * u);
+                p.lineTo(x0 + (x1 - x0) * u, t.yL + (t.yR - t.yL) * w);
+            }
+            const juce::Colour colr = active ? col::select : std::abs(sm - 0.5) > 1e-6 ? col::accent : col::dim;
+            g.setColour(colr.withAlpha(active ? 1.f : 0.85f));
+            g.strokePath(p, juce::PathStrokeType(active ? 2.2f : 1.4f));
+            const auto h = threadHandle(i);
+            g.setColour(col::bg);
+            g.fillEllipse(h.x - 4.5f, h.y - 4.5f, 9.f, 9.f);
+            g.setColour(colr);
+            g.drawEllipse(h.x - 4.5f, h.y - 4.5f, 9.f, 9.f, 1.5f);
+            if (active) {
+                g.setFont(juce::FontOptions(11.f));
+                const juce::String txt = T("Переход ") + juce::String(juce::roundToInt(sm * 100)) + " %";
+                const auto box = juce::Rectangle<float>(h.x + 8, h.y - 9, 92, 18);
+                g.setColour(col::panel.withAlpha(0.92f));
+                g.fillRoundedRectangle(box, 3.f);
+                g.setColour(col::text);
+                g.drawText(txt, box.reduced(4, 0), juce::Justification::centredLeft);
+            }
+        }
     }
 
     void mouseMove(const juce::MouseEvent& e) override
     {
         lastMouse = e.position;
         if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
-        if (hitSmooth(e.position) >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
+        const int th = hitThread(e.position);
+        if (th != hoverThread) { hoverThread = th; repaint(); }
+        if (th >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
         const int i = hitNote(e.position);
         if (i < 0) setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
         else setMouseCursor(zoneOf(i, e.position) == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
                                                                    : juce::MouseCursor::LeftRightResizeCursor);
+    }
+
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        if (hoverThread >= 0) { hoverThread = -1; repaint(); }
     }
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -486,21 +555,22 @@ public:
             if (ed.host_->canControlTransport()) ed.host_->setPlayheadSec(std::max(0.0, secOf(e.position.x)));
             return;
         }
-        const int hs = hitSmooth(e.position);
-        if (hs >= 0 && !e.mods.isPopupMenu()) {
-            pressed = hs;
-            if (!ed.selection_.count(hs)) ed.selection_ = {hs};
+        const int th = hitThread(e.position);
+        if (th >= 0 && !e.mods.isPopupMenu()) {
+            // The thread sets the move into note `th` (selected, so the panel shows its value);
+            // if `th` was already selected, all selected notes follow.
+            pressed = th;
+            if (!ed.selection_.count(th)) { ed.selection_ = {th}; ed.refresh(); }
             before = *ed.doc();
             start.clear();
             for (int k : ed.selection_) start[k] = ed.doc()->edits.notes[(size_t)k];
-            if (e.getNumberOfClicks() >= 2) { // double click: back to the natural 50 %
+            if (e.getNumberOfClicks() >= 2) { // double click: back to the sung transition
                 ed.edit([&](Document& d) {
-                    for (int k : ed.selection_) d.edits.notes[(size_t)k].transition = 0.5;
+                    for (const auto& kv : start) d.edits.notes[(size_t)kv.first].transition = 0.5;
                 }, false);
                 return;
             }
             gesture = G::Smooth;
-            ed.refresh();
             return;
         }
         if (ed.pencil_ && canvas().contains(e.position)) {
@@ -588,9 +658,11 @@ public:
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
         } else if (gesture == G::Smooth) {
             // 0.7 % per pixel (Shift: 0.2 % for fine steps), relative to where the drag started.
-            const double delta = (e.mods.isShiftDown() ? 0.002 : 0.007) * off.x;
+            // Right = smoother / longer, left = sharper. 0.5 % per pixel (Shift: 0.15 %).
+            const double delta = (e.mods.isShiftDown() ? 0.0015 : 0.005) * off.x;
             for (auto& [k, s0] : start)
                 d->edits.notes[(size_t)k].transition = juce::jlimit(0.0, 1.0, s0.transition + delta);
+            ed.syncInspector();
         } else if (gesture == G::Move) {
             // The note(s) travel with their consonant; neighbours absorb, the rest stays put.
             d->edits = before.edits;
@@ -758,6 +830,7 @@ public:
     bool changed = false;
     Document before;
     std::map<int, NoteEdit> start;
+    int hoverThread = -1;
     std::set<int> selBefore;
     juce::Rectangle<float> marquee;
     juce::Point<float> lastMouse;
@@ -1481,6 +1554,8 @@ void PitchEditor::setPencil(bool on)
     updateToolbar();
     roll_->repaint();
 }
+
+void PitchEditor::syncInspector() { inspector_->update(); }
 
 void PitchEditor::toggleConsonant()
 {
