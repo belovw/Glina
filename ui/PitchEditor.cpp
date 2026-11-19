@@ -453,7 +453,8 @@ public:
         if ((size_t)i >= d->edits.notes.size() || d->edits.notes[(size_t)i].consonant ||
             d->edits.notes[(size_t)i - 1].consonant) return false;
         const auto bL = noteRect(i - 1), bR = noteRect(i);
-        return bL.getWidth() > 6 && bR.getWidth() > 6 && std::abs(bL.getCentreY() - bR.getCentreY()) >= semi() * 0.5f;
+        // Also on one line: then the thread is flat and only its handle grabs it.
+        return bL.getWidth() > 6 && bR.getWidth() > 6;
     }
     Thread threadOf(int i) const
     {
@@ -478,9 +479,12 @@ public:
         const float s = semi();
         for (int i = 1; i < (int)ed.eff_->notes.size(); ++i) {
             if (!hasThread(i)) continue;
-            if (threadHandle(i).getDistanceFrom(p) <= 7.f) return i;
-            // Anywhere on the part of the thread between the two notes (outside their boxes).
+            // The handle always grabs the thread. This takes priority over the note-edge
+            // stretch zones at the same join, so a flat join can still be stretched elsewhere.
+            if (threadHandle(i).getDistanceFrom(p) <= 9.f) return i;
+            // Between notes on different pitches the sloped thread itself also grabs.
             const auto t = threadOf(i);
+            if (std::abs(t.yR - t.yL) < s * 0.5f) continue;
             const float top = std::min(t.yL, t.yR) + s * 0.5f, bottom = std::max(t.yL, t.yR) - s * 0.5f;
             if (bottom > top && p.y > top && p.y < bottom && std::abs(p.x - t.xb) <= std::max(5.f, t.half)) return i;
         }
