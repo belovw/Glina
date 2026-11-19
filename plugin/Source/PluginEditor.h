@@ -36,6 +36,9 @@ public:
     bool handlesTransportKeys() const override { return false; }
     std::vector<GridLine> hostGrid(double t0, double t1) const override;
     bool hasHostTempo() const override;
+    std::vector<TrackRef> tracks() const override;
+    bool ghost(const juce::String& id, Ghost& out) const override;
+    void setEditedTrack(const juce::String& id) override;
 
 private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override { changes.sendChangeMessage(); }
@@ -45,6 +48,9 @@ private:
     juce::ARAMusicalContext* musicalContext() const;
     double toSong(double clipSec) const;
     double fromSong(double songSec) const;
+    // Every playback region in the ARA document that runs Glina (any track).
+    std::vector<juce::ARAPlaybackRegion*> glinaRegions() const;
+    static juce::String idOf(const juce::ARAPlaybackRegion* r) { return juce::String::toHexString((juce::pointer_sized_int)r); }
 
     GlinaDocumentController* dc_;
     GlinaProcessor& proc_;

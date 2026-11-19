@@ -26,6 +26,15 @@ public:
     void redo();
     void fitView();
     void setSelection(std::set<int> notes) { selection_ = std::move(notes); refresh(); }
+    // Draw another track (ClipHost::tracks() id) faintly over this one.
+    void showTrack(const juce::String& id, bool on);
+
+    // ---- self-test hooks (app --selftest): roll coordinates, synthetic mouse gestures ----
+    juce::Rectangle<float> noteRectForTest(int note) const;
+    juce::Point<float> threadHandleForTest(int note) const; // join before `note`; (-1,-1) = none
+    int hitThreadForTest(juce::Point<float> p) const;
+    void zoomForTest(double pixelsPerSecond, double scrollSec);
+    void dragForTest(juce::Point<float> from, juce::Point<float> to);
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -35,6 +44,7 @@ private:
     class Roll;
     class Inspector;
     class Harmonies;
+    class Tracks;
     class Help;
 
     // ---- model helpers ----------------------------------------------------------
@@ -59,6 +69,12 @@ private:
     void cycleVibrato();
     void toggleConsonant();
     void syncInspector();
+    // ---- other tracks ("ghosts") --------------------------------------------------
+    void refreshGhosts();
+    void pollTracks();
+    void switchTrack(const juce::String& id);
+    void toggleTracks();
+    juce::Colour trackColour(const ClipHost::TrackRef& t, int index) const;
     void cycleGrid();
     void showLocator();
     void splitAt(int note, double outSecond);
@@ -90,6 +106,7 @@ private:
     std::unique_ptr<Roll> roll_;
     std::unique_ptr<Inspector> inspector_;
     std::unique_ptr<Harmonies> harmonies_;
+    std::unique_ptr<Tracks> tracks_;
     std::unique_ptr<Help> help_;
 
     juce::TextButton playBtn_, undoBtn_, redoBtn_, applyBtn_, splitBtn_, joinBtn_, abBtn_, harmBtn_, helpBtn_, fitBtn_;
@@ -97,6 +114,12 @@ private:
     juce::Slider corrPitch_, corrDrift_;
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
+    bool showTracks_ = false;
+    juce::TextButton tracksBtn_;
+    std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
+    std::vector<std::pair<juce::Colour, ClipHost::Ghost>> ghosts_;
+    juce::String trackSig_;                                      // detects added/removed tracks
+    int trackPoll_ = 0;
     bool pencil_ = false;
     juce::TextButton pencilBtn_, gridBtn_;
     int gridDenom_ = 4;        // grid = note value 1/N of a whole note: 1, 2, 4, 8 or 16

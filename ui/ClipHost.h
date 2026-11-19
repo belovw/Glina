@@ -7,6 +7,12 @@
 
 #include "glina/Analysis.h"
 #include "glina/Document.h"
+#include "glina/Editing.h"
+#include "glina/Renderer.h"
+
+#include <cmath>
+#include <functional>
+#include <limits>
 
 namespace glina::ui {
 
@@ -83,8 +89,61 @@ public:
     virtual std::vector<GridLine> hostGrid(double /*t0*/, double /*t1*/) const { return {}; }
     virtual bool hasHostTempo() const { return false; }
 
+    // ---- other tracks: shown faintly ("ghosts") to line parts up --------------------
+    struct TrackRef {
+        juce::String id;          // stable while that clip exists
+        juce::String name;
+        juce::Colour colour;      // transparent = none given by the host
+        bool current = false;     // the clip being edited now
+        bool editable = true;     // can become the edited clip (setEditedTrack)
+    };
+    struct GhostNote { double t0 = 0, t1 = 0, midi = 0; };
+    struct Ghost {
+        std::vector<GhostNote> notes;            // on THIS clip's output timeline
+        std::vector<juce::Point<double>> curve;  // (time, MIDI); NaN MIDI = break in the line
+    };
+    // Every clip the editor could show or edit, the current one included.
+    virtual std::vector<TrackRef> tracks() const { return {}; }
+    virtual bool ghost(const juce::String& /*id*/, Ghost& /*out*/) const { return false; }
+    virtual void setEditedTrack(const juce::String& /*id*/) {}
+    // Standalone: load a reference recording to show as a ghost.
+    virtual bool canOpenReference() const { return false; }
+    virtual void openReference() {}
+
     // Fired (asynchronously) when analysis/render finished or the clip changed.
     juce::ChangeBroadcaster changes;
 };
+
+// Notes and edited pitch line of a clip (a, e), placed on the edited clip's
+// timeline by `toLocal` (ghost output time -> edited clip output time). Only
+// [lo, hi] of the ghost's own output time is used: the part the DAW plays.
+inline ClipHost::Ghost buildGhost(const Analysis& a, const EditSet& e,
+                                  const std::function<double(double)>& toLocal, double lo, double hi)
+{
+    ClipHost::Ghost g;
+    const auto times = noteTimes(a, e);
+    for (size_t i = 0; i < a.notes.size() && i < times.size(); ++i) {
+        const double t0 = std::max(lo, times[i].outStart), t1 = std::min(hi, times[i].outEnd);
+        if (t1 <= t0) continue;
+        const bool shifted = i < e.notes.size() && !e.notes[i].consonant;
+        g.notes.push_back({toLocal(t0), toLocal(t1), a.notes[i].centerMidi + (shifted ? e.notes[i].pitchOffset : 0.0)});
+    }
+    const auto curve = editedPitchCurve(a, e);
+    const TimeMap map = TimeMap::build(a, e);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    bool open = false;
+    for (size_t k = 0; k < curve.size() && k < a.frames.size(); ++k) {
+        const double t = map.inToOut(a.frameTime((int)k) * a.sampleRate) / a.sampleRate; // TimeMap works in samples
+        const bool ok = a.frames[k].f0 > 0 && std::isfinite(curve[k]) && curve[k] > 0 && t >= lo && t <= hi;
+        if (!ok) {
+            if (open) g.curve.push_back({0.0, nan});
+            open = false;
+            continue;
+        }
+        g.curve.push_back({toLocal(t), curve[k]});
+        open = true;
+    }
+    return g;
+}
 
 } // namespace glina::ui

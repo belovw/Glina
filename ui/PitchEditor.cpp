@@ -73,6 +73,7 @@ public:
             "  Пробел — пуск/стоп (в плагине — транспорт DAW)    B — сравнить с оригиналом (A/B)\n"
             "  C — согласная (не растягивать, высоту не менять)\n"
             "  G — линии сетки 1/4 → 1/8 → 1/16    L — показать локатор\n"
+            "  T — треки: ноты других треков поверх этого, переключение редактирования\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -175,6 +176,7 @@ public:
         {
             juce::Graphics::ScopedSaveState clip(g);
             g.reduceClipRegion(c.toNearestInt());
+            drawGhosts(g);
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
             drawCurves(g, *A);
@@ -468,20 +470,22 @@ public:
         t.half = (float)std::min<double>(0.5 * ms / 1000.0 * ed.pps_, 0.5 * std::min(bL.getWidth(), bR.getWidth()));
         return t;
     }
+    // The handle never sits on a note: between the two notes when there is room
+    // (a step of 1.5 semitones or more), otherwise just above the join.
     juce::Point<float> threadHandle(int i) const
     {
         const auto t = threadOf(i);
-        return {t.xb, 0.5f * (t.yL + t.yR)};
+        if (std::abs(t.yR - t.yL) >= semi() * 1.5f) return {t.xb, 0.5f * (t.yL + t.yR)};
+        return {t.xb, std::min(noteRect(i - 1).getY(), noteRect(i).getY()) - 8.f};
     }
     int hitThread(juce::Point<float> p) const
     {
         if (ed.eff_ == nullptr || ed.doc() == nullptr) return -1;
+        if (hitNote(p) >= 0) return -1; // notes (body and edges) always win over threads
         const float s = semi();
         for (int i = 1; i < (int)ed.eff_->notes.size(); ++i) {
             if (!hasThread(i)) continue;
-            // The handle always grabs the thread. This takes priority over the note-edge
-            // stretch zones at the same join, so a flat join can still be stretched elsewhere.
-            if (threadHandle(i).getDistanceFrom(p) <= 9.f) return i;
+            if (threadHandle(i).getDistanceFrom(p) <= 7.f) return i;
             // Between notes on different pitches the sloped thread itself also grabs.
             const auto t = threadOf(i);
             if (std::abs(t.yR - t.yL) < s * 0.5f) continue;
@@ -489,6 +493,35 @@ public:
             if (bottom > top && p.y > top && p.y < bottom && std::abs(p.x - t.xb) <= std::max(5.f, t.half)) return i;
         }
         return -1;
+    }
+
+    // Other tracks, faint: note outlines and their pitch line in the track's colour.
+    void drawGhosts(juce::Graphics& g)
+    {
+        const auto c = canvas();
+        const float s = semi();
+        for (const auto& [colour, gh] : ed.ghosts_) {
+            for (const auto& n : gh.notes) {
+                const float x0 = xOf(n.t0), x1 = xOf(n.t1);
+                if (x1 < c.getX() || x0 > c.getRight()) continue;
+                const juce::Rectangle<float> r(x0, yOf(n.midi) - s * 0.5f, std::max(2.f, x1 - x0), s);
+                g.setColour(colour.withAlpha(0.12f));
+                g.fillRoundedRectangle(r, 3.f);
+                g.setColour(colour.withAlpha(0.55f));
+                g.drawRoundedRectangle(r, 3.f, 1.f);
+            }
+            juce::Path p;
+            bool open = false;
+            for (const auto& pt : gh.curve) {
+                const float x = std::isfinite(pt.y) ? xOf(pt.x) : 0.f;
+                if (!std::isfinite(pt.y) || x < c.getX() - 40 || x > c.getRight() + 40) { open = false; continue; }
+                const float y = yOf(pt.y);
+                if (!open) p.startNewSubPath(x, y); else p.lineTo(x, y);
+                open = true;
+            }
+            g.setColour(colour.withAlpha(0.75f));
+            g.strokePath(p, juce::PathStrokeType(1.3f));
+        }
     }
 
     void drawThreads(juce::Graphics& g, const Document& d)
@@ -513,6 +546,11 @@ public:
             g.setColour(colr.withAlpha(active ? 1.f : 0.85f));
             g.strokePath(p, juce::PathStrokeType(active ? 2.2f : 1.4f));
             const auto h = threadHandle(i);
+            const float joinTop = std::min(noteRect(i - 1).getY(), noteRect(i).getY());
+            if (h.y < joinTop) { // handle above the join: a short stem down to it
+                g.setColour(colr.withAlpha(0.7f));
+                g.drawLine(h.x, h.y + 4.5f, h.x, joinTop, 1.f);
+            }
             g.setColour(col::bg);
             g.fillEllipse(h.x - 4.5f, h.y - 4.5f, 9.f, 9.f);
             g.setColour(colr);
@@ -1242,6 +1280,134 @@ public:
 };
 
 // =====================================================================================
+// ============================================================================
+// Other tracks with Glina: show them faintly over this one, or switch editing to one.
+class PitchEditor::Tracks final : public juce::Component {
+public:
+    static constexpr int kHeader = 30, kRow = 26;
+
+    struct Row {
+        juce::String id;
+        juce::Colour colour;
+        juce::Label name;
+        juce::ToggleButton show;
+        juce::TextButton edit;
+        juce::Rectangle<int> swatch;
+    };
+
+    explicit Tracks(PitchEditor& o) : ed(o)
+    {
+        title.setText(T("Треки"), juce::dontSendNotification);
+        title.setFont(juce::FontOptions(14.f, juce::Font::bold));
+        addAndMakeVisible(title);
+        hint.setColour(juce::Label::textColourId, col::dim);
+        addAndMakeVisible(hint);
+        ref.setButtonText(T("Открыть референс…"));
+        quiet(ref);
+        ref.onClick = [this] { if (ed.host_ != nullptr) ed.host_->openReference(); };
+        addChildComponent(ref);
+    }
+
+    int preferredHeight() const { return kHeader + kRow * (int)rows.size() + 6; }
+
+    // Rebuild the rows when the set of tracks changed (never from a row's own click).
+    void update()
+    {
+        const auto list = ed.host_ != nullptr ? ed.host_->tracks() : std::vector<ClipHost::TrackRef>{};
+        juce::String s;
+        for (const auto& t : list) s << t.id << '|' << t.name << '|' << (int)t.current << (int)t.editable << '|';
+        ref.setVisible(ed.host_ != nullptr && ed.host_->canOpenReference());
+        if (s == sig && !rows.empty() == !list.empty()) { syncToggles(); return; }
+        sig = s;
+        rows.clear();
+        for (size_t i = 0; i < list.size(); ++i) {
+            const auto& t = list[i];
+            auto row = std::make_unique<Row>();
+            Row& r = *row;
+            r.id = t.id;
+            r.colour = ed.trackColour(t, (int)i);
+            r.name.setText(t.name, juce::dontSendNotification);
+            r.name.setColour(juce::Label::textColourId, col::text);
+            r.show.setButtonText(T("показать"));
+            r.show.setTooltip(T("Ноты этого трека бледным цветом поверх редактируемого"));
+            r.edit.setButtonText(t.current ? T("редактируется") : T("Редактировать"));
+            r.edit.setTooltip(T("Переключить окно на этот трек"));
+            r.edit.setEnabled(!t.current);
+            const juce::String id = t.id;
+            Row* rp = &r;
+            r.show.onClick = [this, id, rp] {
+                if (rp->show.getToggleState()) ed.shownTracks_.insert(id); else ed.shownTracks_.erase(id);
+                ed.refreshGhosts();
+                ed.roll_->repaint();
+            };
+            r.edit.onClick = [this, id] { ed.switchTrack(id); };
+            quiet(r.show);
+            quiet(r.edit);
+            addAndMakeVisible(r.name);
+            addAndMakeVisible(r.show);
+            addChildComponent(r.edit);
+            r.edit.setVisible(t.editable);
+            rows.push_back(std::move(row));
+        }
+        syncToggles();
+        hint.setText(list.size() > 1
+                         ? T("«Показать» — ноты трека бледным цветом поверх ваших. «Редактировать» — переключить окно на трек.")
+                     : ref.isVisible()
+                         ? T("Откройте референс: его ноты будут видны бледным цветом поверх ваших.")
+                         : T("Других item с Glina в проекте нет. Добавьте Glina как Take FX на другие item — они появятся здесь."),
+                     juce::dontSendNotification);
+        resized();
+        repaint();
+    }
+
+    void syncToggles()
+    {
+        const auto list = ed.host_ != nullptr ? ed.host_->tracks() : std::vector<ClipHost::TrackRef>{};
+        for (auto& r : rows) {
+            bool current = false;
+            for (const auto& t : list) if (t.id == r->id) current = t.current;
+            r->show.setToggleState(current || ed.shownTracks_.count(r->id) > 0, juce::dontSendNotification);
+            r->show.setEnabled(!current);
+        }
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(col::panel);
+        g.setColour(col::panelLine);
+        g.drawHorizontalLine(0, 0.f, (float)getWidth());
+        for (const auto& r : rows) {
+            g.setColour(r->colour);
+            g.fillRoundedRectangle(r->swatch.toFloat(), 3.f);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(10, 0);
+        auto head = r.removeFromTop(kHeader);
+        title.setBounds(head.removeFromLeft(70));
+        if (ref.isVisible()) ref.setBounds(head.removeFromRight(160).reduced(0, 4));
+        hint.setBounds(head);
+        for (auto& row : rows) {
+            auto rr = r.removeFromTop(kRow);
+            row->swatch = rr.removeFromLeft(14).withSizeKeepingCentre(12, 12);
+            rr.removeFromLeft(6);
+            row->edit.setBounds(rr.removeFromRight(130).reduced(0, 3));
+            rr.removeFromRight(8);
+            row->show.setBounds(rr.removeFromRight(100));
+            row->name.setBounds(rr);
+        }
+    }
+
+private:
+    PitchEditor& ed;
+    juce::Label title, hint;
+    juce::TextButton ref;
+    std::vector<std::unique_ptr<Row>> rows;
+    juce::String sig;
+};
+
 PitchEditor::PitchEditor()
 {
     setLookAndFeel(&lnf_);
@@ -1249,10 +1415,12 @@ PitchEditor::PitchEditor()
     roll_ = std::make_unique<Roll>(*this);
     inspector_ = std::make_unique<Inspector>(*this);
     harmonies_ = std::make_unique<Harmonies>(*this);
+    tracks_ = std::make_unique<Tracks>(*this);
     help_ = std::make_unique<Help>();
     addAndMakeVisible(*roll_);
     addAndMakeVisible(*inspector_);
     addAndMakeVisible(*harmonies_);
+    addChildComponent(*tracks_);
     addChildComponent(*help_);
 
     auto button = [this](juce::TextButton& b, const char* text, const char* tip, std::function<void()> fn) {
@@ -1277,6 +1445,7 @@ PitchEditor::PitchEditor()
         setPencil(!pencil_);
     });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
+    button(tracksBtn_, "Треки", "Другие треки с Glina: показать поверх или редактировать (T)", [this] { toggleTracks(); });
     button(harmBtn_, "Гармонии", "Показать/скрыть панель гармоний (H)", [this] {
         showHarmonies_ = !showHarmonies_;
         resized();
@@ -1419,9 +1588,12 @@ void PitchEditor::refresh()
     }
 
     const int hh = harmonies_->preferredHeight();
+    const int th = tracks_->preferredHeight();
     inspector_->update();
     harmonies_->update();
-    if (showHarmonies_ && harmonies_->getHeight() != hh) resized();
+    tracks_->update();
+    refreshGhosts();
+    if ((showHarmonies_ && harmonies_->getHeight() != hh) || (showTracks_ && tracks_->preferredHeight() != th)) resized();
     else inspector_->resized();
     updateToolbar();
     roll_->repaint();
@@ -1560,6 +1732,104 @@ void PitchEditor::setPencil(bool on)
 }
 
 void PitchEditor::syncInspector() { inspector_->update(); }
+
+// ---- self-test hooks -------------------------------------------------------------------
+juce::Rectangle<float> PitchEditor::noteRectForTest(int i) const { return roll_->noteRect(i); }
+
+juce::Point<float> PitchEditor::threadHandleForTest(int i) const
+{
+    return roll_->hasThread(i) ? roll_->threadHandle(i) : juce::Point<float>(-1.f, -1.f);
+}
+
+int PitchEditor::hitThreadForTest(juce::Point<float> p) const { return roll_->hitThread(p); }
+
+void PitchEditor::zoomForTest(double pixelsPerSecond, double scrollSec)
+{
+    pps_ = pixelsPerSecond;
+    scroll_ = scrollSec;
+    roll_->repaint();
+}
+
+void PitchEditor::dragForTest(juce::Point<float> from, juce::Point<float> to)
+{
+    auto src = juce::Desktop::getInstance().getMainMouseSource();
+    const auto t0 = juce::Time::getCurrentTime();
+    const auto mods = juce::ModifierKeys(juce::ModifierKeys::leftButtonModifier);
+    auto ev = [&](juce::Point<float> p, bool dragged) {
+        return juce::MouseEvent(src, p, mods, 1.f, 0.f, 0.f, 0.f, 0.f, roll_.get(), roll_.get(), t0, from, t0, 1, dragged);
+    };
+    roll_->mouseMove(ev(from, false));
+    roll_->mouseDown(ev(from, false));
+    for (int k = 1; k <= 10; ++k) roll_->mouseDrag(ev(from + (to - from) * (k / 10.f), true));
+    roll_->mouseUp(ev(to, true));
+}
+
+juce::Colour PitchEditor::trackColour(const ClipHost::TrackRef& t, int index) const
+{
+    static const juce::uint32 pal[] = {0xffe9c46a, 0xfff4a6a6, 0xffa8dadc, 0xffcdb4db, 0xffb5e48c, 0xfff7b267};
+    juce::Colour c = t.colour.isTransparent() ? juce::Colour(pal[(size_t)index % 6]) : t.colour;
+    if (c.getPerceivedBrightness() < 0.5f) c = c.brighter(0.8f); // dark track colours vanish on the dark roll
+    return c;
+}
+
+void PitchEditor::showTrack(const juce::String& id, bool on)
+{
+    if (on) shownTracks_.insert(id); else shownTracks_.erase(id);
+    tracks_->update();
+    refreshGhosts();
+    roll_->repaint();
+}
+
+void PitchEditor::refreshGhosts()
+{
+    ghosts_.clear();
+    if (host_ == nullptr) return;
+    const auto list = host_->tracks();
+    for (size_t i = 0; i < list.size(); ++i) {
+        const auto& t = list[i];
+        if (t.current || shownTracks_.count(t.id) == 0) continue;
+        ClipHost::Ghost g;
+        if (host_->ghost(t.id, g)) ghosts_.emplace_back(trackColour(t, (int)i), std::move(g));
+    }
+}
+
+void PitchEditor::pollTracks()
+{
+    const auto list = host_->tracks();
+    juce::String s;
+    for (const auto& t : list) s << t.id << '|' << t.name << '|' << (int)t.current << '|';
+    if (s == trackSig_) return;
+    trackSig_ = s;
+    const int th = tracks_->preferredHeight();
+    tracks_->update();
+    refreshGhosts();
+    if (showTracks_ && tracks_->preferredHeight() != th) resized();
+    roll_->repaint();
+}
+
+void PitchEditor::toggleTracks()
+{
+    showTracks_ = !showTracks_;
+    if (showTracks_) tracks_->update();
+    resized();
+    updateToolbar();
+}
+
+void PitchEditor::switchTrack(const juce::String& id)
+{
+    // Deferred: the click came from a row of the tracks panel, which the switch rebuilds.
+    juce::Component::SafePointer<PitchEditor> self(this);
+    juce::MessageManager::callAsync([self, id] {
+        if (self == nullptr || self->host_ == nullptr) return;
+        ClipHost* h = self->host_;
+        for (const auto& t : h->tracks())
+            if (t.current) self->shownTracks_.insert(t.id); // keep seeing the track we leave
+        self->shownTracks_.erase(id);
+        h->setEditedTrack(id);
+        self->setHost(nullptr);
+        self->setHost(h);
+    });
+}
 
 void PitchEditor::toggleConsonant()
 {
@@ -1729,6 +1999,7 @@ void PitchEditor::updateToolbar()
     const bool by = host_ != nullptr && host_->isBypassed();
     abBtn_.setColour(juce::TextButton::buttonColourId, by ? col::warn.darker(0.3f) : juce::Colour(0xff252930));
     harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
+    tracksBtn_.setColour(juce::TextButton::buttonColourId, showTracks_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
 }
 
 // ---- layout / paint ----------------------------------------------------------------------
@@ -1743,32 +2014,40 @@ void PitchEditor::resized()
 {
     auto r = getLocalBounds();
     auto bar = r.removeFromTop(40).reduced(6, 7);
-    auto put = [&bar](juce::Component& c, int w, int gap = 4) {
-        if (!c.isVisible()) return;
-        c.setBounds(bar.removeFromLeft(w));
-        bar.removeFromLeft(gap);
-    };
-    put(playBtn_, 34, 8);
-    put(undoBtn_, 62);
-    put(redoBtn_, 62, 12);
-    put(keyLbl_, 30, 2);
-    put(keyBox_, 150, 12);
-    put(corrPitchLbl_, 50, 2);
-    put(corrPitch_, 118);
-    put(corrDriftLbl_, 46, 2);
-    put(corrDrift_, 118);
-    put(applyBtn_, 86, 12);
-    put(splitBtn_, 82);
-    put(joinBtn_, 74, 12);
-    put(pencilBtn_, 84, 12);
-    put(gridBtn_, 84);
-    put(abBtn_, 44);
-    put(harmBtn_, 84);
-    put(fitBtn_, 44);
-    put(helpBtn_, 28);
+    // Toolbar: when the window is too narrow, the key box and the correction sliders
+    // get narrower first, then the slider captions go (the sliders keep tooltips).
+    struct Slot { juce::Component* c; int w, gap, minW; };
+    std::vector<Slot> slots = {
+        {&playBtn_, 34, 8, 34},      {&undoBtn_, 62, 4, 62},      {&redoBtn_, 62, 12, 62},
+        {&keyLbl_, 30, 2, 30},       {&keyBox_, 150, 12, 96},
+        {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
+        {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
+        {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
+        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 84, 4, 84},      {&abBtn_, 44, 4, 44},
+        {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 62, 4, 62},    {&fitBtn_, 44, 4, 44},
+        {&helpBtn_, 28, 4, 28}};
+    int deficit = -bar.getWidth();
+    for (const auto& s : slots) if (s.c->isVisible()) deficit += s.w + s.gap;
+    for (auto& s : slots) {
+        if (deficit <= 0) break;
+        if (!s.c->isVisible()) continue;
+        const int cut = std::min(deficit, s.w - s.minW);
+        s.w -= cut;
+        deficit -= cut;
+    }
+    if (deficit > 0)
+        for (auto& s : slots)
+            if (s.c == &corrPitchLbl_ || s.c == &corrDriftLbl_) { deficit -= s.w + s.gap; s.w = 0; s.gap = 0; }
+    for (const auto& s : slots) {
+        if (!s.c->isVisible()) continue;
+        s.c->setBounds(bar.removeFromLeft(s.w));
+        bar.removeFromLeft(s.gap);
+    }
 
     harmonies_->setVisible(showHarmonies_);
     if (showHarmonies_) harmonies_->setBounds(r.removeFromBottom(harmonies_->preferredHeight()));
+    tracks_->setVisible(showTracks_);
+    if (showTracks_) tracks_->setBounds(r.removeFromBottom(tracks_->preferredHeight()));
     inspector_->setBounds(r.removeFromRight(236));
     roll_->setBounds(r);
     help_->setBounds(r);
@@ -1827,6 +2106,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         case 'l': showLocator(); return true;
         case 'b': toggleBypass(); return true;
         case 'h': showHarmonies_ = !showHarmonies_; resized(); updateToolbar(); return true;
+        case 't': toggleTracks(); return true;
         case '0': fitView(); return true;
         case '+': case '=': pps_ = std::min(4000.0, pps_ * 1.4); roll_->repaint(); return true;
         case '-': pps_ = std::max(2.0, pps_ / 1.4); roll_->repaint(); return true;
@@ -1843,6 +2123,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
 void PitchEditor::timerCallback()
 {
     if (host_ == nullptr) return;
+    if (++trackPoll_ >= 30) { trackPoll_ = 0; pollTracks(); } // items added/removed in the DAW
     const bool busy = host_->analysis() == nullptr || host_->isRendering() || host_->busyText().isNotEmpty();
     const bool playing = host_->isPlaying();
     if (host_->analysis() != eff_) refresh();

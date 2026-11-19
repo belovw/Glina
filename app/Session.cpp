@@ -77,7 +77,8 @@ void Session::reset()
     projectFile_ = juce::File();
 }
 
-bool Session::openAudio(const juce::File& file, juce::String& error)
+bool Session::readMono(const juce::File& file, std::shared_ptr<std::vector<float>>& mono, double& sampleRate,
+                       juce::String& error)
 {
     std::unique_ptr<juce::AudioFormatReader> reader(formats_.createReaderFor(file));
     if (reader == nullptr) {
@@ -92,15 +93,24 @@ bool Session::openAudio(const juce::File& file, juce::String& error)
     const int ch = (int)std::max(1u, reader->numChannels);
     juce::AudioBuffer<float> buf(ch, (int)len);
     if (!reader->read(&buf, 0, (int)len, 0, true, ch > 1)) { error = T("Ошибка чтения файла."); return false; }
-    auto mono = std::make_shared<std::vector<float>>((size_t)len, 0.f);
+    mono = std::make_shared<std::vector<float>>((size_t)len, 0.f);
     for (int c = 0; c < ch; ++c) {
         const float* p = buf.getReadPointer(c);
         for (juce::int64 i = 0; i < len; ++i) (*mono)[(size_t)i] += p[i] / (float)ch;
     }
+    sampleRate = reader->sampleRate;
+    return true;
+}
+
+bool Session::openAudio(const juce::File& file, juce::String& error)
+{
+    std::shared_ptr<std::vector<float>> mono;
+    double sr = 48000;
+    if (!readMono(file, mono, sr, error)) return false;
 
     reset();
     mono_ = std::move(mono);
-    sampleRate_ = reader->sampleRate;
+    sampleRate_ = sr;
     audioFile_ = file;
     publish(nullptr);
     startAnalysis();
@@ -159,6 +169,77 @@ bool Session::exportStems(const juce::File& folder, juce::String& error) const
                       lastRender_->voices[j].size(), lastRender_->sampleRate, error))
             return false;
     }
+    return true;
+}
+
+// ---- reference recording ------------------------------------------------------------
+bool Session::loadReference(const juce::File& file, juce::String& error)
+{
+    std::shared_ptr<std::vector<float>> mono;
+    double sr = 48000;
+    if (!readMono(file, mono, sr, error)) return false;
+    refFile_ = file;
+    ref_.reset();
+    refLoading_ = true;
+    const uint64_t gen = ++refGen_;
+    auto alive = alive_;
+    pool_.addJob([this, mono, sr, gen, alive] {
+        auto a = std::make_shared<const Analysis>(analyze(mono->data(), mono->size(), sr));
+        juce::MessageManager::callAsync([this, a, gen, alive] {
+            if (!*alive || gen != refGen_) return;
+            ref_ = a;
+            refLoading_ = false;
+            changes.sendChangeMessage();
+        });
+    });
+    changes.sendChangeMessage();
+    return true;
+}
+
+void Session::openReference()
+{
+    const juce::File start = audioFile_ != juce::File() ? audioFile_.getParentDirectory() : juce::File();
+    refChooser_ = std::make_unique<juce::FileChooser>(T("Референс: запись, под которую подгонять"), start,
+                                                     "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3");
+    refChooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                             [this](const juce::FileChooser& fc) {
+                                 const juce::File f = fc.getResult();
+                                 if (f == juce::File()) return;
+                                 juce::String err;
+                                 if (!loadReference(f, err))
+                                     juce::AlertWindow::showAsync(juce::MessageBoxOptions()
+                                                                      .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                                                      .withTitle("Glina").withMessage(err).withButton("OK", 0),
+                                                                  nullptr);
+                             });
+}
+
+std::vector<ui::ClipHost::TrackRef> Session::tracks() const
+{
+    std::vector<TrackRef> out;
+    if (mono_ != nullptr) {
+        TrackRef t;
+        t.id = "main";
+        t.name = audioFile_.getFileName();
+        t.current = true;
+        out.push_back(t);
+    }
+    if (ref_ != nullptr || refLoading_) {
+        TrackRef t;
+        t.id = "reference";
+        t.name = T("Референс: ") + refFile_.getFileName() + (refLoading_ ? T(" (анализ…)") : juce::String());
+        t.editable = false;
+        out.push_back(t);
+    }
+    return out;
+}
+
+bool Session::ghost(const juce::String& id, Ghost& out) const
+{
+    if (id != "reference" || ref_ == nullptr) return false;
+    // Both recordings start at 0 s: the reference lies on the same timeline as the file.
+    const double len = (double)ref_->numSamples / ref_->sampleRate;
+    out = ui::buildGhost(*ref_, EditSet{}, [](double t) { return t; }, 0.0, len);
     return true;
 }
 

@@ -287,6 +287,7 @@ public:
             if (args[i] == "--screenshot" && i + 1 < args.size()) { shotFile_ = juce::File(args[++i]); continue; }
             if (args[i] == "--demo-edits") { demo_ = true; continue; }
             if (args[i] == "--selftest") { selftest_ = true; continue; }
+            if (args[i] == "--reference" && i + 1 < args.size()) { refFile_ = juce::File::getCurrentWorkingDirectory().getChildFile(args[++i]); continue; }
             if (args[i] == "--size" && i + 1 < args.size()) {
                 const auto wh = juce::StringArray::fromTokens(args[++i], "x", "");
                 if (wh.size() == 2) window_->setSize(wh[0].getIntValue(), wh[1].getIntValue());
@@ -294,6 +295,11 @@ public:
             }
             const juce::File f = juce::File::getCurrentWorkingDirectory().getChildFile(args[i]);
             if (f.existsAsFile()) window_->main().open(f);
+        }
+        if (refFile_ != juce::File()) {
+            juce::String err;
+            if (!window_->main().session().loadReference(refFile_, err)) std::printf("reference: %s\n", err.toRawUTF8());
+            window_->main().editor().showTrack("reference", true);
         }
         if (shotFile_ != juce::File() || selftest_) startScreenshotMode();
     }
@@ -337,6 +343,8 @@ private:
             ++ticks_;
             if (ticks_ > 600) { quit(); return; } // 60 s safety
             if (!m.session().isIdle()) return;
+            if (refFile_ != juce::File() && !m.session().hasReference()) return;
+            if (refFile_ != juce::File() && !tracksShown_) { tracksShown_ = true; m.editor().keyPressed(juce::KeyPress('t', {}, 't')); return; }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
                 demoDone_ = true;
@@ -403,6 +411,7 @@ private:
             case 9: check(notes() == n0_ + 1, "split button splits the selected note"); key('z', cmd, 'z'); break;
             case 10: {
                 check(notes() == n0_, "undo of split");
+                gestureChecks(m, check);
                 for (auto* c : ed.getChildren())
                     for (auto* cc : c->getChildren())
                         if (auto* b = dynamic_cast<juce::TextButton*>(cc); b != nullptr && b->getButtonText() == T("+ Голос")) b->triggerClick();
@@ -428,6 +437,131 @@ private:
         }
         std::fflush(stdout);
         return false;
+    }
+
+    // Mouse gestures through the real roll (synthetic events): a body drag moves a note
+    // in time, edge drags change its length, the thread handle changes the transition,
+    // and a note is never taken by a thread. At a normal zoom and zoomed out (short notes).
+    template <typename Check>
+    static void gestureChecks(MainComponent& m, Check& check)
+    {
+        Session& s = m.session();
+        auto& ed = m.editor();
+        const Analysis* a = s.analysis();
+        if (a == nullptr || a->notes.size() < 4) { check(false, "gestures: no notes"); return; }
+        auto times = [&] { return noteTimes(*s.analysis(), s.document().edits); };
+        auto undoIfChanged = [&](const std::string& snap) {
+            if (serialize(s.document()) == snap) return;
+            ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+            check(serialize(s.document()) == snap, "gesture undone");
+        };
+        int i = -1; // a note joined to the previous one (legato), as in a real phrase
+        for (int k = 1; k + 1 < (int)a->notes.size(); ++k)
+            if (a->notes[(size_t)k].startFrame - a->notes[(size_t)k - 1].endFrame <= 1) { i = k; break; }
+        if (i < 0) { check(false, "gestures: no joined notes"); return; }
+        for (const double pps : {200.0, 60.0}) {
+            const bool zoomed = pps > 100;
+            ed.zoomForTest(pps, std::max(0.0, times()[(size_t)i].outStart - 1.0));
+            const auto r = ed.noteRectForTest(i);
+            const double px = 1.0 / pps; // seconds per pixel
+            std::printf("  zoom %.0f px/s: note %d is %.0f x %.0f px\n", pps, i, r.getWidth(), r.getHeight());
+            check(ed.hitThreadForTest(r.getCentre()) < 0 && ed.hitThreadForTest({r.getX() + 1.f, r.getCentreY()}) < 0 &&
+                      ed.hitThreadForTest({r.getRight() - 1.f, r.getCentreY()}) < 0,
+                  zoomed ? "note body and edges are never taken by a thread (normal zoom)"
+                         : "note body and edges are never taken by a thread (short notes)");
+
+            std::string snap = serialize(s.document());
+            double t0 = times()[(size_t)i].outStart;
+            ed.dragForTest(r.getCentre(), r.getCentre() + juce::Point<float>(30.f, 0.f));
+            double d = times()[(size_t)i].outStart - t0;
+            std::printf("    body drag +30 px: note moved %+.1f ms (expected %+.1f)\n", d * 1000, 30 * px * 1000);
+            check(std::abs(d - 30 * px) < 0.25 * 30 * px, zoomed ? "body drag moves the note (normal zoom)" : "body drag moves the note (short notes)");
+            undoIfChanged(snap);
+
+            const float in = std::min(2.f, r.getWidth() * 0.1f);
+            snap = serialize(s.document());
+            t0 = times()[(size_t)i].outEnd;
+            ed.dragForTest({r.getRight() - in, r.getCentreY()}, {r.getRight() - in + 20.f, r.getCentreY()});
+            d = times()[(size_t)i].outEnd - t0;
+            std::printf("    right edge +20 px: end moved %+.1f ms\n", d * 1000);
+            check(d > 0.5 * 20 * px, zoomed ? "right edge drag lengthens the note (normal zoom)" : "right edge drag lengthens the note (short notes)");
+            undoIfChanged(snap);
+
+            snap = serialize(s.document());
+            t0 = times()[(size_t)i].outStart;
+            ed.dragForTest({r.getX() + in, r.getCentreY()}, {r.getX() + in - 20.f, r.getCentreY()});
+            d = times()[(size_t)i].outStart - t0;
+            std::printf("    left edge -20 px: start moved %+.1f ms\n", d * 1000);
+            check(d < -0.5 * 20 * px, zoomed ? "left edge drag moves the start (normal zoom)" : "left edge drag moves the start (short notes)");
+            undoIfChanged(snap);
+
+            const auto h = ed.threadHandleForTest(i);
+            if (h.x >= 0) {
+                snap = serialize(s.document());
+                const double tr0 = s.document().edits.notes[(size_t)i].transition;
+                ed.dragForTest(h, h + juce::Point<float>(40.f, 0.f));
+                const double tr1 = s.document().edits.notes[(size_t)i].transition;
+                std::printf("    thread handle +40 px: transition %.0f %% -> %.0f %%\n", tr0 * 100, tr1 * 100);
+                check(tr1 > tr0 + 0.1, zoomed ? "thread handle changes the transition (normal zoom)" : "thread handle changes the transition (short notes)");
+                undoIfChanged(snap);
+            } else {
+                std::printf("    (no thread at this join at this zoom)\n");
+            }
+        }
+
+        // A join on one pitch line (a note cut in two): the commonest join in a sung phrase.
+        const std::string preSplit = serialize(s.document());
+        ed.setSelection({i});
+        const int count = (int)s.analysis()->notes.size();
+        for (auto* c : ed.getChildren())
+            if (auto* b = dynamic_cast<juce::TextButton*>(c); b != nullptr && b->getButtonText() == T("Разрезать") && b->onClick)
+                b->onClick();
+        if ((int)s.analysis()->notes.size() != count + 1) { check(false, "gestures: split for a flat join"); return; }
+        for (const double pps : {200.0, 60.0}) {
+            const bool zoomed = pps > 100;
+            ed.zoomForTest(pps, std::max(0.0, times()[(size_t)i].outStart - 1.0));
+            const auto L = ed.noteRectForTest(i), R = ed.noteRectForTest(i + 1);
+            const double px = 1.0 / pps;
+            std::printf("  flat join, zoom %.0f px/s: halves %.0f and %.0f px wide\n", pps, L.getWidth(), R.getWidth());
+            bool free = true;
+            for (const auto& q : {L, R})
+                for (const float y : {q.getY() + 2.f, q.getCentreY(), q.getBottom() - 2.f})
+                    for (const float x : {q.getX() + 1.f, q.getCentreX(), q.getRight() - 1.f})
+                        if (ed.hitThreadForTest({x, y}) >= 0) free = false;
+            check(free, zoomed ? "flat join: no part of either note is taken by the thread (normal zoom)"
+                               : "flat join: no part of either note is taken by the thread (short notes)");
+
+            std::string snap = serialize(s.document());
+            const float in = std::min(1.5f, L.getWidth() * 0.1f);
+            double t0 = times()[(size_t)i].outEnd;
+            ed.dragForTest({L.getRight() - in, L.getCentreY()}, {L.getRight() - in + 10.f, L.getCentreY()});
+            double d = times()[(size_t)i].outEnd - t0;
+            std::printf("    join dragged +10 px at the note centre line: %+.1f ms\n", d * 1000);
+            check(d > 0.5 * 10 * px, zoomed ? "flat join: the edge can be dragged (normal zoom)" : "flat join: the edge can be dragged (short notes)");
+            undoIfChanged(snap);
+
+            snap = serialize(s.document());
+            t0 = times()[(size_t)i + 1].outStart;
+            ed.dragForTest(R.getCentre(), R.getCentre() + juce::Point<float>(8.f, 0.f));
+            d = times()[(size_t)i + 1].outStart - t0;
+            std::printf("    right half body +8 px: %+.1f ms\n", d * 1000);
+            check(d > 0.5 * 8 * px, zoomed ? "flat join: the body can be dragged (normal zoom)" : "flat join: the body can be dragged (short notes)");
+            undoIfChanged(snap);
+
+            const auto h = ed.threadHandleForTest(i + 1);
+            if (h.x >= 0) {
+                snap = serialize(s.document());
+                const double tr0 = s.document().edits.notes[(size_t)i + 1].transition;
+                ed.dragForTest(h, h + juce::Point<float>(40.f, 0.f));
+                std::printf("    handle above the join at y %.0f (notes top %.0f): transition %.0f %% -> %.0f %%\n", h.y,
+                            std::min(L.getY(), R.getY()), tr0 * 100, s.document().edits.notes[(size_t)i + 1].transition * 100);
+                check(s.document().edits.notes[(size_t)i + 1].transition > tr0 + 0.1,
+                      zoomed ? "flat join: the thread handle still works (normal zoom)" : "flat join: the thread handle still works (short notes)");
+                undoIfChanged(snap);
+            }
+        }
+        undoIfChanged(preSplit);
+        ed.fitView();
     }
 
     static void applyDemoEdits(MainComponent& m)
@@ -471,6 +605,8 @@ private:
     std::unique_ptr<juce::Timer> poll_;
     juce::File shotFile_;
     bool demo_ = false, demoDone_ = false, selftest_ = false;
+    juce::File refFile_;
+    bool tracksShown_ = false;
     int step_ = 0, n0_ = 0, joinAt_ = -1, failures_ = 0;
     int ticks_ = 0, settled_ = 0;
 };

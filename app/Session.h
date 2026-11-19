@@ -46,6 +46,15 @@ public:
     void setPlayheadSec(double t) override { pos_.store(std::max(0.0, t)); }
     bool isBypassed() const override { return bypass_.load(); }
     void setBypassed(bool b) override { bypass_.store(b); }
+    // The edited file and, if loaded, a reference recording shown as a read-only ghost.
+    std::vector<TrackRef> tracks() const override;
+    bool ghost(const juce::String& id, Ghost& out) const override;
+    bool canOpenReference() const override { return true; }
+    void openReference() override;
+
+    // ---- reference recording (message thread) ---------------------------------------
+    bool loadReference(const juce::File& file, juce::String& error);
+    bool hasReference() const { return ref_ != nullptr; }
 
     // ---- AudioSource (audio thread) ---------------------------------------------------
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override;
@@ -66,6 +75,7 @@ private:
     };
 
     void reset();
+    bool readMono(const juce::File& file, std::shared_ptr<std::vector<float>>& mono, double& sampleRate, juce::String& error);
     void startAnalysis();
     void rebuildEffective();
     void startRender();
@@ -88,6 +98,13 @@ private:
     juce::String busy_;
     juce::File audioFile_, projectFile_;
     bool dirty_ = false;
+
+    // Reference: analysed in the background; independent of the edited file.
+    std::shared_ptr<const Analysis> ref_;
+    juce::File refFile_;
+    uint64_t refGen_ = 0;
+    bool refLoading_ = false;
+    std::unique_ptr<juce::FileChooser> refChooser_;
 
     juce::SpinLock playLock_;
     std::shared_ptr<const Playback> play_;
