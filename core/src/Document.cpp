@@ -83,7 +83,7 @@ std::string serialize(const Document& d)
     o.imbue(std::locale::classic());
     o << std::setprecision(10);
     const EditSet& e = d.edits;
-    o << "glina-document 2\n";
+    o << "glina-document 3\n";
     o << "key " << d.keyTonic << ' ' << (int)d.keyMinor << ' ' << (int)d.chromatic << '\n';
     o << "lead " << d.leadGainDb << '\n';
     o << "tempo " << d.tempoBpm << ' ' << d.beatsPerBar << ' ' << d.barOffsetSec << '\n';
@@ -95,7 +95,7 @@ std::string serialize(const Document& d)
     o << "notes " << e.notes.size() << '\n';
     for (const auto& n : e.notes)
         o << "n " << n.pitchOffset << ' ' << n.driftAmount << ' ' << n.vibratoAmount << ' ' << n.formantShift << ' '
-          << n.gainDb << ' ' << n.timeOffsetSec << ' ' << n.stretch << ' ' << n.transition << '\n';
+          << n.gainDb << ' ' << n.timeOffsetSec << ' ' << n.stretch << ' ' << n.transition << ' ' << (n.consonant ? 1 : 0) << '\n';
     o << std::setprecision(6);
     for (const auto& r : e.draw) {
         o << "draw " << r.start << ' ' << r.delta.size();
@@ -121,7 +121,7 @@ bool deserialize(const std::string& text, Document& out)
     in.imbue(std::locale::classic());
     std::string tag;
     int version = 0;
-    if (!(in >> tag >> version) || tag != "glina-document" || version < 1 || version > 2) return false;
+    if (!(in >> tag >> version) || tag != "glina-document" || version < 1 || version > 3) return false;
     Document d;
     while (in >> tag) {
         if (tag == "end") { out = std::move(d); return true; }
@@ -153,6 +153,7 @@ bool deserialize(const std::string& text, Document& out)
             in >> n.pitchOffset >> n.driftAmount >> n.vibratoAmount >> n.formantShift >> n.gainDb >> n.timeOffsetSec >>
                 n.stretch;
             if (version >= 2) in >> n.transition;
+            if (version >= 3) { int c = 0; in >> c; n.consonant = c != 0; }
             d.edits.notes.push_back(n);
         } else if (tag == "draw") {
             DrawRun r;

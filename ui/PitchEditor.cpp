@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <map>
+#include <set>
 
 namespace glina::ui {
 
@@ -69,6 +70,8 @@ public:
             "  Ctrl+A — все ноты    Esc — снять выделение\n"
             "  Ctrl+Z / Ctrl+Shift+Z — отмена / повтор\n"
             "  Пробел — пуск/стоп (в плагине — транспорт DAW)    B — сравнить с оригиналом (A/B)\n"
+            "  C — согласная (не растягивать, высоту не менять)\n"
+            "  G — линии сетки 1/4 → 1/8 → 1/16    L — показать локатор\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -217,12 +220,30 @@ public:
             for (const auto& l : lines) beatsPerBar = std::max(beatsPerBar, l.beat);
             barPx = beatPx * beatsPerBar;
             const int labelEvery = std::max(1, (int)std::ceil(44.0 / std::max(1.0, barPx)));
-            for (const auto& l : lines) {
+            // Eighths / sixteenths: extra lines between the beats (beat = -1 marks them).
+            std::vector<ClipHost::GridLine> all;
+            for (size_t k = 0; k < lines.size(); ++k) {
+                all.push_back(lines[k]);
+                if (k + 1 >= lines.size() || ed.gridDiv_ <= 1) continue;
+                for (int j = 1; j < ed.gridDiv_; ++j) {
+                    ClipHost::GridLine s = lines[k];
+                    s.sec = lines[k].sec + (lines[k + 1].sec - lines[k].sec) * j / ed.gridDiv_;
+                    s.beat = -1;
+                    all.push_back(s);
+                }
+            }
+            for (const auto& l : all) {
                 const float x = xOf(l.sec);
                 if (x < c.getX() || x > c.getRight()) continue;
+                if (l.beat < 0) { // subdivision
+                    if (beatPx / ed.gridDiv_ < 6) continue;
+                    g.setColour(col::grid.brighter(0.2f).withAlpha(0.6f));
+                    g.drawVerticalLine((int)x, c.getY(), c.getBottom());
+                    continue;
+                }
                 const bool bar = l.beat == 1;
                 if (!bar && beatPx < 7) continue;
-                g.setColour(bar ? col::grid.brighter(0.25f) : col::grid.withAlpha(0.55f));
+                g.setColour(bar ? col::grid.brighter(0.7f) : col::grid.brighter(0.35f));
                 g.drawVerticalLine((int)x, c.getY(), c.getBottom());
                 g.setColour(col::dim);
                 g.drawVerticalLine((int)x, bar ? kRulerH - 8.f : kRulerH - 4.f, kRulerH);
@@ -291,7 +312,7 @@ public:
             if (box.getRight() < c.getX() || box.getX() > c.getRight()) continue;
             const double centre = ed.editedCentre(i);
             const double dev = std::abs(centre - d.target(centre, A)) * 100.0;
-            const juce::Colour fill = dev < 10 ? col::inTune : dev < 25 ? col::nearTune : col::offTune;
+            const juce::Colour fill = e.consonant ? col::dim : dev < 10 ? col::inTune : dev < 25 ? col::nearTune : col::offTune;
             const bool sel = ed.selection_.count(i) > 0;
 
             if (std::abs(e.pitchOffset) > 0.01) { // ghost of the original position
@@ -597,6 +618,11 @@ public:
         m.addItem(5, T("Дрейф убрать / вернуть\tD"), true);
         m.addItem(6, T("Вибрато 100 / 50 / 0 %\tV"), true);
         m.addItem(7, T("Стереть карандаш в выделенных"), any && ed.doc() != nullptr && !ed.doc()->edits.draw.empty());
+        bool allCons = any && ed.doc() != nullptr;
+        if (allCons)
+            for (int s : ed.selection_)
+                if ((size_t)s >= ed.doc()->edits.notes.size() || !ed.doc()->edits.notes[(size_t)s].consonant) allCons = false;
+        m.addItem(8, T("Согласная (не растягивать, высоту не менять)\tC"), any, allCons);
         Document* d = ed.doc();
         if (d != nullptr && !d->voices.empty() && any) {
             m.addSeparator();
@@ -618,6 +644,7 @@ public:
             else if (r == 5) ed.toggleDrift();
             else if (r == 6) ed.cycleVibrato();
             else if (r == 7) ed.erasePencilInSelection();
+            else if (r == 8) ed.toggleConsonant();
             else if (r >= 10 && r < 30) {
                 const int j = r % 10;
                 const bool on = r < 20;
@@ -1121,6 +1148,7 @@ PitchEditor::PitchEditor()
         updateToolbar();
     });
     button(fitBtn_, "Всё", "Показать весь клип (0)", [this] { fitView(); });
+    button(gridBtn_, "Сетка 1/4", "Линии сетки: 1/4 → 1/8 → 1/16 (G)", [this] { cycleGrid(); });
     button(helpBtn_, "?", "Справка по мыши и клавишам (F1)", [this] { showHelp(!help_->isVisible()); });
     abBtn_.setClickingTogglesState(false);
 
@@ -1396,6 +1424,40 @@ void PitchEditor::setPencil(bool on)
     roll_->repaint();
 }
 
+void PitchEditor::toggleConsonant()
+{
+    if (eff_ == nullptr || selection_.empty()) return;
+    bool allOn = true;
+    for (int i : selection_)
+        if (doc() == nullptr || (size_t)i >= doc()->edits.notes.size() || !doc()->edits.notes[(size_t)i].consonant) allOn = false;
+    const bool on = !allOn;
+    const std::set<int> sel = selection_;
+    const Analysis& a = *eff_;
+    edit([&](Document& d) {
+        for (int i : sel) setConsonant(d.edits, a, i, on);
+    }, true);
+}
+
+void PitchEditor::cycleGrid()
+{
+    static const int order[] = {4, 8, 16, 2, 1};
+    int k = 0;
+    for (int i = 0; i < 5; ++i) if (order[i] == gridDiv_) k = (i + 1) % 5;
+    gridDiv_ = order[k];
+    gridBtn_.setButtonText(T("Сетка ") + (gridDiv_ == 1 ? juce::String("1/1") : "1/" + juce::String(gridDiv_)));
+    roll_->repaint();
+}
+
+void PitchEditor::showLocator()
+{
+    if (host_ == nullptr || roll_->getWidth() <= 0) return;
+    const double ph = host_->playheadSec();
+    if (ph < 0) return;
+    const double visible = roll_->canvas().getWidth() / pps_;
+    scroll_ = std::max(0.0, ph - visible * 0.5);
+    roll_->repaint();
+}
+
 std::vector<ClipHost::GridLine> PitchEditor::gridLines(double t0, double t1) const
 {
     std::vector<ClipHost::GridLine> out;
@@ -1562,6 +1624,7 @@ void PitchEditor::resized()
     put(splitBtn_, 82);
     put(joinBtn_, 74, 12);
     put(pencilBtn_, 84, 12);
+    put(gridBtn_, 84);
     put(abBtn_, 44);
     put(harmBtn_, 84);
     put(fitBtn_, 44);
@@ -1622,6 +1685,9 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         case 'v': cycleVibrato(); return true;
         case 'j': joinSelected(); return true;
         case 'p': setPencil(!pencil_); return true;
+        case 'c': toggleConsonant(); return true;
+        case 'g': cycleGrid(); return true;
+        case 'l': showLocator(); return true;
         case 'b': toggleBypass(); return true;
         case 'h': showHarmonies_ = !showHarmonies_; resized(); updateToolbar(); return true;
         case '0': fitView(); return true;
@@ -1643,15 +1709,16 @@ void PitchEditor::timerCallback()
     const bool busy = host_->analysis() == nullptr || host_->isRendering() || host_->busyText().isNotEmpty();
     const bool playing = host_->isPlaying();
     if (host_->analysis() != eff_) refresh();
-    if (playing || busy || busy != wasBusy_) {
-        // Follow the playhead.
-        const double ph = host_->playheadSec();
-        if (playing && ph >= 0 && roll_->getWidth() > 0) {
-            const double visible = roll_->canvas().getWidth() / pps_;
-            if (ph > scroll_ + visible * 0.92 || ph < scroll_) scroll_ = std::max(0.0, ph - visible * 0.08);
-        }
-        roll_->repaint();
+    // The view follows the playhead only while it moves during playback; when stopped,
+    // scrolling by hand stays where the user left it.
+    const double ph = host_->playheadSec();
+    const bool moved = ph != lastPh_;
+    lastPh_ = ph;
+    if (playing && moved && ph >= 0 && roll_->getWidth() > 0) {
+        const double visible = roll_->canvas().getWidth() / pps_;
+        if (ph > scroll_ + visible * 0.92 || ph < scroll_) scroll_ = std::max(0.0, ph - visible * 0.08);
     }
+    if (moved || playing || busy || busy != wasBusy_) roll_->repaint();
     if (playing != wasPlaying_ || busy != wasBusy_) updateToolbar();
     wasBusy_ = busy;
     wasPlaying_ = playing;

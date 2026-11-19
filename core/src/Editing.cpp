@@ -40,18 +40,22 @@ double clampDt(double dt, double clipLen, Make&& make)
 // Lay out the block of notes [b, e] (taken from `base`) so that it starts at
 // `start` and ends at `end`. The gaps between its notes (consonants, pauses)
 // keep their length; the notes share the change in proportion to their durations.
-void layBlock(std::vector<NoteTimes>& t, const std::vector<NoteTimes>& base, int b, int e, double start, double end)
+// Consonant notes keep their own duration; only the vowel notes share the change.
+void layBlock(std::vector<NoteTimes>& t, const std::vector<NoteTimes>& base, const EditSet& ed, int b, int e,
+              double start, double end)
 {
+    auto fixed = [&](int i) { return i < (int)ed.notes.size() && ed.notes[(size_t)i].consonant; };
     double notes = 0, gaps = 0;
     for (int i = b; i <= e; ++i) {
-        notes += base[(size_t)i].outEnd - base[(size_t)i].outStart;
+        if (!fixed(i)) notes += base[(size_t)i].outEnd - base[(size_t)i].outStart;
         if (i > b) gaps += base[(size_t)i].outStart - base[(size_t)i - 1].outEnd;
     }
     const double k = notes > 0 ? (end - start - gaps) / notes : 1.0;
     double pos = start;
     for (int i = b; i <= e; ++i) {
         if (i > b) pos += base[(size_t)i].outStart - base[(size_t)i - 1].outEnd;
-        const double dur = (base[(size_t)i].outEnd - base[(size_t)i].outStart) * k;
+        const double scale = fixed(i) ? 1.0 : k;
+        const double dur = (base[(size_t)i].outEnd - base[(size_t)i].outStart) * scale;
         t[(size_t)i].outStart = pos;
         t[(size_t)i].outEnd = pos + dur;
         pos += dur;
@@ -99,12 +103,19 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     if (left >= 0 && sel.count(left)) while (L0 - 1 >= 0 && sel.count(L0 - 1)) --L0;
     if (left + 1 < n && sel.count(left + 1)) while (R1 + 1 < n && sel.count(R1 + 1)) ++R1;
 
+    // Notes that touch at the boundary move together. If they do not touch (a gap
+    // between them), only the note whose edge is dragged changes; the neighbour stays.
+    const bool touching = left >= 0 && left + 1 < n &&
+                          std::abs(base[(size_t)left + 1].outStart - base[(size_t)left].outEnd) < 0.005;
+
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         if (left >= 0) // left block: start fixed, end follows the boundary
-            layBlock(t, base, L0, left, base[(size_t)L0].outStart, base[(size_t)left].outEnd + d);
-        if (left + 1 < n) // right block: end fixed; its start (and the consonant before it) follows
-            layBlock(t, base, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
+            layBlock(t, base, e, L0, left, base[(size_t)L0].outStart, base[(size_t)left].outEnd + d);
+        if (left + 1 < n && touching) // right block: end fixed; its start (and the consonant before it) follows
+            layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
+        else if (left + 1 < n && left < 0) // dragging the start of the first note
+            layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
     const double applied = clampDt(dt, clipLen, make);
@@ -140,6 +151,19 @@ void setNoteDuration(EditSet& e, const Analysis& a, int i, double seconds)
     if (i < 0 || i >= (int)a.notes.size()) return;
     const auto t = noteTimes(a, e);
     moveBoundary(e, a, i, seconds - (t[(size_t)i].outEnd - t[(size_t)i].outStart), {});
+}
+
+void setConsonant(EditSet& e, const Analysis& a, int i, bool on)
+{
+    if (i < 0 || i >= (int)a.notes.size()) return;
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    if (on) {
+        // Bring the note back to its original length first, so the flag freezes it there.
+        const double inDur = a.notes[(size_t)i].endSec - a.notes[(size_t)i].startSec;
+        setNoteDuration(e, a, i, inDur);
+        e.notes[(size_t)i].stretch = 1;
+    }
+    e.notes[(size_t)i].consonant = on;
 }
 
 double transitionWidthMs(double s, double baseMs)

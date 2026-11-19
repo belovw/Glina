@@ -65,14 +65,15 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
     double lastIn = 0, lastOut = 0;
     for (size_t i = 0; i < a.notes.size(); ++i) {
         const NoteEdit& ed = i < e.notes.size() ? e.notes[i] : kNoEdit;
-        if (ed.timeOffsetSec != 0 || ed.stretch != 1) m.identity_ = false;
+        const double stretch = ed.consonant ? 1.0 : ed.stretch;
+        if (ed.timeOffsetSec != 0 || stretch != 1) m.identity_ = false;
         const double ai = std::max(lastIn + 1, a.notes[i].startSec * sr);
         const double bi = std::max(ai + 1, a.notes[i].endSec * sr);
         // A note keeps its own position unless moved; a stretched or moved
         // neighbour that would overlap pushes it later instead.
         double ao = ai + ed.timeOffsetSec * sr;
         ao = std::max(ao, lastOut + 0.1 * (ai - lastIn));
-        double bo = ao + (bi - ai) * std::max(0.05, ed.stretch);
+        double bo = ao + (bi - ai) * std::max(0.05, stretch);
         bo = std::max(bo, ao + 0.1 * (bi - ai));
         m.in_.push_back(ai); m.out_.push_back(ao);
         // Only the steady middle of a note is stretched: the attack and the
@@ -139,8 +140,10 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         const double drift = 1.0 + (ed.driftAmount - 1.0) * w;
         const double vib = 1.0 + (ed.vibratoAmount - 1.0) * w;
         // Scaling drift/vibrato around their own mean keeps the perceived centre where it was.
-        offset[k] = (float)ed.pitchOffset;
-        shape[k] = (float)((drift - 1.0) * (a.slowDev[k] - nt.meanSlow) + (vib - 1.0) * (a.fastDev[k] - nt.meanFast));
+        if (!ed.consonant) { // consonants are passed through with their own pitch
+            offset[k] = (float)ed.pitchOffset;
+            shape[k] = (float)((drift - 1.0) * (a.slowDev[k] - nt.meanSlow) + (vib - 1.0) * (a.fastDev[k] - nt.meanFast));
+        }
         formant[k] += (float)ed.formantShift;
         c.gainDb[k] += (float)ed.gainDb;
     }
@@ -193,6 +196,7 @@ Controls buildControls(const Analysis& a, const EditSet& e)
             const int k = r.start + q;
             if (k < 0 || k >= nf || a.frames[k].f0 <= 0 || std::isnan(r.delta[(size_t)q])) continue;
             const int ni = noteAt(k);
+            if (ni >= 0 && ni < (int)e.notes.size() && e.notes[(size_t)ni].consonant) continue;
             const double noteOff = (ni >= 0 && ni < (int)e.notes.size()) ? e.notes[(size_t)ni].pitchOffset : 0.0;
             const double drawn = noteOff + r.delta[(size_t)q];
             const double edgeDist = std::min(q, len - 1 - q) + 1.0;

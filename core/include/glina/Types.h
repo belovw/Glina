@@ -85,6 +85,7 @@ struct NoteEdit {
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier
     double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide
+    bool consonant = false;    // treated as a consonant: no pitch change, no stretch (moves only)
 };
 
 // A pencil-drawn stretch of pitch over analysis frames [start, start + delta.size()).

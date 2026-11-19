@@ -428,6 +428,44 @@ static void testPencil(const test::SynthResult& s, const Analysis& a, double sr)
     CHECK(e.draw.empty(), "erase left %zu runs", e.draw.size());
 }
 
+static void testConsonant(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[consonant] a consonant keeps its length and pitch; unlinked neighbours stay\n");
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    setNoteDuration(e, a, 3, (a.notes[3].endSec - a.notes[3].startSec) * 1.5);
+    setConsonant(e, a, 3, true);
+    // A stretched neighbour cannot change the consonant's length.
+    const auto before = noteTimes(a, e);
+    moveBoundary(e, a, 2, 0.03, {});
+    const auto t = noteTimes(a, e);
+    CHECK(std::abs((t[3].outEnd - t[3].outStart) - (a.notes[3].endSec - a.notes[3].startSec)) < 1e-4,
+          "consonant changed length");
+    CHECK(std::abs((before[3].outEnd - before[3].outStart) - (t[3].outEnd - t[3].outStart)) < 1e-4,
+          "consonant stretched by neighbour");
+    // Rendering: the consonant's pitch is not shifted.
+    EditSet c = e;
+    c.notes[3].pitchOffset = 3.0;
+    const std::vector<double> curve = editedPitchCurve(a, c);
+    double worst = 0;
+    for (int k = 0; k < (int)a.frames.size(); ++k)
+        if (a.noteOfFrame[(size_t)k] == 3 && a.frames[(size_t)k].f0 > 0)
+            worst = std::max(worst, std::abs(curve[(size_t)k] - a.frames[(size_t)k].midi));
+    CHECK(worst < 1e-6, "consonant pitch changed by %.3f st", worst);
+    // Gap rule: notes that do not touch keep the neighbour in place.
+    EditSet g;
+    g.notes.resize(a.notes.size());
+    const auto gt = noteTimes(a, g);
+    const double gap = gt[1].outStart - gt[0].outEnd;
+    if (gap > 0.01) {
+        const auto before2 = noteTimes(a, g);
+        moveBoundary(g, a, 0, 0.02, {});
+        const auto t2 = noteTimes(a, g);
+        CHECK(std::abs(t2[1].outStart - before2[1].outStart) < 1e-6, "unlinked neighbour moved");
+    }
+    std::printf("  checked gap %.1f ms\n", gap * 1000);
+}
+
 static void testDocumentV2(const Analysis& a)
 {
     std::printf("[document v2] smoothness + pencil round trip, v1 still loads\n");
@@ -468,6 +506,7 @@ int main()
         testAttackKept(a);
         testTransitions(a);
         testPencil(s, a, sr);
+        testConsonant(s, a, sr);
         testDocumentV2(a);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);

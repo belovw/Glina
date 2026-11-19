@@ -57,6 +57,9 @@ private:
     void resetNotes();
     void toggleDrift();
     void cycleVibrato();
+    void toggleConsonant();
+    void cycleGrid();
+    void showLocator();
     void splitAt(int note, double outSecond);
     void joinSelected();
     void selectAll();
@@ -94,7 +97,9 @@ private:
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
     bool pencil_ = false;
-    juce::TextButton pencilBtn_;
+    juce::TextButton pencilBtn_, gridBtn_;
+    int gridDiv_ = 4;          // grid lines per beat: 1, 2, 4, 8 or 16
+    double lastPh_ = -2;       // last playhead seen by the timer (-2 = none)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchEditor)
 };

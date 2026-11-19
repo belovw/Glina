@@ -34,6 +34,10 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
 // Set note `i`'s output duration (seconds) by moving its end boundary.
 void setNoteDuration(EditSet& e, const Analysis& a, int i, double seconds);
 
+// Mark note `i` as a consonant (or back to a vowel). A consonant keeps its
+// length and its own pitch: it is passed through unprocessed, only moved.
+void setConsonant(EditSet& e, const Analysis& a, int i, bool on);
+
 // Width (ms) of the pitch ramp into a note for a smoothness value 0..1.
 double transitionWidthMs(double smoothness, double baseMs);
 

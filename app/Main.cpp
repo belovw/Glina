@@ -452,6 +452,8 @@ private:
             for (size_t k = 0; k < wave.size(); ++k) wave[k] = (float)(c + 0.35 * std::sin(k * 0.12));
             drawPitch(d.edits, *a, f0, wave);
         }
+        // A consonant: passed through unprocessed (drawn grey).
+        if (a->notes.size() > 2) setConsonant(d.edits, *a, 2, true);
         d.tempoBpm = 96;
         d.beatsPerBar = 4;
         HarmonyVoice v1; v1.degrees = 2; v1.pan = -0.45; v1.seed = 7919;

@@ -58,6 +58,10 @@ double PluginClip::playheadSec() const
 {
     if (region_ == nullptr) return -1;
     const double song = proc_.playheadSec.load();
+    if (locatorSet_) {
+        if (!proc_.playing.load() && song == locatorHostSong_) return locatorSec_;
+        locatorSet_ = false; // playing, or the host moved its own cursor
+    }
     if (song < region_->getStartInPlaybackTime() || song > region_->getEndInPlaybackTime()) return -1;
     const double pd = region_->getDurationInPlaybackTime();
     const double ratio = pd > 0 ? region_->getDurationInAudioModificationTime() / pd : 1.0;
@@ -141,6 +145,9 @@ void PluginClip::setPlayheadSec(double t)
     const double ratio = md > 0 ? region_->getDurationInPlaybackTime() / md : 1.0;
     const double song = region_->getStartInPlaybackTime() + (t - region_->getStartInAudioModificationTime()) * ratio;
     pc->requestSetPlaybackPosition(std::max(0.0, song));
+    locatorSec_ = std::max(0.0, t);
+    locatorHostSong_ = proc_.playheadSec.load();
+    locatorSet_ = true;
 }
 
 // ============================================================================

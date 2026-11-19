@@ -48,6 +48,11 @@ private:
 
     GlinaDocumentController* dc_;
     GlinaProcessor& proc_;
+    // A locator set by a click: the host ignores that while stopped, so keep showing it
+    // until the host's own cursor moves.
+    mutable bool locatorSet_ = false;
+    mutable double locatorSec_ = -1;
+    mutable double locatorHostSong_ = 0;
     juce::ARAPlaybackRegion* region_ = nullptr;
     GlinaAudioModification* mod_ = nullptr;
     Document dummyDoc_;
