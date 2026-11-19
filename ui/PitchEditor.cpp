@@ -59,6 +59,7 @@ public:
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
+            "  Кружок над началом ноты — тянуть вбок: плавность перехода (Shift — тоньше, двойной клик — 50 %)\n"
             "  Клик по линейке — позиция воспроизведения;  правая кнопка — меню ноты\n"
             "  Колесо — прокрутка;  Ctrl+колесо — масштаб;  Shift+колесо — по высоте\n"
             "\n"
@@ -349,6 +350,15 @@ public:
             g.setColour(sel ? col::select : fill.withAlpha(0.9f));
             g.strokePath(p, juce::PathStrokeType(sel ? 1.6f : 1.f));
 
+            if (box.getWidth() > 8) { // transition handle
+                const auto h = smoothHandle(i);
+                g.setColour(sel ? col::select : col::dim.withAlpha(0.85f));
+                g.fillEllipse(h.x - 3.5f, h.y - 3.5f, 7.f, 7.f);
+                if (e.transition != 0.5) {
+                    g.setColour(col::accent);
+                    g.fillEllipse(h.x - 1.5f, h.y - 1.5f, 3.f, 3.f);
+                }
+            }
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
                 e.vibratoAmount != 1) {
                 g.setColour(col::text.withAlpha(0.8f));
@@ -437,10 +447,27 @@ public:
     }
 
     // ---- mouse ---------------------------------------------------------------------
+    // Transition handle: a dot above the start of each note. Dragging it sideways sets
+    // the smoothness of the pitch move into that note.
+    juce::Point<float> smoothHandle(int i) const
+    {
+        const auto b = noteRect(i);
+        return {b.getX(), b.getY() - 7.f};
+    }
+
+    int hitSmooth(juce::Point<float> p) const
+    {
+        if (ed.eff_ == nullptr || ed.doc() == nullptr) return -1;
+        for (int i = 0; i < (int)ed.eff_->notes.size(); ++i)
+            if (smoothHandle(i).getDistanceFrom(p) <= 6.5f) return i;
+        return -1;
+    }
+
     void mouseMove(const juce::MouseEvent& e) override
     {
         lastMouse = e.position;
         if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
+        if (hitSmooth(e.position) >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
         const int i = hitNote(e.position);
         if (i < 0) setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
         else setMouseCursor(zoneOf(i, e.position) == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
@@ -457,6 +484,23 @@ public:
         if (e.position.y < kRulerH && e.position.x > kKeysW) {
             gesture = G::Ruler;
             if (ed.host_->canControlTransport()) ed.host_->setPlayheadSec(std::max(0.0, secOf(e.position.x)));
+            return;
+        }
+        const int hs = hitSmooth(e.position);
+        if (hs >= 0 && !e.mods.isPopupMenu()) {
+            pressed = hs;
+            if (!ed.selection_.count(hs)) ed.selection_ = {hs};
+            before = *ed.doc();
+            start.clear();
+            for (int k : ed.selection_) start[k] = ed.doc()->edits.notes[(size_t)k];
+            if (e.getNumberOfClicks() >= 2) { // double click: back to the natural 50 %
+                ed.edit([&](Document& d) {
+                    for (int k : ed.selection_) d.edits.notes[(size_t)k].transition = 0.5;
+                }, false);
+                return;
+            }
+            gesture = G::Smooth;
+            ed.refresh();
             return;
         }
         if (ed.pencil_ && canvas().contains(e.position)) {
@@ -531,6 +575,7 @@ public:
             case G::Move:
             case G::StretchL:
             case G::StretchR:
+            case G::Smooth:
                 break;
         }
         const double dt = off.x / ed.pps_;
@@ -541,6 +586,11 @@ public:
                 delta = std::round(c0 + delta) - c0;
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
+        } else if (gesture == G::Smooth) {
+            // 0.7 % per pixel (Shift: 0.2 % for fine steps), relative to where the drag started.
+            const double delta = (e.mods.isShiftDown() ? 0.002 : 0.007) * off.x;
+            for (auto& [k, s0] : start)
+                d->edits.notes[(size_t)k].transition = juce::jlimit(0.0, 1.0, s0.transition + delta);
         } else if (gesture == G::Move) {
             // The note(s) travel with their consonant; neighbours absorb, the rest stays put.
             d->edits = before.edits;
@@ -701,7 +751,7 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, Pitch, Move, StretchL, StretchR, Marquee, Ruler, Draw, Erase };
+    enum class G { None, Pending, Pitch, Move, StretchL, StretchR, Smooth, Marquee, Ruler, Draw, Erase };
     DrawPt lastDraw;
     G gesture = G::None;
     int pressed = -1;
