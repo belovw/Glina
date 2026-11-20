@@ -17,7 +17,10 @@ public:
 
     void setRegion(juce::ARAPlaybackRegion* region);
     juce::ARAPlaybackRegion* region() const { return region_; }
+    GlinaAudioModification* modification() const { return mod_; }
     bool valid() const { return mod_ != nullptr; }
+    // Keeps the edited track after the host replaced its item or switched its take.
+    void followTrack();
 
     const Analysis* analysis() const override;
     Document& document() override { return mod_ != nullptr ? mod_->doc : dummyDoc_; }
@@ -48,9 +51,12 @@ private:
     juce::ARAMusicalContext* musicalContext() const;
     double toSong(double clipSec) const;
     double fromSong(double songSec) const;
-    // Every playback region in the ARA document that runs Glina (any track).
-    std::vector<juce::ARAPlaybackRegion*> glinaRegions() const;
-    static juce::String idOf(const juce::ARAPlaybackRegion* r) { return juce::String::toHexString((juce::pointer_sized_int)r); }
+    juce::ARADocument* arDoc() const;
+    // Every track (region sequence) in the ARA document that has Glina items.
+    std::vector<juce::ARARegionSequence*> glinaSequences() const;
+    juce::ARAPlaybackRegion* itemAt(const std::vector<juce::ARAPlaybackRegion*>& items) const;
+    bool ghostOfItem(juce::ARAPlaybackRegion* r, Ghost& out) const;
+    static juce::String idOf(const void* p) { return juce::String::toHexString((juce::pointer_sized_int)p); }
 
     GlinaDocumentController* dc_;
     GlinaProcessor& proc_;
@@ -61,6 +67,7 @@ private:
     mutable double locatorHostSong_ = 0;
     juce::ARAPlaybackRegion* region_ = nullptr;
     GlinaAudioModification* mod_ = nullptr;
+    juce::ARARegionSequence* seq_ = nullptr; // the edited track; kept while its item changes
     Document dummyDoc_;
     ui::DocumentHistory dummyHistory_;
 };

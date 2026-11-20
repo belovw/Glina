@@ -2,6 +2,9 @@
 
 #include <ARA_Library/Utilities/ARATimelineConversion.h>
 
+#include <algorithm>
+#include <limits>
+
 namespace glina::plugin {
 
 using ui::T;
@@ -20,12 +23,13 @@ PluginClip::~PluginClip()
 
 void PluginClip::setRegion(juce::ARAPlaybackRegion* region)
 {
-    if (region == region_) return;
+    auto* mod = region != nullptr ? dynamic_cast<GlinaAudioModification*>(region->getAudioModification()) : nullptr;
+    if (region == region_ && mod == mod_) return;
     if (region_ != nullptr) region_->removeListener(this);
     if (mod_ != nullptr) mod_->removeListener(this);
     region_ = region;
-    mod_ = region != nullptr ? static_cast<GlinaAudioModification*>(region->getAudioModification()) : nullptr;
-    if (region_ != nullptr) region_->addListener(this);
+    mod_ = mod;
+    if (region_ != nullptr) { region_->addListener(this); seq_ = region_->getRegionSequence(); }
     if (mod_ != nullptr) mod_->addListener(this);
     changes.sendChangeMessage();
 }
@@ -132,76 +136,117 @@ std::vector<ui::ClipHost::GridLine> PluginClip::hostGrid(double t0, double t1) c
     return out;
 }
 
-// ---- other Glina items in the project -------------------------------------------------
-std::vector<juce::ARAPlaybackRegion*> PluginClip::glinaRegions() const
+// ---- Glina tracks in the project ----------------------------------------------------------
+// A track is an ARA region sequence. Its Glina items are the playback regions in it, and each
+// item plays its active take (the audio modification the region points at).
+namespace {
+std::vector<juce::ARAPlaybackRegion*> glinaItemsOf(juce::ARARegionSequence* seq)
 {
-    std::vector<juce::ARAPlaybackRegion*> out;
-    if (dc_ == nullptr) return out;
-    auto* doc = dc_->getDocumentController()->getDocument<juce::ARADocument>();
+    std::vector<juce::ARAPlaybackRegion*> rs;
+    for (auto* r : seq->getPlaybackRegions<juce::ARAPlaybackRegion>())
+        if (dynamic_cast<GlinaAudioModification*>(r->getAudioModification()) != nullptr) rs.push_back(r);
+    std::stable_sort(rs.begin(), rs.end(), [](auto* a, auto* b) { return a->getStartInPlaybackTime() < b->getStartInPlaybackTime(); });
+    return rs;
+}
+} // namespace
+
+juce::ARADocument* PluginClip::arDoc() const
+{
+    if (dc_ == nullptr) return nullptr;
+    return dc_->getDocumentController()->getDocument<juce::ARADocument>();
+}
+
+std::vector<juce::ARARegionSequence*> PluginClip::glinaSequences() const
+{
+    std::vector<juce::ARARegionSequence*> out;
+    auto* doc = arDoc();
     if (doc == nullptr) return out;
-    std::vector<juce::ARARegionSequence*> seqs(doc->getRegionSequences().begin(), doc->getRegionSequences().end());
-    std::stable_sort(seqs.begin(), seqs.end(), [](auto* a, auto* b) { return a->getOrderIndex() < b->getOrderIndex(); });
-    for (auto* seq : seqs) {
-        std::vector<juce::ARAPlaybackRegion*> rs;
-        for (auto* r : seq->getPlaybackRegions<juce::ARAPlaybackRegion>())
-            if (dynamic_cast<GlinaAudioModification*>(r->getAudioModification()) != nullptr) rs.push_back(r);
-        std::stable_sort(rs.begin(), rs.end(), [](auto* a, auto* b) { return a->getStartInPlaybackTime() < b->getStartInPlaybackTime(); });
-        out.insert(out.end(), rs.begin(), rs.end());
-    }
+    out.assign(doc->getRegionSequences().begin(), doc->getRegionSequences().end());
+    out.erase(std::remove_if(out.begin(), out.end(), [](auto* s) { return glinaItemsOf(s).empty(); }), out.end());
+    std::stable_sort(out.begin(), out.end(), [](auto* a, auto* b) { return a->getOrderIndex() < b->getOrderIndex(); });
     return out;
+}
+
+juce::ARAPlaybackRegion* PluginClip::itemAt(const std::vector<juce::ARAPlaybackRegion*>& items) const
+{
+    if (items.empty()) return nullptr;
+    const double song = proc_.playheadSec.load();
+    for (auto* r : items)
+        if (song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime()) return r;
+    return items.front();
+}
+
+void PluginClip::followTrack()
+{
+    if (seq_ != nullptr) {
+        if (auto* doc = arDoc()) {
+            const auto& all = doc->getRegionSequences();
+            if (std::find(all.begin(), all.end(), seq_) == all.end()) seq_ = nullptr; // track is gone
+        }
+    }
+    if (seq_ == nullptr) return;
+    // Still the same take of the same item: nothing to do.
+    if (region_ != nullptr && mod_ != nullptr && mod_ == region_->getAudioModification()) return;
+    // The host replaced the item or switched its take: stay on this track, take its item.
+    setRegion(itemAt(glinaItemsOf(seq_)));
 }
 
 std::vector<ui::ClipHost::TrackRef> PluginClip::tracks() const
 {
     std::vector<TrackRef> out;
-    const auto regions = glinaRegions();
-    for (size_t i = 0; i < regions.size(); ++i) {
-        auto* r = regions[i];
-        auto* seq = r->getRegionSequence();
+    for (auto* seq : glinaSequences()) {
         TrackRef t;
-        t.id = idOf(r);
-        const char* sn = seq != nullptr ? (const char*)seq->getName() : nullptr;
+        t.id = idOf(seq);
+        const char* sn = (const char*)seq->getName();
         t.name = sn != nullptr && *sn != 0 ? juce::String::fromUTF8(sn)
-                                            : ui::T("Трек ") + juce::String(seq != nullptr ? seq->getOrderIndex() + 1 : 0);
-        // Several Glina items on one track: tell them apart.
-        int onTrack = 0, index = 0;
-        for (auto* o : regions)
-            if (o->getRegionSequence() == seq) { ++onTrack; if (o == r) index = onTrack; }
-        if (onTrack > 1) {
-            const char* rn = (const char*)r->getName();
-            t.name << " · " << (rn != nullptr && *rn != 0 ? juce::String::fromUTF8(rn) : ui::T("item ") + juce::String(index));
-        }
-        const ARA::ARAColor* c = seq != nullptr ? (const ARA::ARAColor*)seq->getColor() : nullptr;
-        if (const ARA::ARAColor* rc = (const ARA::ARAColor*)r->getColor()) c = rc;
-        if (c != nullptr) t.colour = juce::Colour::fromFloatRGBA(c->r, c->g, c->b, 1.f);
-        t.current = r == region_;
+                                            : ui::T("Трек ") + juce::String(seq->getOrderIndex() + 1);
+        if (const ARA::ARAColor* c = (const ARA::ARAColor*)seq->getColor())
+            t.colour = juce::Colour::fromFloatRGBA(c->r, c->g, c->b, 1.f);
+        t.current = seq == seq_;
         out.push_back(t);
     }
     return out;
 }
 
+bool PluginClip::ghostOfItem(juce::ARAPlaybackRegion* r, Ghost& out) const
+{
+    auto* m = dynamic_cast<GlinaAudioModification*>(r->getAudioModification());
+    if (m == nullptr || !m->getGlinaSource()->data->analysisReady || m->effective == nullptr) return false;
+    const double md = r->getDurationInAudioModificationTime();
+    const double ratio = md > 0 ? r->getDurationInPlaybackTime() / md : 1.0;
+    const double ms = r->getStartInAudioModificationTime(), ps = r->getStartInPlaybackTime();
+    // ghost clip time -> song time -> this clip's time
+    auto toLocal = [&](double t) { return fromSong(ps + (t - ms) * ratio); };
+    out = ui::buildGhost(*m->effective, m->doc.edits, toLocal, ms, r->getEndInAudioModificationTime());
+    return true;
+}
+
 bool PluginClip::ghost(const juce::String& id, Ghost& out) const
 {
     if (region_ == nullptr) return false;
-    for (auto* r : glinaRegions()) {
-        if (idOf(r) != id) continue;
-        auto* m = static_cast<GlinaAudioModification*>(r->getAudioModification());
-        if (!m->getGlinaSource()->data->analysisReady || m->effective == nullptr) return false;
-        const double md = r->getDurationInAudioModificationTime();
-        const double ratio = md > 0 ? r->getDurationInPlaybackTime() / md : 1.0;
-        const double ms = r->getStartInAudioModificationTime(), ps = r->getStartInPlaybackTime();
-        // ghost clip time -> song time -> this clip's time
-        auto toLocal = [&](double t) { return fromSong(ps + (t - ms) * ratio); };
-        out = ui::buildGhost(*m->effective, m->doc.edits, toLocal, ms, r->getEndInAudioModificationTime());
-        return true;
+    for (auto* seq : glinaSequences()) {
+        if (idOf(seq) != id) continue;
+        // All items of the track at once, one after another with a break between them.
+        out = Ghost{};
+        bool any = false;
+        for (auto* r : glinaItemsOf(seq)) {
+            Ghost g;
+            if (!ghostOfItem(r, g)) continue;
+            if (any && !out.curve.empty())
+                out.curve.emplace_back(out.curve.back().x, std::numeric_limits<double>::quiet_NaN());
+            out.notes.insert(out.notes.end(), g.notes.begin(), g.notes.end());
+            out.curve.insert(out.curve.end(), g.curve.begin(), g.curve.end());
+            any = true;
+        }
+        return any;
     }
     return false;
 }
 
 void PluginClip::setEditedTrack(const juce::String& id)
 {
-    for (auto* r : glinaRegions())
-        if (idOf(r) == id) { setRegion(r); return; }
+    for (auto* seq : glinaSequences())
+        if (idOf(seq) == id) { setRegion(itemAt(glinaItemsOf(seq))); return; }
 }
 
 void PluginClip::setPlaying(bool p)
@@ -272,9 +317,14 @@ void GlinaEditor::pickFallbackRegion()
 
 void GlinaEditor::timerCallback()
 {
-    if (clip_ != nullptr && !clip_->valid()) {
-        pickFallbackRegion();
-        if (clip_->valid()) { editor_.setHost(nullptr); editor_.setHost(clip_.get()); }
+    if (clip_ == nullptr) return;
+    const auto* before = clip_->region();
+    const auto* beforeMod = clip_->modification();
+    clip_->followTrack(); // item or take changed in the host: stay on the same track
+    if (!clip_->valid()) pickFallbackRegion();
+    if (clip_->region() != before || clip_->modification() != beforeMod) {
+        editor_.setHost(nullptr);
+        editor_.setHost(clip_.get());
     }
 }
 
