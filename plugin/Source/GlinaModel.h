@@ -64,7 +64,13 @@ struct RenderCache {
     uint64_t key = 0;                           // source samples + document it was made from
     int version = kRenderVersion;               // engine version that made it
     bool fromDisk = false;                      // loaded from <project>/Glina instead of rendered
+    // Diagnostics only (glina_diag.txt): the edit version this render was made for, hash of `left`.
+    uint64_t diagEditVersion = 0;
+    uint64_t diagAudioHash = 0;
 };
+
+// Diagnostics: append one line to Desktop/glina_diag.txt (message thread).
+void diagLog(const juce::String& line);
 
 class GlinaAudioModification final : public juce::ARAAudioModification {
 public:

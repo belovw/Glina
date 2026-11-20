@@ -23,6 +23,52 @@ std::vector<std::pair<GlinaDocumentController*, reaper::HostLink*>>& hostLinks()
 } // namespace
 
 // ============================================================================
+// Diagnostics (glina_diag.txt on the desktop).
+void diagLog(const juce::String& line)
+{
+    static juce::CriticalSection lock;
+    static const juce::File file =
+        juce::File::getSpecialLocation(juce::File::userDesktopDirectory).getChildFile("glina_diag.txt");
+    const auto t = juce::Time::getCurrentTime();
+    const juce::ScopedLock sl(lock);
+    file.appendText(t.formatted("%Y-%m-%d %H:%M:%S") + "." + juce::String(t.getMilliseconds()).paddedLeft('0', 3) + "  "
+                        + line + "\n",
+                    false, false, "\r\n");
+}
+
+namespace {
+juce::String hexOf(const void* p) { return juce::String::toHexString((juce::pointer_sized_int)p); }
+
+// One line about a finished render: what the player will get from this cache.
+juce::String describeRender(const RenderCache& c, const Document& doc, double mapRate)
+{
+    int timeEdits = 0;
+    for (const auto& n : doc.edits.notes)
+        if (n.timeOffsetSec != 0 || (!n.consonant && n.stretch != 1)) ++timeEdits;
+    const auto& in = c.map.inPoints();
+    const auto& out = c.map.outPoints();
+    auto sec = [mapRate](double samples) { return juce::String(mapRate > 0 ? samples / mapRate : 0.0, 4); };
+    juce::String s;
+    s << "key=" << renderstore::keyText(c.key) << " fromDisk=" << (int)c.fromDisk << " sampleRate=" << c.sampleRate
+      << " cacheLen=" << (int)c.left.size() << " (" << juce::String(c.sampleRate > 0 ? c.left.size() / c.sampleRate : 0.0, 3)
+      << " s) audioHash=" << renderstore::keyText(c.diagAudioHash) << " timeEditsInDoc=" << timeEdits
+      << " map: identity=" << (int)c.map.isIdentity() << " points=" << (int)in.size();
+    for (size_t i = 0; i < std::min<size_t>(2, in.size()); ++i)
+        s << " p" << (int)i << "=(in " << sec(in[i]) << ", out " << sec(out[i]) << ")";
+    // The first point the edit actually moved (out != in by more than half a sample).
+    size_t moved = in.size();
+    for (size_t i = 0; i < in.size(); ++i)
+        if (std::abs(out[i] - in[i]) > 0.5) { moved = i; break; }
+    if (moved < in.size())
+        s << " firstMoved=p" << (int)moved << "(in " << sec(in[moved]) << ", out " << sec(out[moved]) << ", shift "
+          << juce::String(mapRate > 0 ? (out[moved] - in[moved]) * 1000.0 / mapRate : 0.0, 1) << " ms)";
+    else
+        s << " firstMoved=none";
+    return s;
+}
+} // namespace
+
+// ============================================================================
 GlinaAudioModification::GlinaAudioModification(juce::ARAAudioSource* source, ARA::ARAAudioModificationHostRef ref,
                                                const GlinaAudioModification* clone)
     : juce::ARAAudioModification(source, ref, clone)
@@ -411,6 +457,8 @@ void GlinaDocumentController::startRender(GlinaAudioModification* mod)
     const bool firstAfterLoad = mod->restoredFromArchive;
     mod->restoredFromArchive = false;
     const juce::String name = mod->sourceName();
+    diagLog("renderStart: mod=" + hexOf(mod) + " name=\"" + name + "\" editVersion=" + juce::String(version)
+            + " key=" + renderstore::keyText(key) + " searchFolders=" + juce::String((int)folders.size()));
     pool.addJob([this, mod, data, doc, eff, version, alive, key, folders, firstAfterLoad, name] {
         auto cache = std::make_shared<RenderCache>();
         renderstore::Loaded saved;
@@ -440,14 +488,24 @@ void GlinaDocumentController::startRender(GlinaAudioModification* mod)
         }
         cache->key = key;
         cache->map = TimeMap::build(*eff, doc.edits);
+        cache->diagEditVersion = version;
+        cache->diagAudioHash = renderstore::hashSamples(cache->left.data(), cache->left.size(), cache->sampleRate);
+        const juce::String diag = describeRender(*cache, doc, eff->sampleRate);
 
-        juce::MessageManager::callAsync([this, mod, cache, version, alive] {
+        juce::MessageManager::callAsync([this, mod, cache, version, alive, name, diag] {
             if (!*alive) return;
             mod->renderRunning = false;
             mod->setCache(cache);
             mod->renderedVersion = version;
             mod->renderFromDisk = cache->fromDisk;
             mod->renderEngineVersion = cache->version;
+            {
+                juce::String regions;
+                for (auto* region : mod->getPlaybackRegions()) regions << (regions.isEmpty() ? "" : ",") << hexOf(region);
+                diagLog("renderDone: mod=" + hexOf(mod) + " name=\"" + name + "\" cache=" + hexOf(cache.get())
+                        + " editVersion=" + juce::String(mod->editVersion) + " renderedVersion=" + juce::String(mod->renderedVersion)
+                        + " " + diag + " regions=[" + regions + "]");
+            }
             mod->notifyContentChanged(juce::ARAContentUpdateScopes::samplesAreAffected(), true);
             for (auto* region : mod->getPlaybackRegions())
                 region->notifyContentChanged(juce::ARAContentUpdateScopes::samplesAreAffected(), true);

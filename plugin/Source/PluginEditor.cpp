@@ -22,12 +22,7 @@ PluginClip::~PluginClip()
     if (dc_ != nullptr) dc_->modelChanged.removeChangeListener(this);
 }
 
-void PluginClip::debugLog(const juce::String& line)
-{
-    static const juce::File file = juce::File::getSpecialLocation(juce::File::userDesktopDirectory)
-                                       .getChildFile("glina_diag.txt");
-    file.appendText(juce::Time::getCurrentTime().toString(true, true, true, true) + "  " + line + "\n");
-}
+void PluginClip::debugLog(const juce::String& line) { diagLog(line); }
 
 void PluginClip::setRegion(juce::ARAPlaybackRegion* region)
 {

@@ -21,6 +21,9 @@ public:
     double inToOut(double t) const;
     double outToIn(double t) const;
     bool isIdentity() const { return identity_; }
+    // Diagnostics: the control points (input / output time, in samples).
+    const std::vector<double>& inPoints() const { return in_; }
+    const std::vector<double>& outPoints() const { return out_; }
 
 private:
     std::vector<double> in_, out_;
