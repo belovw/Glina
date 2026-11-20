@@ -77,6 +77,33 @@ void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
                juce::Justification::centred, false);
 }
 
+// Up arrow for the ghost shift. When on, the head is filled.
+void shiftUp(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool on)
+{
+    const float cx = a.getCentreX(), top = a.getY() + a.getHeight() * 0.10f, bot = a.getBottom();
+    const float hw = a.getWidth() * 0.34f, hh = a.getHeight() * 0.40f;
+    juce::Path stem;
+    stem.startNewSubPath(cx, bot);
+    stem.lineTo(cx, top + hh * 0.5f);
+    juce::Path head;
+    head.startNewSubPath(cx - hw, top + hh);
+    head.lineTo(cx, top);
+    head.lineTo(cx + hw, top + hh);
+    g.setColour(c);
+    const juce::PathStrokeType st(1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+    g.strokePath(stem, st);
+    if (on) { head.closeSubPath(); g.fillPath(head); }
+    else g.strokePath(head, st);
+}
+
+// Letter T for the tracks panel.
+void letterT(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
+{
+    g.setColour(c);
+    g.setFont(juce::FontOptions(a.getHeight() * 1.0f));
+    g.drawText("T", a, juce::Justification::centred, false);
+}
+
 // A stack of `n` rectangles. Off: diagonal, the front one bright and the others shaded.
 // On: standing one above another, like tracks in a list.
 void stack(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, int n, bool on)
@@ -292,26 +319,29 @@ public:
             const int labelEvery = std::max(1, (int)std::ceil(44.0 / std::max(1.0, barPx)));
             // Eighths / sixteenths: extra lines between the beats (beat = -1 marks them).
             // Grid = note value as a fraction of a whole note: 1/4 = beats, 1/8 and 1/16 add
-            // lines between beats. Triplets split each beat in 3 (6 for 1/16).
+            // lines between beats. Triplets scale that step by 2/3: 1/4 = 3 per two beats,
+            // 1/8 = 3 per beat, 1/16 = 6 per beat.
             const int denom = ed.gridDenom_;
-            const int perBeat = ed.triplets_ ? (denom >= 16 ? 6 : 3) : (denom >= 8 ? denom / 4 : 1);
-            std::vector<ClipHost::GridLine> all;
-            for (size_t k = 0; k < lines.size(); ++k) {
-                const auto& L = lines[k];
-                all.push_back(L);
-                if (k + 1 >= lines.size() || perBeat <= 1) continue;
-                for (int j = 1; j < perBeat; ++j) {
-                    ClipHost::GridLine s = L;
-                    s.sec = L.sec + (lines[k + 1].sec - L.sec) * j / perBeat;
-                    s.beat = -1;
-                    all.push_back(s);
+            const double stepBeats = (4.0 / denom) * (ed.triplets_ ? 2.0 / 3.0 : 1.0);
+            std::vector<ClipHost::GridLine> all(lines.begin(), lines.end());
+            if (lines.size() >= 2 && stepBeats < 1.0 - 1e-9) {
+                const int nBeats = (int)lines.size() - 1;
+                for (int i = 1; i * stepBeats < nBeats; ++i) {
+                    const double p = i * stepBeats;
+                    const int k = (int)std::floor(p + 1e-9);
+                    const double f = p - k;
+                    if (f < 1e-6 || 1.0 - f < 1e-6) continue; // lands on a beat line
+                    ClipHost::GridLine sub = lines[(size_t)k];
+                    sub.sec = lines[(size_t)k].sec + (lines[(size_t)k + 1].sec - lines[(size_t)k].sec) * f;
+                    sub.beat = -1;
+                    all.push_back(sub);
                 }
             }
             for (const auto& l : all) {
                 const float x = xOf(l.sec);
                 if (x < c.getX() || x > c.getRight()) continue;
                 if (l.beat < 0) { // subdivision
-                    if (beatPx / perBeat < 6) continue;
+                    if (beatPx * stepBeats < 6) continue;
                     g.setColour(col::grid.withAlpha(0.55f));
                     g.drawVerticalLine((int)x, c.getY(), c.getBottom());
                     continue;
@@ -1583,10 +1613,10 @@ PitchEditor::PitchEditor()
     });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
     iconBtn(tracksBtn_, "Другие треки с Glina: показать поверх или редактировать (T)",
-            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::stack(g, a, c, 3, false); },
+            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::letterT(g, a, c); },
             [this] { toggleTracks(); });
     iconBtn(shiftBtn_, "Призраки визуально подняты на 3 полутона каждый относительно предыдущего",
-            [this](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::stack(g, a, c, 4, ghostShift_); },
+            [this](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::shiftUp(g, a, c, ghostShift_); },
             [this] {
                 ghostShift_ = !ghostShift_;
                 roll_->repaint();
@@ -2214,7 +2244,7 @@ void PitchEditor::resized()
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
-        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 34, 4, 34},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
+        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
     auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
