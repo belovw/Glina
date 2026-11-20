@@ -248,13 +248,13 @@ public:
                 if (x < c.getX() || x > c.getRight()) continue;
                 if (l.beat < 0) { // subdivision
                     if (beatPx / perBeat < 6) continue;
-                    g.setColour(col::grid.brighter(0.2f).withAlpha(0.6f));
+                    g.setColour(col::grid.withAlpha(0.55f));
                     g.drawVerticalLine((int)x, c.getY(), c.getBottom());
                     continue;
                 }
                 const bool bar = l.beat == 1;
                 if (!bar && beatPx < 7) continue;
-                g.setColour(bar ? col::grid.brighter(0.7f) : col::grid.brighter(0.35f));
+                g.setColour(bar ? col::grid.brighter(0.25f) : col::grid.withAlpha(0.55f));
                 g.drawVerticalLine((int)x, c.getY(), c.getBottom());
                 g.setColour(col::dim);
                 g.drawVerticalLine((int)x, bar ? kRulerH - 8.f : kRulerH - 4.f, kRulerH);
@@ -1021,7 +1021,7 @@ public:
     {
         g.fillAll(col::panel);
         g.setColour(col::panelLine);
-        g.drawVerticalLine(0, 0.f, (float)getHeight());
+        g.drawHorizontalLine(0, 0.f, (float)getWidth());
     }
 
     void resized() override
@@ -1295,6 +1295,18 @@ public:
         juce::Rectangle<int> swatch;
     };
 
+    struct Body final : public juce::Component {
+        const std::vector<std::unique_ptr<Row>>* rows = nullptr;
+        void paint(juce::Graphics& g) override
+        {
+            if (rows == nullptr) return;
+            for (const auto& r : *rows) {
+                g.setColour(r->colour);
+                g.fillRoundedRectangle(r->swatch.toFloat(), 3.f);
+            }
+        }
+    };
+
     explicit Tracks(PitchEditor& o) : ed(o)
     {
         title.setText(T("Треки"), juce::dontSendNotification);
@@ -1302,13 +1314,19 @@ public:
         addAndMakeVisible(title);
         hint.setColour(juce::Label::textColourId, col::dim);
         addAndMakeVisible(hint);
+        view.setScrollBarsShown(true, false);
+        view.setViewedComponent(&body, false);
+        addAndMakeVisible(view);
         ref.setButtonText(T("Открыть референс…"));
         quiet(ref);
         ref.onClick = [this] { if (ed.host_ != nullptr) ed.host_->openReference(); };
         addChildComponent(ref);
+        body.rows = &rows;
     }
 
-    int preferredHeight() const { return kHeader + kRow * (int)rows.size() + 6; }
+    // Up to kShowRows rows show at once; a longer list scrolls.
+    static constexpr int kShowRows = 4;
+    int preferredHeight() const { return kHeader + kRow * std::min(kShowRows, (int)rows.size()) + 6; }
 
     // Rebuild the rows when the set of tracks changed (never from a row's own click).
     void update()
@@ -1343,9 +1361,9 @@ public:
             r.edit.onClick = [this, id] { ed.switchTrack(id); };
             quiet(r.show);
             quiet(r.edit);
-            addAndMakeVisible(r.name);
-            addAndMakeVisible(r.show);
-            addChildComponent(r.edit);
+            body.addAndMakeVisible(r.name);
+            body.addAndMakeVisible(r.show);
+            body.addChildComponent(r.edit);
             r.edit.setVisible(t.editable);
             rows.push_back(std::move(row));
         }
@@ -1384,11 +1402,14 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced(10, 0);
-        auto head = r.removeFromTop(kHeader);
+        auto head = getLocalBounds().reduced(10, 0).removeFromTop(kHeader);
         title.setBounds(head.removeFromLeft(70));
         if (ref.isVisible()) ref.setBounds(head.removeFromRight(160).reduced(0, 4));
         hint.setBounds(head);
+        const auto area = getLocalBounds().withTrimmedTop(kHeader);
+        view.setBounds(area);
+        body.setSize(std::max(0, area.getWidth() - view.getScrollBarThickness()), kRow * (int)rows.size() + 6);
+        auto r = body.getLocalBounds().reduced(10, 0);
         for (auto& row : rows) {
             auto rr = r.removeFromTop(kRow);
             row->swatch = rr.removeFromLeft(14).withSizeKeepingCentre(12, 12);
@@ -1398,12 +1419,15 @@ public:
             row->show.setBounds(rr.removeFromRight(100));
             row->name.setBounds(rr);
         }
+        body.repaint();
     }
 
 private:
     PitchEditor& ed;
     juce::Label title, hint;
     juce::TextButton ref;
+    juce::Viewport view;
+    Body body;
     std::vector<std::unique_ptr<Row>> rows;
     juce::String sig;
 };
