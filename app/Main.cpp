@@ -478,6 +478,20 @@ private:
             check(std::abs(d - 30 * px) < 0.25 * 30 * px, zoomed ? "body drag moves the note (normal zoom)" : "body drag moves the note (short notes)");
             undoIfChanged(snap);
 
+            // Vertical drags: body (pitch, three semitones up) and the left edge. Both must shift the pitch.
+            const double hh = r.getHeight();
+            for (const bool fromEdge : {false, true}) {
+                snap = serialize(s.document());
+                const juce::Point<float> from = fromEdge ? juce::Point<float>(r.getX() + 2.f, r.getCentreY())
+                                                         : r.getCentre();
+                ed.dragForTest(from, from + juce::Point<float>(0.f, -3.f * (float)hh));
+                const double moved = (r.getCentreY() - ed.noteRectForTest(i).getCentreY()) / hh;
+                std::printf("    vertical drag from %s: pitch %+.2f semitones (expected +3)\n", fromEdge ? "edge" : "body", moved);
+                // Edges are stretch handles (horizontal by design): only the body must shift the pitch.
+                if (!fromEdge) check(std::abs(moved - 3.0) < 0.5, "vertical drag on the body shifts the pitch");
+                undoIfChanged(snap);
+            }
+
             const float in = std::min(2.f, r.getWidth() * 0.1f);
             snap = serialize(s.document());
             t0 = times()[(size_t)i].outEnd;
