@@ -12,6 +12,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "../../ui/ClipHost.h"
+#include "ReaperHost.h"
 #include "glina/Analysis.h"
 #include "glina/Document.h"
 #include "glina/Renderer.h"
@@ -30,6 +31,7 @@ struct SourceData {
     std::atomic<bool> samplesReady { false };   // `mono` valid (dry playback possible)
     std::atomic<bool> analysisReady { false };  // `analysis` valid
     double sampleRate = 0;
+    uint64_t contentHash = 0;                   // of `mono`; set before samplesReady
     std::vector<float> mono;                    // immutable once samplesReady
     Analysis analysis;                          // immutable once analysisReady (automatic note layout)
 };
@@ -59,6 +61,9 @@ struct RenderCache {
     double sampleRate = 0;
     std::vector<float> left, right;             // edited lead + harmonies
     TimeMap map;                                // for A/B: output time -> original time
+    uint64_t key = 0;                           // source samples + document it was made from
+    int version = kRenderVersion;               // engine version that made it
+    bool fromDisk = false;                      // loaded from <project>/Glina instead of rendered
 };
 
 class GlinaAudioModification final : public juce::ARAAudioModification {
@@ -76,7 +81,13 @@ public:
     uint64_t editVersion = 0;      // bumped on every change
     uint64_t renderedVersion = 0;  // version currently in the cache
     bool renderRunning = false;
+    bool forceRender = false;      // next render: ignore renders saved in the project folder
+    bool restoredFromArchive = false; // next render is the first after loading the project
+    bool renderFromDisk = false;   // the cache came from the project folder...
+    int renderEngineVersion = kRenderVersion; // ...made by this engine version
     void setCache(std::shared_ptr<const RenderCache> c);
+    std::shared_ptr<const RenderCache> currentCache() const; // message thread
+    juce::String sourceName() const;
 
     // ---- audio thread (non-blocking) -------------------------------------------
     bool tryGetCache(std::shared_ptr<const RenderCache>& out) const;
@@ -97,6 +108,15 @@ public:
 
     // Called by the editor after it changed `mod->doc` (message thread).
     void documentChanged(GlinaAudioModification* mod, bool layoutChanged);
+
+    // ---- renders kept in <project folder>/Glina (REAPER only) ------------------------
+    // Plug-in instances bound to a document controller register their REAPER link, so the
+    // controller knows which project it belongs to. Any thread; links unregister themselves.
+    static void registerHostLink(GlinaDocumentController* dc, reaper::HostLink* link);
+    static void unregisterHostLink(reaper::HostLink* link);
+    bool canSaveRenders() const { return reaper::available(); }
+    // Render the clip again with the current engine (drops a render from an older version).
+    void rerender(GlinaAudioModification* mod);
 
     // Broadcast (async) when analysis or a render finishes, so editors repaint.
     juce::ChangeBroadcaster modelChanged;
@@ -121,6 +141,17 @@ private:
     void analysisFinished(GlinaAudioSource* src);
     void rebuildEffective(GlinaAudioModification* mod);
     void startRender(GlinaAudioModification* mod);
+
+    // REAPER project of this document (via a bound plug-in instance); may be null.
+    void* reaperProject() const;
+    // Folders that may hold saved renders: this project's first, then every open project's.
+    std::vector<juce::File> renderFolders() const;
+    // After a full store: wait until REAPER has really written the project file
+    // (stores also happen without a save), then write the renders next to it.
+    void watchSave(const std::vector<const GlinaAudioModification*>& mods);
+    struct PendingSave;
+    class SaveWatcher;
+    std::shared_ptr<SaveWatcher> saveWatcher; // shared_ptr: SaveWatcher is complete only in the .cpp
 
     juce::ThreadPool pool { juce::ThreadPoolOptions{}.withNumberOfThreads(2).withThreadName("Glina worker") };
     juce::ReadWriteLock processLock;

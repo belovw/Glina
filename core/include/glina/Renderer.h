@@ -6,6 +6,12 @@
 
 namespace glina {
 
+// Version of the sound the engine produces for a given document. Bump it whenever
+// analysis, synthesis, harmonies or mixing change the rendered audio of an existing
+// project: the plug-in keeps renders next to the DAW project and marks those made by
+// another version (they stay as they are until the user re-renders or edits the clip).
+inline constexpr int kRenderVersion = 1;
+
 // Monotonic piecewise-linear mapping between input and output sample time.
 // Built from note timing edits; identity when nothing was moved/stretched.
 class TimeMap {

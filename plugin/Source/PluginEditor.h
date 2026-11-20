@@ -39,6 +39,12 @@ public:
     std::vector<TrackRef> tracks() const override;
     bool ghost(const juce::String& id, Ghost& out) const override;
     void setEditedTrack(const juce::String& id) override;
+    bool hasRenderOptions() const override;
+    bool savesRender() const override;
+    void setSavesRender(bool on) override;
+    juce::String renderOrigin() const override;
+    bool canRerender() const override;
+    void rerender() override;
 
 private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override { changes.sendChangeMessage(); }

@@ -4,9 +4,12 @@
 
 namespace glina::plugin {
 
-class GlinaProcessor final : public juce::AudioProcessor, public juce::AudioProcessorARAExtension {
+class GlinaProcessor final : public juce::AudioProcessor,
+                             public juce::AudioProcessorARAExtension,
+                             public juce::VST3ClientExtensions {
 public:
     GlinaProcessor();
+    ~GlinaProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -33,7 +36,15 @@ public:
     std::atomic<double> playheadSec { 0 };
     std::atomic<bool> playing { false };
 
+    // VST3: REAPER hands over its host extension here (which project this FX is in).
+    juce::VST3ClientExtensions* getVST3ClientExtensions() override { return this; }
+    void setIHostApplication(Steinberg::FUnknown* hostContext) override { hostLink_.attach(hostContext); }
+
+protected:
+    void didBindToARA() noexcept override;
+
 private:
+    reaper::HostLink hostLink_;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GlinaProcessor)
 };
 

@@ -110,6 +110,15 @@ public:
     virtual bool canOpenReference() const { return false; }
     virtual void openReference() {}
 
+    // ---- render kept next to the DAW project (plug-in in REAPER) ----------------------
+    virtual bool hasRenderOptions() const { return false; }
+    virtual bool savesRender() const { return false; }      // global option, default on
+    virtual void setSavesRender(bool) {}
+    // Where the audio being played came from, e.g. "рендер с диска"; empty = rendered now.
+    virtual juce::String renderOrigin() const { return {}; }
+    virtual bool canRerender() const { return false; }      // the render is from an older engine
+    virtual void rerender() {}
+
     // Fired (asynchronously) when analysis/render finished or the clip changed.
     juce::ChangeBroadcaster changes;
 };
