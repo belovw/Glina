@@ -677,6 +677,9 @@ public:
         start[i] = ed.doc()->edits.notes[(size_t)i];
         const Zone z = zoneOf(i, e.position);
         gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR : G::Pending;
+        if (ed.host_ != nullptr)
+            ed.host_->debugLog("noteDown: note=" + juce::String(i) + " zone=" + juce::String((int)z) + " gesture=" + juce::String((int)gesture)
+                               + " eff=" + juce::String((int)(ed.eff_ != nullptr)) + " pos=" + juce::String(e.position.x, 1) + "," + juce::String(e.position.y, 1));
         ed.refresh();
     }
 

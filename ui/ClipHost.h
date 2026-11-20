@@ -119,6 +119,9 @@ public:
     virtual bool canRerender() const { return false; }      // the render is from an older engine
     virtual void rerender() {}
 
+    // Diagnostics: a line for the host's log file (default: nothing).
+    virtual void debugLog(const juce::String&) {}
+
     // Fired (asynchronously) when analysis/render finished or the clip changed.
     juce::ChangeBroadcaster changes;
 };

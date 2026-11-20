@@ -22,6 +22,13 @@ PluginClip::~PluginClip()
     if (dc_ != nullptr) dc_->modelChanged.removeChangeListener(this);
 }
 
+void PluginClip::debugLog(const juce::String& line)
+{
+    static const juce::File file = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                                       .getChildFile("glina_diag.txt");
+    file.appendText(juce::Time::getCurrentTime().toString(true, true, true, true) + "  " + line + "\n");
+}
+
 void PluginClip::setRegion(juce::ARAPlaybackRegion* region)
 {
     auto* mod = region != nullptr ? dynamic_cast<GlinaAudioModification*>(region->getAudioModification()) : nullptr;
@@ -32,6 +39,13 @@ void PluginClip::setRegion(juce::ARAPlaybackRegion* region)
     mod_ = mod;
     if (region_ != nullptr) { region_->addListener(this); seq_ = region_->getRegionSequence(); }
     if (mod_ != nullptr) mod_->addListener(this);
+    if (region_ != nullptr)
+        debugLog("region: ptr=" + idOf(region_) + " mod=" + idOf(mod_) + " playStart=" + juce::String(region_->getStartInPlaybackTime(), 4)
+                 + " playDur=" + juce::String(region_->getDurationInPlaybackTime(), 4) + " modStart=" + juce::String(region_->getStartInAudioModificationTime(), 4)
+                 + " modDur=" + juce::String(region_->getDurationInAudioModificationTime(), 4) + " analysis=" + juce::String((int)(mod_ != nullptr && mod_->effective != nullptr))
+                 + " cache=" + juce::String((int)(mod_ != nullptr && mod_->renderedVersion == mod_->editVersion)));
+    else
+        debugLog("region: none (mod null)");
     changes.sendChangeMessage();
 }
 
@@ -43,6 +57,9 @@ const Analysis* PluginClip::analysis() const
 
 void PluginClip::documentChanged(bool layoutChanged)
 {
+    if (mod_ != nullptr)
+        debugLog("docChanged: layout=" + juce::String((int)layoutChanged) + " notes=" + juce::String((int)(mod_->doc.edits.notes.size()))
+                 + " mod=" + idOf(mod_) + " editVersion=" + juce::String((int)mod_->editVersion));
     if (mod_ != nullptr && dc_ != nullptr) dc_->documentChanged(mod_, layoutChanged);
 }
 

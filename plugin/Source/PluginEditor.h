@@ -26,6 +26,7 @@ public:
     Document& document() override { return mod_ != nullptr ? mod_->doc : dummyDoc_; }
     ui::DocumentHistory& history() override { return mod_ != nullptr ? mod_->history : dummyHistory_; }
     void documentChanged(bool layoutChanged) override;
+    void debugLog(const juce::String& line) override;
     juce::String busyText() const override;
     bool isRendering() const override;
     double playheadSec() const override;
