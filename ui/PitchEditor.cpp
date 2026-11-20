@@ -62,6 +62,21 @@ void curvedArrow(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bo
     g.strokePath(head, st);
 }
 
+// Triplet mark: a bracket over the top with a "3" in the gap.
+void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
+{
+    const float top = a.getY() + a.getHeight() * 0.22f, tick = a.getY() + a.getHeight() * 0.62f;
+    const float l = a.getX(), r = a.getRight(), cx = a.getCentreX(), half = a.getWidth() * 0.20f;
+    juce::Path p;
+    p.startNewSubPath(l, tick); p.lineTo(l, top); p.lineTo(cx - half, top);
+    p.startNewSubPath(cx + half, top); p.lineTo(r, top); p.lineTo(r, tick);
+    g.setColour(c);
+    g.strokePath(p, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setFont(juce::FontOptions(a.getHeight() * 0.78f));
+    g.drawText("3", juce::Rectangle<float>(cx - half, top - a.getHeight() * 0.36f, half * 2, a.getHeight() * 0.72f),
+               juce::Justification::centred, false);
+}
+
 // A stack of `n` rectangles. Off: diagonal, the front one bright and the others shaded.
 // On: standing one above another, like tracks in a list.
 void stack(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, int n, bool on)
@@ -277,16 +292,14 @@ public:
             const int labelEvery = std::max(1, (int)std::ceil(44.0 / std::max(1.0, barPx)));
             // Eighths / sixteenths: extra lines between the beats (beat = -1 marks them).
             // Grid = note value as a fraction of a whole note: 1/4 = beats, 1/8 and 1/16 add
-            // lines between beats, 1/2 keeps every second beat, 1/1 keeps bars only.
+            // lines between beats. Triplets split each beat in 3 (6 for 1/16).
             const int denom = ed.gridDenom_;
-            const int perBeat = denom >= 8 ? denom / 4 : 1;
+            const int perBeat = ed.triplets_ ? (denom >= 16 ? 6 : 3) : (denom >= 8 ? denom / 4 : 1);
             std::vector<ClipHost::GridLine> all;
             for (size_t k = 0; k < lines.size(); ++k) {
                 const auto& L = lines[k];
-                const bool keep = denom == 4 || denom >= 8 || (denom == 2 && (L.beat - 1) % 2 == 0) ||
-                                  (denom == 1 && L.beat == 1);
-                if (keep) all.push_back(L);
-                if (k + 1 >= lines.size() || perBeat <= 1 || !keep) continue;
+                all.push_back(L);
+                if (k + 1 >= lines.size() || perBeat <= 1) continue;
                 for (int j = 1; j < perBeat; ++j) {
                     ClipHost::GridLine s = L;
                     s.sec = L.sec + (lines[k + 1].sec - L.sec) * j / perBeat;
@@ -1586,6 +1599,13 @@ PitchEditor::PitchEditor()
     });
     button(fitBtn_, "Всё", "Показать весь клип (0)", [this] { fitView(); });
     button(gridBtn_, "1/4", "Линии сетки: 1/4 → 1/8 → 1/16 (G)", [this] { cycleGrid(); });
+    iconBtn(triBtn_, "Триольная сетка: доли делятся на три (для 1/8 и 1/16 — на шесть)",
+            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::triplet(g, a, c); },
+            [this] {
+                triplets_ = !triplets_;
+                roll_->repaint();
+                updateToolbar();
+            });
     button(helpBtn_, "?", "Справка по мыши и клавишам (F1)", [this] { showHelp(!help_->isVisible()); });
     button(renderBtn_, "Рендер", "Рендер в папке проекта: сохранять, перерендерить", [this] { showRenderMenu(); });
     renderBtn_.setVisible(false); // shown when the host keeps renders (plug-in in REAPER)
@@ -1983,9 +2003,9 @@ void PitchEditor::toggleConsonant()
 
 void PitchEditor::cycleGrid()
 {
-    static const int order[] = {4, 8, 16, 2, 1};
+    static const int order[] = {4, 8, 16};
     int k = 0;
-    for (int i = 0; i < 5; ++i) if (order[i] == gridDenom_) k = (i + 1) % 5;
+    for (int i = 0; i < 3; ++i) if (order[i] == gridDenom_) k = (i + 1) % 3;
     gridDenom_ = order[k];
     gridBtn_.setButtonText(T("1/") + juce::String(gridDenom_));
     roll_->repaint();
@@ -2160,6 +2180,8 @@ void PitchEditor::updateToolbar()
     harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
     tracksBtn_.on = showTracks_;
     shiftBtn_.on = ghostShift_;
+    triBtn_.on = triplets_;
+    triBtn_.repaint();
     tracksBtn_.repaint();
     shiftBtn_.repaint();
     const bool several = host_ != nullptr && host_->tracks().size() > 1;
@@ -2192,7 +2214,7 @@ void PitchEditor::resized()
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
-        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 26, 4, 26},      {&abBtn_, 44, 4, 44},
+        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 26, 4, 26},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
     auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };

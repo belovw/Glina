@@ -141,7 +141,9 @@ private:
     bool pencil_ = false;
     juce::TextButton pencilBtn_, gridBtn_;
     juce::TextButton renderBtn_; // plug-in: render kept in the project folder
-    int gridDenom_ = 4;        // grid = note value 1/N of a whole note: 1, 2, 4, 8 or 16
+    int gridDenom_ = 4;        // grid = note value 1/N of a whole note: 4, 8 or 16
+    bool triplets_ = false;    // triplet grid: beats split in 3 (6 for 1/16)
+    IconButton triBtn_;
     double lastPh_ = -2;       // last playhead seen by the timer (-2 = none)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchEditor)
