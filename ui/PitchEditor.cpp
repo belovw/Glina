@@ -2087,15 +2087,16 @@ void PitchEditor::paint(juce::Graphics& g)
 {
     g.fillAll(col::panel);
     g.setColour(col::panelLine);
-    g.drawHorizontalLine(39, 0.f, (float)getWidth());
+    g.drawHorizontalLine(toolbarH_ - 1, 0.f, (float)getWidth());
 }
 
 void PitchEditor::resized()
 {
     auto r = getLocalBounds();
-    auto bar = r.removeFromTop(40).reduced(6, 7);
-    // Toolbar: when the window is too narrow, the key box and the correction sliders
-    // get narrower first, then the slider captions go (the sliders keep tooltips).
+    const int barW = r.getWidth() - 12;   // the toolbar keeps a 6 px gutter on each side
+    constexpr int kRowH = 40;
+    // Toolbar: one line while it fits (the key box and sliders shrink first, then the slider
+    // captions go; the sliders keep tooltips). When even that does not fit, it wraps to more lines.
     struct Slot { juce::Component* c; int w, gap, minW; };
     std::vector<Slot> slots = {
         {&playBtn_, 34, 8, 34},      {&undoBtn_, 62, 4, 62},      {&redoBtn_, 62, 12, 62},
@@ -2106,23 +2107,53 @@ void PitchEditor::resized()
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 84, 4, 84},      {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 62, 4, 62},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
-    int deficit = -bar.getWidth();
-    for (const auto& s : slots) if (s.c->isVisible()) deficit += s.w + s.gap;
-    for (auto& s : slots) {
-        if (deficit <= 0) break;
-        if (!s.c->isVisible()) continue;
-        const int cut = std::min(deficit, s.w - s.minW);
-        s.w -= cut;
-        deficit -= cut;
+    auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
+    std::vector<Slot*> vis;
+    for (auto& s : slots) if (s.c->isVisible()) vis.push_back(&s);
+
+    // Shrinks one line's items down to what fits in `avail` px; drops the captions if still too wide.
+    auto fitLine = [&](const std::vector<Slot*>& line, int avail) {
+        int deficit = -avail;
+        for (const auto* s : line) deficit += s->w + s->gap;
+        for (auto* s : line) {
+            if (deficit <= 0) break;
+            const int cut = std::min(deficit, s->w - s->minW);
+            s->w -= cut;
+            deficit -= cut;
+        }
+        if (deficit > 0)
+            for (auto* s : line)
+                if (isCaption(s)) { deficit -= s->w + s->gap; s->w = 0; s->gap = 0; }
+    };
+
+    // One line if the items fit with their minimum widths (captions may go), else wrap.
+    int minOneLine = 0;
+    for (const auto* s : vis) if (!isCaption(s)) minOneLine += s->minW + s->gap;
+    std::vector<std::vector<Slot*>> lines;
+    if (minOneLine <= barW) {
+        lines.push_back(vis);
+    } else {
+        std::vector<Slot*> cur;
+        int used = 0;
+        for (auto* s : vis) {
+            const int need = s->minW + s->gap;
+            if (!cur.empty() && used + need > barW) { lines.push_back(cur); cur.clear(); used = 0; }
+            cur.push_back(s);
+            used += need;
+        }
+        if (!cur.empty()) lines.push_back(cur);
     }
-    if (deficit > 0)
-        for (auto& s : slots)
-            if (s.c == &corrPitchLbl_ || s.c == &corrDriftLbl_) { deficit -= s.w + s.gap; s.w = 0; s.gap = 0; }
-    for (const auto& s : slots) {
-        if (!s.c->isVisible()) continue;
-        s.c->setBounds(bar.removeFromLeft(s.w));
-        bar.removeFromLeft(s.gap);
+    for (auto& line : lines) fitLine(line, barW);
+
+    toolbarH_ = std::max(1, (int)lines.size()) * kRowH;
+    for (size_t li = 0; li < lines.size(); ++li) {
+        auto bar = juce::Rectangle<int>(6, (int)li * kRowH + 7, barW, kRowH - 14);
+        for (const auto* s : lines[li]) {
+            s->c->setBounds(bar.removeFromLeft(s->w));
+            bar.removeFromLeft(s->gap);
+        }
     }
+    r.removeFromTop(toolbarH_);
 
     harmonies_->setVisible(showHarmonies_);
     if (showHarmonies_) harmonies_->setBounds(r.removeFromBottom(harmonies_->preferredHeight()));

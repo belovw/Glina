@@ -101,6 +101,7 @@ private:
     float levelRef_ = -20.f;
     std::set<int> selection_;
     bool fitted_ = false;
+    int toolbarH_ = 40;     // height of the toolbar (it wraps onto more lines when narrow)
     double pps_ = 120, scroll_ = 0, lo_ = 48, hi_ = 72; // view: pixels/second, left edge (s), MIDI range
     bool wasBusy_ = true, wasPlaying_ = false;
 
