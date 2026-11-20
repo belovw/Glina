@@ -133,6 +133,7 @@ private:
         juce::String id;     // the track (ClipHost::TrackRef id)
         juce::Colour colour;
         ClipHost::Ghost g;
+        juce::String name;   // track name, for the label
     };
     // Shown ghosts are moved up by 3 semitones each, relative to the previous one (visual only).
     std::vector<GhostView> ghosts_;

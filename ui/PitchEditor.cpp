@@ -644,22 +644,29 @@ public:
         }
     }
 
-    // Name of the track being edited, so it is clear what the editor works on.
+    // Names at the top left: the track being edited, then the shown ghosts in the ghost colour.
     void drawTrackName(juce::Graphics& g)
     {
         if (ed.editedName_.isEmpty()) return;
         const auto c = canvas();
-        const juce::String txt = T("Редактируется: ") + ed.editedName_;
         const juce::Font font(juce::FontOptions(12.f));
         g.setFont(font);
-        juce::GlyphArrangement ga;
-        ga.addLineOfText(font, txt, 0.f, 0.f);
-        const float w = ga.getBoundingBox(0, ga.getNumGlyphs(), true).getWidth() + 16.f;
-        const auto box = juce::Rectangle<float>(c.getX() + 8.f, c.getY() + 6.f, w, 20.f);
-        g.setColour(col::panel.withAlpha(0.85f));
-        g.fillRoundedRectangle(box, 4.f);
-        g.setColour(col::text);
-        g.drawText(txt, box.reduced(8.f, 0.f), juce::Justification::centredLeft, false);
+        auto label = [&](const juce::String& txt, juce::Colour textCol, float y) {
+            juce::GlyphArrangement ga;
+            ga.addLineOfText(font, txt, 0.f, 0.f);
+            const float w = ga.getBoundingBox(0, ga.getNumGlyphs(), true).getWidth() + 16.f;
+            const auto box = juce::Rectangle<float>(c.getX() + 8.f, y, w, 20.f);
+            g.setColour(col::panel.withAlpha(0.85f));
+            g.fillRoundedRectangle(box, 4.f);
+            g.setColour(textCol);
+            g.drawText(txt, box.reduced(8.f, 0.f), juce::Justification::centredLeft, false);
+        };
+        float y = c.getY() + 6.f;
+        label(ed.editedName_, col::text, y);
+        for (const auto& gv : ed.ghosts_) {
+            y += 24.f;
+            label(gv.name, juce::Colour(0xffa7aec0), y);
+        }
     }
 
     void drawThreads(juce::Graphics& g, const Document& d)
@@ -1995,7 +2002,7 @@ void PitchEditor::refreshGhosts()
         if (t.current) editedName_ = t.name;
         if (t.current || shownTracks_.count(t.id) == 0) continue;
         ClipHost::Ghost g;
-        if (host_->ghost(t.id, g)) ghosts_.push_back({t.id, trackColour(t, (int)i), std::move(g)});
+        if (host_->ghost(t.id, g)) ghosts_.push_back({t.id, trackColour(t, (int)i), std::move(g), t.name});
     }
 }
 
