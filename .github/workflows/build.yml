@@ -23,23 +23,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # Test branch: builds only the GlinaProbe test plugin (GLINA_HOST_PROBE, see plugin/CMakeLists.txt).
       - name: Configure
-        run: cmake -S . -B build -A x64 -DGLINA_BUILD_APP=ON -DGLINA_BUILD_PLUGIN=ON
+        run: cmake -S . -B build -A x64 -DGLINA_BUILD_PLUGIN=ON -DGLINA_HOST_PROBE=ON
       - name: Build
-        run: cmake --build build --config Release --target glina_tests glina GlinaApp GlinaPlugin_VST3 --parallel
+        run: cmake --build build --config Release --target glina_tests GlinaPlugin_VST3 --parallel
       - name: Engine tests
         run: build\Release\glina_tests.exe
       - name: Collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory out | Out-Null
-          Copy-Item build\app\GlinaApp_artefacts\Release\Glina.exe out\
-          Copy-Item -Recurse build\plugin\GlinaPlugin_artefacts\Release\VST3\Glina.vst3 out\
-          Copy-Item build\Release\glina.exe out\glina-cli.exe
-          Copy-Item .github\INSTALL-ru.txt out\INSTALL-ru.txt
+          Copy-Item -Recurse build\plugin\GlinaPlugin_artefacts\Release\VST3\GlinaProbe.vst3 out\
       - uses: actions/upload-artifact@v4
         with:
-          name: Glina-windows-x64
+          name: GlinaProbe-windows-x64
           path: out
 
   linux:
