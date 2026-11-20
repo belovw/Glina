@@ -13,9 +13,13 @@ constexpr double kMinNoteSec = 0.03;
 double minDur(const NoteTimes& t) { return std::min(kMinNoteSec, 0.5 * (t.inEnd - t.inStart)); }
 
 // Every note keeps a minimal length, nothing overlaps, nothing leaves the clip.
-bool valid(const std::vector<NoteTimes>& t, double clipLen)
+// `lo` is the earliest boundary the layout may use. It is normally 0, but note
+// boundaries sit at frame centres, so a clip whose first note starts at frame 0
+// (singing from the very first sample) has its first boundary just below 0. Taking
+// 0 there would make the untouched layout invalid and block every move.
+bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo)
 {
-    double last = 0;
+    double last = lo;
     for (const auto& n : t) {
         if (n.outEnd - n.outStart < minDur(n) - 1e-9) return false;
         if (n.outStart < last - 1e-9) return false;
@@ -26,15 +30,21 @@ bool valid(const std::vector<NoteTimes>& t, double clipLen)
 
 // Largest part of `dt` (shrinking towards 0) for which `make` gives a valid layout.
 template <typename Make>
-double clampDt(double dt, double clipLen, Make&& make)
+double clampDt(double dt, double clipLen, double floorSec, Make&& make)
 {
-    if (valid(make(dt), clipLen)) return dt;
+    if (valid(make(dt), clipLen, floorSec)) return dt;
     double lo = 0, hi = 1;
     for (int it = 0; it < 40; ++it) {
         const double mid = 0.5 * (lo + hi);
-        if (valid(make(dt * mid), clipLen)) lo = mid; else hi = mid;
+        if (valid(make(dt * mid), clipLen, floorSec)) lo = mid; else hi = mid;
     }
     return dt * lo;
+}
+
+// The layout may not start before the clip, nor before where it already starts.
+double floorOf(const std::vector<NoteTimes>& base)
+{
+    return base.empty() ? 0.0 : std::min(0.0, base.front().outStart);
 }
 
 // Lay out the block of notes [b, e] (taken from `base`) so that it starts at
@@ -118,7 +128,7 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    const double applied = clampDt(dt, clipLen, make);
+    const double applied = clampDt(dt, clipLen, floorOf(base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
@@ -143,7 +153,7 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
         }
         return t;
     };
-    const double applied = clampDt(dt, clipLen, make);
+    const double applied = clampDt(dt, clipLen, floorOf(base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }

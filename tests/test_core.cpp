@@ -281,6 +281,34 @@ static double onsetNear(const Analysis& b, double want)
     return best;
 }
 
+// A clip that starts singing on the very first sample: note 0 begins at frame 0, so its
+// boundary sits just below zero (boundaries are frame centres). The layout must still be
+// movable — taking 0 as the floor made every drag a no-op (found on a real REAPER item).
+static void testNoteAtFrameZero(const test::SynthResult& s, double sr)
+{
+    std::printf("[frame0] first note starts at frame 0: time edits still work\n");
+    // Drop the leading silence so the first note starts at the first frame.
+    const Analysis probe = analyze(s.audio.data(), s.audio.size(), sr);
+    if (probe.notes.empty()) { CHECK(false, "no notes"); return; }
+    const size_t cut = (size_t)probe.notes[0].startFrame * (size_t)probe.hop;
+    if (cut >= s.audio.size()) { CHECK(false, "clip too short"); return; }
+    const std::vector<float> trimmed(s.audio.begin() + (long)cut, s.audio.end());
+    const Analysis a = analyze(trimmed.data(), trimmed.size(), sr);
+    if (a.notes.size() < 3) { CHECK(false, "need 3 notes"); return; }
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    const auto base = noteTimes(a, e);
+    std::printf("  note0 starts at frame %d, outStart %.4f s\n", a.notes[0].startFrame, base[0].outStart);
+    const int mid = (int)a.notes.size() / 2;
+    const double right = moveNotes(e, a, {mid}, 0.05);
+    EditSet e2;
+    e2.notes.resize(a.notes.size());
+    const double left = moveNotes(e2, a, {mid}, -0.05);
+    std::printf("  moveNotes +50 ms -> %.4f, -50 ms -> %.4f\n", right, left);
+    CHECK(std::abs(right) > 0.001, "note moves right");
+    CHECK(std::abs(left) > 0.001, "note moves left");
+}
+
 static void testBoundaryBlocks(const test::SynthResult& s, const Analysis& a, double sr)
 {
     std::printf("[boundary] 5 selected notes, drag the edge between the 2nd and 3rd: two blocks\n");
@@ -541,6 +569,7 @@ int main()
         testHarmony(s, a, sr);
         testDocumentIO(a);
         testBoundaryBlocks(s, a, sr);
+        testNoteAtFrameZero(s, sr);
         testMoveNote(s, a, sr);
         testAttackKept(a);
         testTransitions(a);
