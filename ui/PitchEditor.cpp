@@ -36,25 +36,30 @@ namespace icons {
 // Curved arrow over the top, arrowhead at the left end (undo). `mirror` gives redo.
 void curvedArrow(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool mirror)
 {
-    const float pi = juce::MathConstants<float>::pi;
-    const float cx = a.getCentreX(), cy = a.getBottom() - a.getHeight() * 0.3f;
-    const float r = a.getWidth() * 0.38f;
-    juce::Path arc;
-    arc.addCentredArc(cx, cy, r, r, 0.f, 2.f * pi, pi, true); // from the right end, over the top, to the left end
-    const float lx = cx - r, ly = cy;
-    juce::Path head;
-    head.startNewSubPath(lx - 4.f, ly - 5.f);
-    head.lineTo(lx + 4.f, ly - 5.f);
-    head.lineTo(lx, ly + 2.f);
-    head.closeSubPath();
+    // Own design: a bent stem that turns into an open chevron head (not a filled arc).
+    // Undo points left; redo is the mirror image.
+    const float cx = a.getCentreX(), cy = a.getCentreY();
+    const float w = a.getWidth() * 0.46f, h = a.getHeight() * 0.42f;
+    const float x0 = cx + w * 0.5f, y0 = cy + h * 0.5f;      // stem foot, lower right
+    const float xr = cx + w * 0.5f, yt = cy - h * 0.15f;     // where the stem turns
+    const float xl = cx - w * 0.5f;                          // head tip, left
+    juce::Path p;
+    p.startNewSubPath(x0, y0);
+    p.quadraticTo(xr, yt, xl + w * 0.25f, yt);                // soft turn into the top run
+    p.lineTo(xl + 0.5f, yt);
+    juce::Path head;                                         // open chevron at the tip
+    head.startNewSubPath(xl + w * 0.30f, yt - h * 0.30f);
+    head.lineTo(xl, yt);
+    head.lineTo(xl + w * 0.30f, yt + h * 0.30f);
     if (mirror) {
         const auto m = juce::AffineTransform::scale(-1.f, 1.f, cx, cy);
-        arc.applyTransform(m);
+        p.applyTransform(m);
         head.applyTransform(m);
     }
     g.setColour(c);
-    g.strokePath(arc, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.fillPath(head);
+    const juce::PathStrokeType st(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+    g.strokePath(p, st);
+    g.strokePath(head, st);
 }
 
 // A stack of `n` rectangles. Off: diagonal, the front one bright and the others shaded.
