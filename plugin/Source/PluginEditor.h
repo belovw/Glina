@@ -74,6 +74,7 @@ private:
     juce::ARAPlaybackRegion* region_ = nullptr;
     GlinaAudioModification* mod_ = nullptr;
     juce::ARARegionSequence* seq_ = nullptr; // the edited track; kept while its item changes
+    juce::ARAAudioModification* lastMod_ = nullptr; // the take we last edited; preferred when the host recreates its region
     Document dummyDoc_;
     ui::DocumentHistory dummyHistory_;
 };

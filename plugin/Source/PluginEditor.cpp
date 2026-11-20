@@ -31,7 +31,7 @@ void PluginClip::setRegion(juce::ARAPlaybackRegion* region)
     region_ = region;
     mod_ = mod;
     if (region_ != nullptr) { region_->addListener(this); seq_ = region_->getRegionSequence(); }
-    if (mod_ != nullptr) mod_->addListener(this);
+    if (mod_ != nullptr) { mod_->addListener(this); lastMod_ = mod_; }
     changes.sendChangeMessage();
 }
 
@@ -188,8 +188,15 @@ void PluginClip::followTrack()
     if (seq_ == nullptr) return;
     // Still the same take of the same item: nothing to do.
     if (region_ != nullptr && mod_ != nullptr && mod_ == region_->getAudioModification()) return;
-    // The host replaced the item or switched its take: stay on this track, take its item.
-    setRegion(itemAt(glinaItemsOf(seq_)));
+    // The host replaced the item or switched its take: stay on this track. If the host only
+    // recreated the region of the take we were editing, pick that take again; otherwise
+    // fall back to the item under the playhead.
+    const auto items = glinaItemsOf(seq_);
+    juce::ARAPlaybackRegion* pick = nullptr;
+    if (lastMod_ != nullptr)
+        for (auto* r : items)
+            if (r->getAudioModification() == lastMod_) { pick = r; break; }
+    setRegion(pick != nullptr ? pick : itemAt(items));
 }
 
 std::vector<ui::ClipHost::TrackRef> PluginClip::tracks() const
