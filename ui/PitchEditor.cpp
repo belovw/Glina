@@ -2012,8 +2012,16 @@ void PitchEditor::switchTrack(const juce::String& id)
             if (t.current) self->shownTracks_.insert(t.id); // keep seeing the track we leave
         self->shownTracks_.erase(id);
         h->setEditedTrack(id);
+        // Keep the view: setHost refits it, so remember the zoom and scroll and put them back.
+        const double pps = self->pps_, scroll = self->scroll_, lo = self->lo_, hi = self->hi_;
         self->setHost(nullptr);
         self->setHost(h);
+        self->pps_ = pps;
+        self->scroll_ = scroll;
+        self->lo_ = lo;
+        self->hi_ = hi;
+        self->fitted_ = true;
+        self->roll_->repaint();
     });
 }
 
