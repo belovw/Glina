@@ -136,6 +136,7 @@ private:
     };
     // Shown ghosts are moved up by 3 semitones each, relative to the previous one (visual only).
     std::vector<GhostView> ghosts_;
+    juce::String editedName_;                                    // name of the track being edited
     juce::String trackSig_;                                      // detects added/removed tracks
     int trackPoll_ = 0;
     bool pencil_ = false;

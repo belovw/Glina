@@ -270,6 +270,7 @@ public:
             juce::Graphics::ScopedSaveState clip(g);
             g.reduceClipRegion(c.toNearestInt());
             drawGhosts(g);
+            drawTrackName(g);
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
             drawCurves(g, *A);
@@ -617,7 +618,7 @@ public:
         const float s = semi();
         for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
             const auto& gv = ed.ghosts_[gi];
-            const auto& colour = gv.colour;
+            const juce::Colour colour(0xffa7aec0); // ghosts share one neutral colour; the edited track has the colour
             const auto& gh = gv.g;
             const double sh = ed.ghostShift_ ? ghostShift(gi) : 0.0;
             for (const auto& n : gh.notes) {
@@ -641,6 +642,21 @@ public:
             g.setColour(colour.withAlpha(0.75f));
             g.strokePath(p, juce::PathStrokeType(1.3f));
         }
+    }
+
+    // Name of the track being edited, so it is clear what the editor works on.
+    void drawTrackName(juce::Graphics& g)
+    {
+        if (ed.editedName_.isEmpty()) return;
+        const auto c = canvas();
+        const juce::String txt = T("Редактируется: ") + ed.editedName_;
+        g.setFont(juce::FontOptions(12.f));
+        const float w = g.getCurrentFont().getStringWidthFloat(txt) + 16.f;
+        const auto box = juce::Rectangle<float>(c.getX() + 8.f, c.getY() + 6.f, w, 20.f);
+        g.setColour(col::panel.withAlpha(0.85f));
+        g.fillRoundedRectangle(box, 4.f);
+        g.setColour(col::text);
+        g.drawText(txt, box.reduced(8.f, 0.f), juce::Justification::centredLeft, false);
     }
 
     void drawThreads(juce::Graphics& g, const Document& d)
@@ -1968,10 +1984,12 @@ void PitchEditor::showTrack(const juce::String& id, bool on)
 void PitchEditor::refreshGhosts()
 {
     ghosts_.clear();
+    editedName_.clear();
     if (host_ == nullptr) return;
     const auto list = host_->tracks();
     for (size_t i = 0; i < list.size(); ++i) {
         const auto& t = list[i];
+        if (t.current) editedName_ = t.name;
         if (t.current || shownTracks_.count(t.id) == 0) continue;
         ClipHost::Ghost g;
         if (host_->ghost(t.id, g)) ghosts_.push_back({t.id, trackColour(t, (int)i), std::move(g)});
