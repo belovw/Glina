@@ -31,6 +31,49 @@ bool inScale(int m, const Key& k)
 }
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
+// Icons for the square toolbar buttons.
+namespace icons {
+// Curved arrow over the top, arrowhead at the left end (undo). `mirror` gives redo.
+void curvedArrow(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool mirror)
+{
+    const float pi = juce::MathConstants<float>::pi;
+    const float cx = a.getCentreX(), cy = a.getBottom() - a.getHeight() * 0.3f;
+    const float r = a.getWidth() * 0.38f;
+    juce::Path arc;
+    arc.addCentredArc(cx, cy, r, r, 0.f, 2.f * pi, pi, true); // from the right end, over the top, to the left end
+    const float lx = cx - r, ly = cy;
+    juce::Path head;
+    head.startNewSubPath(lx - 4.f, ly - 5.f);
+    head.lineTo(lx + 4.f, ly - 5.f);
+    head.lineTo(lx, ly + 2.f);
+    head.closeSubPath();
+    if (mirror) {
+        const auto m = juce::AffineTransform::scale(-1.f, 1.f, cx, cy);
+        arc.applyTransform(m);
+        head.applyTransform(m);
+    }
+    g.setColour(c);
+    g.strokePath(arc, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.fillPath(head);
+}
+
+// A stack of `n` rectangles. Off: diagonal, the front one bright and the others shaded.
+// On: standing one above another, like tracks in a list.
+void stack(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, int n, bool on)
+{
+    const float w = a.getWidth() * 0.62f, h = a.getHeight() * 0.42f;
+    const float dx = (a.getWidth() - w) / (float)(n - 1), dy = (a.getHeight() - h) / (float)(n - 1);
+    for (int i = 0; i < n; ++i) {
+        const bool front = i == n - 1;
+        const float x = on ? a.getX() + (a.getWidth() - w) * 0.5f : a.getX() + i * dx;
+        const float y = on ? a.getY() + i * dy : a.getY() + i * dy;
+        const juce::Rectangle<float> r(x, y, w, h);
+        if (front) { g.setColour(c); g.fillRoundedRectangle(r, 2.f); }
+        else { g.setColour(c.withAlpha(0.35f)); g.drawRoundedRectangle(r.reduced(0.5f), 2.f, 1.2f); }
+    }
+}
+} // namespace icons
+
 // Slider that edits the document: one undo step per drag, live preview while dragging.
 struct EditSlider {
     juce::Slider slider;
@@ -1313,6 +1356,17 @@ public:
 // =====================================================================================
 // ============================================================================
 // Other tracks with Glina: show them faintly over this one, or switch editing to one.
+void PitchEditor::IconButton::paintButton(juce::Graphics& g, bool over, bool down)
+{
+    auto a = getLocalBounds().toFloat().reduced(0.5f);
+    const juce::Colour bg = on ? juce::Colour(0xff2f6db5) : down ? juce::Colour(0xff3a4150)
+                          : over ? juce::Colour(0xff2f3540) : juce::Colour(0xff252930);
+    g.setColour(bg);
+    g.fillRoundedRectangle(a, 4.f);
+    const juce::Colour fg = isEnabled() ? juce::Colour(0xffd6dbe3) : juce::Colour(0xff5a616d);
+    if (icon) icon(g, a.reduced(6.f), fg);
+}
+
 class PitchEditor::Tracks final : public juce::Component {
 public:
     static constexpr int kHeader = 30, kRow = 26;
@@ -1486,9 +1540,19 @@ PitchEditor::PitchEditor()
         addAndMakeVisible(b);
     };
     button(playBtn_, "▶", "Пуск / стоп (пробел)", [this] { togglePlay(); });
-    button(undoBtn_, "Отмена", "Отменить (Ctrl+Z)", [this] { undo(); });
-    button(redoBtn_, "Повтор", "Повторить (Ctrl+Shift+Z)", [this] { redo(); });
-    button(applyBtn_, "Применить", "Подтянуть ноты к ладу и убрать часть дрейфа (выделенные или все)", [this] { applyCorrection(); });
+    auto iconBtn = [this](IconButton& b, const char* tip, std::function<void(juce::Graphics&, juce::Rectangle<float>, juce::Colour)> icon,
+                          std::function<void()> fn) {
+        b.icon = std::move(icon);
+        b.setTooltip(T(tip));
+        b.onClick = std::move(fn);
+        quiet(b);
+        addAndMakeVisible(b);
+    };
+    iconBtn(undoBtn_, "Отменить (Ctrl+Z)", [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::curvedArrow(g, a, c, false); },
+            [this] { undo(); });
+    iconBtn(redoBtn_, "Повторить (Ctrl+Shift+Z)", [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::curvedArrow(g, a, c, true); },
+            [this] { redo(); });
+    button(applyBtn_, "Исправить", "Подтянуть ноты к ладу и убрать часть дрейфа (выделенные или все)", [this] { applyCorrection(); });
     button(splitBtn_, "Разрезать", "Разрезать ноту под курсором (S) или Alt+клик", [this] {
         if (eff_ == nullptr || selection_.size() != 1) return;
         const int i = *selection_.begin();
@@ -1500,19 +1564,23 @@ PitchEditor::PitchEditor()
         setPencil(!pencil_);
     });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
-    button(tracksBtn_, "Треки", "Другие треки с Glina: показать поверх или редактировать (T)", [this] { toggleTracks(); });
-    button(shiftBtn_, "Сдвиг", "Призраки визуально подняты на 3 полутона каждый относительно предыдущего", [this] {
-        ghostShift_ = !ghostShift_;
-        roll_->repaint();
-        updateToolbar();
-    });
+    iconBtn(tracksBtn_, "Другие треки с Glina: показать поверх или редактировать (T)",
+            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::stack(g, a, c, 3, false); },
+            [this] { toggleTracks(); });
+    iconBtn(shiftBtn_, "Призраки визуально подняты на 3 полутона каждый относительно предыдущего",
+            [this](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::stack(g, a, c, 4, ghostShift_); },
+            [this] {
+                ghostShift_ = !ghostShift_;
+                roll_->repaint();
+                updateToolbar();
+            });
     button(harmBtn_, "Гармонии", "Показать/скрыть панель гармоний (H)", [this] {
         showHarmonies_ = !showHarmonies_;
         resized();
         updateToolbar();
     });
     button(fitBtn_, "Всё", "Показать весь клип (0)", [this] { fitView(); });
-    button(gridBtn_, "Сетка 1/4", "Линии сетки: 1/4 → 1/8 → 1/16 (G)", [this] { cycleGrid(); });
+    button(gridBtn_, "1/4", "Линии сетки: 1/4 → 1/8 → 1/16 (G)", [this] { cycleGrid(); });
     button(helpBtn_, "?", "Справка по мыши и клавишам (F1)", [this] { showHelp(!help_->isVisible()); });
     button(renderBtn_, "Рендер", "Рендер в папке проекта: сохранять, перерендерить", [this] { showRenderMenu(); });
     renderBtn_.setVisible(false); // shown when the host keeps renders (plug-in in REAPER)
@@ -1862,6 +1930,7 @@ void PitchEditor::pollTracks()
     for (const auto& t : list) s << t.id << '|' << t.name << '|' << (int)t.current << '|';
     if (s == trackSig_) return;
     trackSig_ = s;
+    updateToolbar();
     const int th = tracks_->preferredHeight();
     tracks_->update();
     refreshGhosts();
@@ -1913,7 +1982,7 @@ void PitchEditor::cycleGrid()
     int k = 0;
     for (int i = 0; i < 5; ++i) if (order[i] == gridDenom_) k = (i + 1) % 5;
     gridDenom_ = order[k];
-    gridBtn_.setButtonText(T("Сетка 1/") + juce::String(gridDenom_));
+    gridBtn_.setButtonText(T("1/") + juce::String(gridDenom_));
     roll_->repaint();
 }
 
@@ -2084,8 +2153,16 @@ void PitchEditor::updateToolbar()
     const bool by = host_ != nullptr && host_->isBypassed();
     abBtn_.setColour(juce::TextButton::buttonColourId, by ? col::warn.darker(0.3f) : juce::Colour(0xff252930));
     harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
-    tracksBtn_.setColour(juce::TextButton::buttonColourId, showTracks_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
-    shiftBtn_.setColour(juce::TextButton::buttonColourId, ghostShift_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
+    tracksBtn_.on = showTracks_;
+    shiftBtn_.on = ghostShift_;
+    tracksBtn_.repaint();
+    shiftBtn_.repaint();
+    const bool several = host_ != nullptr && host_->tracks().size() > 1;
+    if (tracksBtn_.isVisible() != several || shiftBtn_.isVisible() != several) {
+        tracksBtn_.setVisible(several);
+        shiftBtn_.setVisible(several);
+        resized();
+    }
 }
 
 // ---- layout / paint ----------------------------------------------------------------------
@@ -2105,13 +2182,13 @@ void PitchEditor::resized()
     // captions go; the sliders keep tooltips). When even that does not fit, it wraps to more lines.
     struct Slot { juce::Component* c; int w, gap, minW; };
     std::vector<Slot> slots = {
-        {&playBtn_, 34, 8, 34},      {&undoBtn_, 62, 4, 62},      {&redoBtn_, 62, 12, 62},
+        {&playBtn_, 34, 8, 34},      {&undoBtn_, 26, 4, 26},      {&redoBtn_, 26, 12, 26},
         {&keyLbl_, 30, 2, 30},       {&keyBox_, 150, 12, 96},
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
-        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 84, 4, 84},      {&abBtn_, 44, 4, 44},
-        {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 62, 4, 62},    {&shiftBtn_, 70, 4, 70},    {&fitBtn_, 44, 4, 44},
+        {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 26, 4, 26},      {&abBtn_, 44, 4, 44},
+        {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
     auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
     std::vector<Slot*> vis;

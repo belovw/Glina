@@ -111,14 +111,22 @@ private:
     std::unique_ptr<Tracks> tracks_;
     std::unique_ptr<Help> help_;
 
-    juce::TextButton playBtn_, undoBtn_, redoBtn_, applyBtn_, splitBtn_, joinBtn_, abBtn_, harmBtn_, helpBtn_, fitBtn_;
+    // Square toolbar button drawn with an icon (undo/redo, track stacks).
+    struct IconButton final : public juce::Button {
+        std::function<void(juce::Graphics&, juce::Rectangle<float>, juce::Colour)> icon;
+        bool on = false;
+        IconButton() : juce::Button({}) {}
+        void paintButton(juce::Graphics& g, bool over, bool down) override;
+    };
+    juce::TextButton playBtn_, applyBtn_, splitBtn_, joinBtn_, abBtn_, harmBtn_, helpBtn_, fitBtn_;
+    IconButton undoBtn_, redoBtn_;
     juce::ComboBox keyBox_;
     juce::Slider corrPitch_, corrDrift_;
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
     bool showTracks_ = false;
-    juce::TextButton tracksBtn_;
-    juce::TextButton shiftBtn_;   // visual +3 semitone shift of the ghosts
+    IconButton tracksBtn_;
+    IconButton shiftBtn_;   // visual +3 semitone shift of the ghosts
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
     struct GhostView {
