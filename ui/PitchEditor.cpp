@@ -291,6 +291,7 @@ public:
                    << (ed.doc()->chromatic ? T("хроматика") : ed.keyLabel(k.tonic, k.minor));
                 if (!ed.selection_.empty()) st << T(" · выделено ") << (int)ed.selection_.size();
                 if (ed.host_->isRendering()) st << T(" · рендер…");
+                else if (const auto o = ed.host_->renderOrigin(); o.isNotEmpty()) st << " · " << o;
                 if (ed.host_->isBypassed()) st << T(" · ОРИГИНАЛ (A/B)");
             }
         }
@@ -1478,6 +1479,8 @@ PitchEditor::PitchEditor()
     button(fitBtn_, "Всё", "Показать весь клип (0)", [this] { fitView(); });
     button(gridBtn_, "Сетка 1/4", "Линии сетки: 1/4 → 1/8 → 1/16 (G)", [this] { cycleGrid(); });
     button(helpBtn_, "?", "Справка по мыши и клавишам (F1)", [this] { showHelp(!help_->isVisible()); });
+    button(renderBtn_, "Рендер", "Рендер в папке проекта: сохранять, перерендерить", [this] { showRenderMenu(); });
+    renderBtn_.setVisible(false); // shown when the host keeps renders (plug-in in REAPER)
     abBtn_.setClickingTogglesState(false);
 
     keyLbl_.setText(T("Лад"), juce::dontSendNotification);
@@ -2007,9 +2010,32 @@ void PitchEditor::showHelp(bool show)
     if (show) help_->toFront(false);
 }
 
+void PitchEditor::showRenderMenu()
+{
+    if (host_ == nullptr || !host_->hasRenderOptions()) return;
+    juce::PopupMenu m;
+    m.addItem(1, T("Сохранять рендер в папке проекта (подпапка Glina)"), true, host_->savesRender());
+    m.addItem(2, T("Перерендерить клип текущей версией"), host_->canRerender());
+    const auto origin = host_->renderOrigin();
+    m.addSeparator();
+    m.addItem(3, T("Сейчас: ") + (origin.isNotEmpty() ? origin : T("рендер посчитан заново")), false);
+    juce::Component::SafePointer<PitchEditor> safe(this);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&renderBtn_), [safe](int r) {
+        if (safe == nullptr || safe->host_ == nullptr) return;
+        if (r == 1) safe->host_->setSavesRender(!safe->host_->savesRender());
+        if (r == 2) safe->host_->rerender();
+        safe->updateToolbar();
+    });
+}
+
 void PitchEditor::updateToolbar()
 {
     const bool ready = host_ != nullptr && eff_ != nullptr;
+    const bool showRender = host_ != nullptr && host_->hasRenderOptions();
+    if (renderBtn_.isVisible() != showRender) {
+        renderBtn_.setVisible(showRender);
+        resized();
+    }
     playBtn_.setVisible(host_ != nullptr && host_->handlesTransportKeys());
     pencilBtn_.setEnabled(ready);
     pencilBtn_.setColour(juce::TextButton::buttonColourId, pencil_ ? col::drawn.darker(0.45f) : juce::Colour(0xff252930));
@@ -2049,7 +2075,7 @@ void PitchEditor::resized()
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 84, 4, 84},      {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 62, 4, 62},    {&fitBtn_, 44, 4, 44},
-        {&helpBtn_, 28, 4, 28}};
+        {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
     int deficit = -bar.getWidth();
     for (const auto& s : slots) if (s.c->isVisible()) deficit += s.w + s.gap;
     for (auto& s : slots) {

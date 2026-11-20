@@ -27,6 +27,8 @@ target_sources(GlinaPlugin PRIVATE
   Source/PlaybackRenderer.cpp
   Source/PluginProcessor.cpp
   Source/PluginEditor.cpp
+  Source/ReaperHost.cpp
+  Source/RenderStore.cpp
   ${PROJECT_SOURCE_DIR}/ui/PitchEditor.cpp)
 
 glina_juce_defaults(GlinaPlugin)

@@ -86,6 +86,7 @@ private:
     void togglePlay();
     void toggleBypass();
     void showHelp(bool);
+    void showRenderMenu();
     void updateToolbar();
 
     void timerCallback() override;
@@ -122,6 +123,7 @@ private:
     int trackPoll_ = 0;
     bool pencil_ = false;
     juce::TextButton pencilBtn_, gridBtn_;
+    juce::TextButton renderBtn_; // plug-in: render kept in the project folder
     int gridDenom_ = 4;        // grid = note value 1/N of a whole note: 1, 2, 4, 8 or 16
     double lastPh_ = -2;       // last playhead seen by the timer (-2 = none)
 

@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "RenderStore.h"
 
 #include <ARA_Library/Utilities/ARATimelineConversion.h>
 
@@ -247,6 +248,34 @@ void PluginClip::setEditedTrack(const juce::String& id)
 {
     for (auto* seq : glinaSequences())
         if (idOf(seq) == id) { setRegion(itemAt(glinaItemsOf(seq))); return; }
+}
+
+// ---- render kept in the project folder ------------------------------------------------
+bool PluginClip::hasRenderOptions() const { return dc_ != nullptr && dc_->canSaveRenders(); }
+
+bool PluginClip::savesRender() const { return settings::saveRender(); }
+
+void PluginClip::setSavesRender(bool on)
+{
+    settings::setSaveRender(on);
+    logLine(juce::String(T("«Сохранять рендер в папке проекта»: ")) + (on ? T("вкл.") : T("выкл.")));
+}
+
+juce::String PluginClip::renderOrigin() const
+{
+    if (mod_ == nullptr || !mod_->renderFromDisk || mod_->renderedVersion != mod_->editVersion) return {};
+    return mod_->renderEngineVersion == kRenderVersion ? T("рендер из папки проекта")
+                                                       : T("рендер из папки проекта, прежняя версия");
+}
+
+bool PluginClip::canRerender() const
+{
+    return mod_ != nullptr && mod_->renderFromDisk && mod_->renderEngineVersion != kRenderVersion;
+}
+
+void PluginClip::rerender()
+{
+    if (mod_ != nullptr && dc_ != nullptr) dc_->rerender(mod_);
 }
 
 void PluginClip::setPlaying(bool p)

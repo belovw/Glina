@@ -1,9 +1,26 @@
 #include "GlinaModel.h"
 #include "PlaybackRenderer.h"
+#include "RenderStore.h"
 
+#include "../../ui/Theme.h"
 #include "glina/Notes.h"
 
+#include <algorithm>
+#include <mutex>
+
 namespace glina::plugin {
+
+using ui::T;
+
+namespace {
+// Plug-in instances (their REAPER link) bound to each document controller.
+std::mutex linksMutex;
+std::vector<std::pair<GlinaDocumentController*, reaper::HostLink*>>& hostLinks()
+{
+    static std::vector<std::pair<GlinaDocumentController*, reaper::HostLink*>> links;
+    return links;
+}
+} // namespace
 
 // ============================================================================
 GlinaAudioModification::GlinaAudioModification(juce::ARAAudioSource* source, ARA::ARAAudioModificationHostRef ref,
@@ -30,6 +47,18 @@ void GlinaAudioModification::setCache(std::shared_ptr<const RenderCache> c)
                   retired.end());
 }
 
+std::shared_ptr<const RenderCache> GlinaAudioModification::currentCache() const
+{
+    const juce::SpinLock::ScopedLockType sl(cacheLock); // the audio thread only try-locks, briefly
+    return cache;
+}
+
+juce::String GlinaAudioModification::sourceName() const
+{
+    const char* n = (const char*)getAudioSource()->getName();
+    return n != nullptr ? juce::String::fromUTF8(n) : juce::String();
+}
+
 bool GlinaAudioModification::tryGetCache(std::shared_ptr<const RenderCache>& out) const
 {
     const juce::SpinLock::ScopedTryLockType sl(cacheLock);
@@ -39,7 +68,205 @@ bool GlinaAudioModification::tryGetCache(std::shared_ptr<const RenderCache>& out
 }
 
 // ============================================================================
-GlinaDocumentController::~GlinaDocumentController() { pool.removeAllJobs(true, 20000); }
+// ============================================================================
+// Saving renders next to the project. REAPER asks for the ARA archive when it saves the
+// project, but possibly at other moments too (undo states, copying items). So a full
+// store only arms a watcher; the renders are written once the .rpp has really been
+// written (it changed, appeared under a new name, or the project stopped being dirty).
+struct GlinaDocumentController::PendingSave {
+    struct Item {
+        uint64_t key = 0;
+        juce::String sourceName;
+        std::shared_ptr<const RenderCache> cache;
+    };
+    void* project = nullptr;
+    juce::String fileAtStore;  // .rpp at the time of the store (empty: never saved)
+    juce::Time mtimeAtStore;   // of fileAtStore
+    int dirtyAtStore = -1;
+    juce::Time started;
+    std::vector<Item> items;
+};
+
+
+class GlinaDocumentController::SaveWatcher final : private juce::Timer {
+public:
+    explicit SaveWatcher(GlinaDocumentController& dc) : dc_(dc) {}
+    ~SaveWatcher() override { stopTimer(); }
+
+    void start(PendingSave p)
+    {
+        // Several stores in a row (one save, or stores between saves): keep the oldest baseline.
+        if (pending_ != nullptr && pending_->project == p.project && pending_->fileAtStore == p.fileAtStore) {
+            p.mtimeAtStore = std::min(p.mtimeAtStore, pending_->mtimeAtStore);
+            p.dirtyAtStore = std::max(p.dirtyAtStore, pending_->dirtyAtStore);
+        }
+        pending_ = std::make_unique<PendingSave>(std::move(p));
+        startTimer(250);
+    }
+
+    // The document is closing: a save just before still gets its renders.
+    void finalCheck()
+    {
+        stopTimer();
+        if (pending_ == nullptr) return;
+        const juce::File f(pending_->fileAtStore);
+        if (pending_->fileAtStore.isNotEmpty() && f.existsAsFile() && f.getLastModificationTime() > pending_->mtimeAtStore) {
+            logLine(T("проект записан перед закрытием: ") + f.getFullPathName());
+            writeRenders(f, pending_->items);
+        }
+        pending_.reset();
+    }
+
+private:
+    static void writeRenders(const juce::File& projectFile, const std::vector<PendingSave::Item>& items)
+    {
+        const juce::File folder = renderstore::folderFor(projectFile);
+        juce::StringArray names;
+        int written = 0, existed = 0, failed = 0;
+        for (const auto& it : items) {
+            juce::String name;
+            switch (renderstore::write(folder, it.sourceName, it.key, it.cache->version, it.cache->sampleRate,
+                                       it.cache->left, it.cache->right, name)) {
+            case renderstore::WriteResult::written: ++written; names.addIfNotAlreadyThere(name); break;
+            case renderstore::WriteResult::existed: ++existed; names.addIfNotAlreadyThere(name); break;
+            case renderstore::WriteResult::failed:  ++failed; logLine(T("  не удалось записать ") + folder.getChildFile(name).getFullPathName()); break;
+            }
+        }
+        renderstore::writeList(folder, projectFile.getFileName(), names);
+        const int removed = renderstore::removeUnlisted(folder);
+        juce::String msg;
+        msg << T("рендер сохранён в ") << folder.getFullPathName() << T(": записано ") << written << T(", уже были ")
+            << existed << T(", удалено старых ") << removed << T(", ошибок ") << failed;
+        logLine(msg);
+    }
+
+    void timerCallback() override
+    {
+        auto& p = *pending_;
+        const juce::String now = reaper::projectFile(p.project);
+        juce::String how;
+        if (now.isNotEmpty()) {
+            const juce::File f(now);
+            if (now != p.fileAtStore && f.existsAsFile())
+                how = p.fileAtStore.isEmpty() ? T("первое сохранение проекта")
+                                              : T("сохранён под новым именем; в момент записи состояния был ") + p.fileAtStore;
+            else if (f.existsAsFile() && f.getLastModificationTime() > p.mtimeAtStore)
+                how = T("файл проекта перезаписан");
+            else if (p.dirtyAtStore > 0 && reaper::isDirty(p.project) == 0)
+                how = T("проект отмечен как сохранённый");
+        }
+        if (how.isEmpty()) {
+            // A never-saved project may be waiting in the "Save as" dialog: give it longer.
+            const int limit = p.fileAtStore.isEmpty() ? 300 : 30;
+            if ((juce::Time::getCurrentTime() - p.started).inSeconds() > limit) {
+                logLine(T("за ") + juce::String(limit) + T(" с файл проекта не изменился — это была не запись проекта, рендер не сохраняю"));
+                stopTimer();
+                pending_.reset();
+            }
+            return;
+        }
+        stopTimer();
+        logLine(T("проект записан: ") + now + " (" + how + ")");
+        auto items = std::move(p.items);
+        pending_.reset();
+        dc_.pool.addJob([file = juce::File(now), items = std::move(items)] { writeRenders(file, items); });
+    }
+
+    GlinaDocumentController& dc_;
+    std::unique_ptr<PendingSave> pending_;
+};
+
+GlinaDocumentController::~GlinaDocumentController()
+{
+    if (saveWatcher != nullptr) saveWatcher->finalCheck();
+    saveWatcher.reset();
+    pool.removeAllJobs(true, 20000);
+    const std::lock_guard<std::mutex> lk(linksMutex);
+    auto& links = hostLinks();
+    links.erase(std::remove_if(links.begin(), links.end(), [this](const auto& e) { return e.first == this; }), links.end());
+}
+
+void GlinaDocumentController::registerHostLink(GlinaDocumentController* dc, reaper::HostLink* link)
+{
+    const std::lock_guard<std::mutex> lk(linksMutex);
+    auto& links = hostLinks();
+    links.erase(std::remove_if(links.begin(), links.end(), [link](const auto& e) { return e.second == link; }), links.end());
+    if (dc != nullptr) links.emplace_back(dc, link);
+}
+
+void GlinaDocumentController::unregisterHostLink(reaper::HostLink* link) { registerHostLink(nullptr, link); }
+
+void* GlinaDocumentController::reaperProject() const
+{
+    {
+        const std::lock_guard<std::mutex> lk(linksMutex);
+        for (const auto& [dc, link] : hostLinks())
+            if (dc == this)
+                if (void* p = link->project()) return p;
+    }
+    const auto open = reaper::openProjects();
+    return open.size() == 1 ? open.front() : nullptr; // no instance knows yet: only safe with one tab
+}
+
+std::vector<juce::File> GlinaDocumentController::renderFolders() const
+{
+    std::vector<juce::File> out;
+    auto add = [&out](void* project) {
+        const juce::String file = reaper::projectFile(project);
+        if (file.isEmpty()) return;
+        const juce::File folder = renderstore::folderFor(juce::File(file));
+        if (std::find(out.begin(), out.end(), folder) == out.end()) out.push_back(folder);
+    };
+    add(reaperProject());
+    for (void* p : reaper::openProjects()) add(p);
+    return out;
+}
+
+void GlinaDocumentController::watchSave(const std::vector<const GlinaAudioModification*>& mods)
+{
+    size_t total = 0;
+    if (auto* doc = getDocumentController()->getDocument<juce::ARADocument>())
+        for (auto* src : doc->getAudioSources()) total += src->getAudioModifications().size();
+    const bool on = settings::saveRender();
+    void* project = reaperProject();
+    const juce::String file = reaper::projectFile(project);
+
+    juce::String msg;
+    msg << T("запись состояния Glina: клипов ") << (int)mods.size() << T(" из ") << (int)total << T(", проект ")
+        << (project == nullptr ? T("неизвестен") : file.isEmpty() ? T("ещё не сохранён") : file)
+        << T(", изменён: ") << reaper::isDirty(project) << T(", «Сохранять рендер» ") << (on ? T("вкл.") : T("выкл."));
+    logLine(msg);
+    if (!on || !reaper::available() || mods.empty() || mods.size() != total || project == nullptr) return;
+
+    PendingSave p;
+    p.project = project;
+    p.fileAtStore = file;
+    if (file.isNotEmpty()) p.mtimeAtStore = juce::File(file).getLastModificationTime();
+    p.dirtyAtStore = reaper::isDirty(project);
+    p.started = juce::Time::getCurrentTime();
+    int notReady = 0;
+    for (auto* m : mods) {
+        const auto& data = *m->getGlinaSource()->data;
+        auto cache = m->currentCache();
+        if (!data.samplesReady || cache == nullptr || cache->key != renderstore::key(data.contentHash, serialize(m->doc))) {
+            ++notReady; // still analysing or rendering: this state is rendered again on open
+            continue;
+        }
+        p.items.push_back({ cache->key, m->sourceName(), std::move(cache) });
+    }
+    if (notReady > 0) logLine(T("  рендер ещё не готов у клипов: ") + juce::String(notReady));
+    if (saveWatcher == nullptr) saveWatcher = std::make_shared<SaveWatcher>(*this);
+    saveWatcher->start(std::move(p));
+}
+
+void GlinaDocumentController::rerender(GlinaAudioModification* mod)
+{
+    logLine(T("перерендер клипа «") + mod->sourceName() + T("» текущей версией"));
+    mod->forceRender = true;
+    ++mod->editVersion;
+    startRender(mod);
+    modelChanged.sendChangeMessage();
+}
 
 juce::ARAAudioSource* GlinaDocumentController::doCreateAudioSource(juce::ARADocument* doc,
                                                                   ARA::ARAAudioSourceHostRef ref) noexcept
@@ -120,6 +347,7 @@ void GlinaDocumentController::startAnalysisIfPossible(GlinaAudioSource* src)
             return;
         }
 
+        data->contentHash = renderstore::hashSamples(mono.data(), mono.size(), data->sampleRate);
         data->mono = std::move(mono);
         data->samplesReady = true;
         data->analysis = analyze(data->mono.data(), data->mono.size(), data->sampleRate);
@@ -175,12 +403,42 @@ void GlinaDocumentController::startRender(GlinaAudioModification* mod)
     auto eff = mod->effective;
     const uint64_t version = mod->editVersion;
     auto alive = mod->alive;
-    pool.addJob([this, mod, data, doc, eff, version, alive] {
-        Mix m = renderMix(data->mono.data(), data->mono.size(), *eff, doc);
+    const uint64_t key = renderstore::key(data->contentHash, serialize(doc));
+    // A render saved with the project is used whatever the option says (it only controls writing).
+    std::vector<juce::File> folders;
+    if (!mod->forceRender) folders = renderFolders();
+    mod->forceRender = false;
+    const bool firstAfterLoad = mod->restoredFromArchive;
+    mod->restoredFromArchive = false;
+    const juce::String name = mod->sourceName();
+    pool.addJob([this, mod, data, doc, eff, version, alive, key, folders, firstAfterLoad, name] {
         auto cache = std::make_shared<RenderCache>();
-        cache->sampleRate = data->sampleRate;
-        cache->left = std::move(m.left);
-        cache->right = std::move(m.right);
+        renderstore::Loaded saved;
+        const size_t maxLength = data->mono.size() + (size_t)(60.0 * data->sampleRate);
+        if (renderstore::find(folders, key, data->sampleRate, maxLength, saved)) {
+            cache->sampleRate = saved.sampleRate;
+            cache->left = std::move(saved.left);
+            cache->right = std::move(saved.right);
+            cache->version = saved.version;
+            cache->fromDisk = true;
+            juce::String msg;
+            msg << T("«") << name << T("»: рендер из папки проекта ") << saved.file.getFullPathName();
+            if (saved.version != kRenderVersion) msg << T(" (прежняя версия движка: r") << saved.version << T(", сейчас r") << kRenderVersion << ")";
+            logLine(msg);
+        } else {
+            if (firstAfterLoad && reaper::available()) {
+                juce::String msg;
+                msg << T("«") << name << T("»: сохранённого рендера нет (ключ ") << renderstore::keyText(key) << T("), считаю заново; ")
+                    << (folders.empty() ? T("папка проекта неизвестна (проект не сохранён?)") : T("искал в:"));
+                for (const auto& f : folders) msg << " " << f.getFullPathName() << ";";
+                logLine(msg);
+            }
+            Mix m = renderMix(data->mono.data(), data->mono.size(), *eff, doc);
+            cache->sampleRate = data->sampleRate;
+            cache->left = std::move(m.left);
+            cache->right = std::move(m.right);
+        }
+        cache->key = key;
         cache->map = TimeMap::build(*eff, doc.edits);
 
         juce::MessageManager::callAsync([this, mod, cache, version, alive] {
@@ -188,6 +446,8 @@ void GlinaDocumentController::startRender(GlinaAudioModification* mod)
             mod->renderRunning = false;
             mod->setCache(cache);
             mod->renderedVersion = version;
+            mod->renderFromDisk = cache->fromDisk;
+            mod->renderEngineVersion = cache->version;
             mod->notifyContentChanged(juce::ARAContentUpdateScopes::samplesAreAffected(), true);
             for (auto* region : mod->getPlaybackRegions())
                 region->notifyContentChanged(juce::ARAContentUpdateScopes::samplesAreAffected(), true);
@@ -209,6 +469,11 @@ bool GlinaDocumentController::doStoreObjectsToStream(juce::ARAOutputStream& out,
     for (auto* m : mods) {
         out.writeString(m->getPersistentID());
         out.writeString(juce::String::fromUTF8(serialize(m->doc).c_str()));
+    }
+    try {
+        watchSave(std::vector<const GlinaAudioModification*>(mods.begin(), mods.end()));
+    } catch (...) {
+        // Saving renders is a convenience: never let it fail the project save.
     }
     return true;
 }
@@ -244,6 +509,7 @@ bool GlinaDocumentController::doRestoreObjectsFromStream(juce::ARAInputStream& i
         if (auto* m = filter->getAudioModificationToRestoreStateWithID<GlinaAudioModification>(id.getCharPointer())) {
             m->doc = std::move(d);
             m->history.clear();
+            m->restoredFromArchive = true;
             rebuildEffective(m);   // no-op until analysis is ready
             ++m->editVersion;
             startRender(m);        // no-op until analysis is ready
