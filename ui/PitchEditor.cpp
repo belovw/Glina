@@ -506,7 +506,7 @@ public:
         const float s = semi();
         for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
             const auto& gh = ed.ghosts_[gi].g;
-            const double sh = ghostShift(gi);
+            const double sh = ed.ghostShift_ ? ghostShift(gi) : 0.0;
             for (const auto& n : gh.notes) {
                 const float x0 = xOf(n.t0), x1 = xOf(n.t1);
                 const juce::Rectangle<float> r(x0, yOf(n.midi + sh) - s * 0.5f, std::max(2.f, x1 - x0), s);
@@ -528,7 +528,7 @@ public:
             const auto& gv = ed.ghosts_[gi];
             const auto& colour = gv.colour;
             const auto& gh = gv.g;
-            const double sh = ghostShift(gi);
+            const double sh = ed.ghostShift_ ? ghostShift(gi) : 0.0;
             for (const auto& n : gh.notes) {
                 const float x0 = xOf(n.t0), x1 = xOf(n.t1);
                 if (x1 < c.getX() || x0 > c.getRight()) continue;
@@ -1501,6 +1501,11 @@ PitchEditor::PitchEditor()
     });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
     button(tracksBtn_, "Треки", "Другие треки с Glina: показать поверх или редактировать (T)", [this] { toggleTracks(); });
+    button(shiftBtn_, "Сдвиг", "Призраки визуально подняты на 3 полутона каждый относительно предыдущего", [this] {
+        ghostShift_ = !ghostShift_;
+        roll_->repaint();
+        updateToolbar();
+    });
     button(harmBtn_, "Гармонии", "Показать/скрыть панель гармоний (H)", [this] {
         showHarmonies_ = !showHarmonies_;
         resized();
@@ -2080,6 +2085,7 @@ void PitchEditor::updateToolbar()
     abBtn_.setColour(juce::TextButton::buttonColourId, by ? col::warn.darker(0.3f) : juce::Colour(0xff252930));
     harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
     tracksBtn_.setColour(juce::TextButton::buttonColourId, showTracks_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
+    shiftBtn_.setColour(juce::TextButton::buttonColourId, ghostShift_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
 }
 
 // ---- layout / paint ----------------------------------------------------------------------
@@ -2105,7 +2111,7 @@ void PitchEditor::resized()
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 84, 4, 84},      {&abBtn_, 44, 4, 44},
-        {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 62, 4, 62},    {&fitBtn_, 44, 4, 44},
+        {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 62, 4, 62},    {&shiftBtn_, 70, 4, 70},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
     auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
     std::vector<Slot*> vis;

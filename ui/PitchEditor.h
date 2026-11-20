@@ -118,6 +118,8 @@ private:
     bool showHarmonies_ = true;
     bool showTracks_ = false;
     juce::TextButton tracksBtn_;
+    juce::TextButton shiftBtn_;   // visual +3 semitone shift of the ghosts
+    bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
     struct GhostView {
         juce::String id;     // the track (ClipHost::TrackRef id)
