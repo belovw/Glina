@@ -650,8 +650,11 @@ public:
         if (ed.editedName_.isEmpty()) return;
         const auto c = canvas();
         const juce::String txt = T("Редактируется: ") + ed.editedName_;
-        g.setFont(juce::FontOptions(12.f));
-        const float w = g.getCurrentFont().getStringWidthFloat(txt) + 16.f;
+        const juce::Font font(juce::FontOptions(12.f));
+        g.setFont(font);
+        juce::GlyphArrangement ga;
+        ga.addLineOfText(font, txt, 0.f, 0.f);
+        const float w = ga.getBoundingBox(0, ga.getNumGlyphs(), true).getWidth() + 16.f;
         const auto box = juce::Rectangle<float>(c.getX() + 8.f, c.getY() + 6.f, w, 20.f);
         g.setColour(col::panel.withAlpha(0.85f));
         g.fillRoundedRectangle(box, 4.f);
