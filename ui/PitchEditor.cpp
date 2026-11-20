@@ -43,6 +43,9 @@ struct EditSlider {
 
 // =====================================================================================
 // Help overlay
+// Visual pitch shift of the k-th shown ghost (k from 0): +3 semitones per ghost, like Melodyne.
+static double ghostShift(size_t k) { return 3.0 * (double)(k + 1); }
+
 class PitchEditor::Help final : public juce::Component {
 public:
     void paint(juce::Graphics& g) override
@@ -497,15 +500,39 @@ public:
     }
 
     // Other tracks, faint: note outlines and their pitch line in the track's colour.
+    // Index of the ghost under a point: one of its notes, or its line within a few pixels.
+    int hitGhost(juce::Point<float> p) const
+    {
+        const float s = semi();
+        for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
+            const auto& gh = ed.ghosts_[gi].g;
+            const double sh = ghostShift(gi);
+            for (const auto& n : gh.notes) {
+                const float x0 = xOf(n.t0), x1 = xOf(n.t1);
+                const juce::Rectangle<float> r(x0, yOf(n.midi + sh) - s * 0.5f, std::max(2.f, x1 - x0), s);
+                if (r.contains(p)) return (int)gi;
+            }
+            for (const auto& pt : gh.curve) {
+                if (!std::isfinite(pt.y)) continue;
+                if (std::abs(xOf(pt.x) - p.x) < 6.f && std::abs(yOf(pt.y + sh) - p.y) < 6.f) return (int)gi;
+            }
+        }
+        return -1;
+    }
+
     void drawGhosts(juce::Graphics& g)
     {
         const auto c = canvas();
         const float s = semi();
-        for (const auto& [colour, gh] : ed.ghosts_) {
+        for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
+            const auto& gv = ed.ghosts_[gi];
+            const auto& colour = gv.colour;
+            const auto& gh = gv.g;
+            const double sh = ghostShift(gi);
             for (const auto& n : gh.notes) {
                 const float x0 = xOf(n.t0), x1 = xOf(n.t1);
                 if (x1 < c.getX() || x0 > c.getRight()) continue;
-                const juce::Rectangle<float> r(x0, yOf(n.midi) - s * 0.5f, std::max(2.f, x1 - x0), s);
+                const juce::Rectangle<float> r(x0, yOf(n.midi + sh) - s * 0.5f, std::max(2.f, x1 - x0), s);
                 g.setColour(colour.withAlpha(0.12f));
                 g.fillRoundedRectangle(r, 3.f);
                 g.setColour(colour.withAlpha(0.55f));
@@ -516,7 +543,7 @@ public:
             for (const auto& pt : gh.curve) {
                 const float x = std::isfinite(pt.y) ? xOf(pt.x) : 0.f;
                 if (!std::isfinite(pt.y) || x < c.getX() - 40 || x > c.getRight() + 40) { open = false; continue; }
-                const float y = yOf(pt.y);
+                const float y = yOf(pt.y + sh);
                 if (!open) p.startNewSubPath(x, y); else p.lineTo(x, y);
                 open = true;
             }
@@ -747,9 +774,12 @@ public:
     void mouseDoubleClick(const juce::MouseEvent& e) override
     {
         const int i = hitNote(e.position);
+        const int gi = i < 0 ? hitGhost(e.position) : -1;
         if (i >= 0) {
             ed.selection_ = {i};
             ed.snapToScale();
+        } else if (gi >= 0) {
+            ed.switchTrack(ed.ghosts_[(size_t)gi].id); // double-click a ghost: edit that track
         } else if (ed.host_ != nullptr && ed.host_->canControlTransport() && canvas().contains(e.position)) {
             ed.host_->setPlayheadSec(std::max(0.0, secOf(e.position.x)));
         }
@@ -1816,7 +1846,7 @@ void PitchEditor::refreshGhosts()
         const auto& t = list[i];
         if (t.current || shownTracks_.count(t.id) == 0) continue;
         ClipHost::Ghost g;
-        if (host_->ghost(t.id, g)) ghosts_.emplace_back(trackColour(t, (int)i), std::move(g));
+        if (host_->ghost(t.id, g)) ghosts_.push_back({t.id, trackColour(t, (int)i), std::move(g)});
     }
 }
 

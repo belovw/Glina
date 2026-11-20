@@ -118,7 +118,13 @@ private:
     bool showTracks_ = false;
     juce::TextButton tracksBtn_;
     std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
-    std::vector<std::pair<juce::Colour, ClipHost::Ghost>> ghosts_;
+    struct GhostView {
+        juce::String id;     // the track (ClipHost::TrackRef id)
+        juce::Colour colour;
+        ClipHost::Ghost g;
+    };
+    // Shown ghosts are moved up by 3 semitones each, relative to the previous one (visual only).
+    std::vector<GhostView> ghosts_;
     juce::String trackSig_;                                      // detects added/removed tracks
     int trackPoll_ = 0;
     bool pencil_ = false;
