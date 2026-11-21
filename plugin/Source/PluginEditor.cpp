@@ -251,6 +251,15 @@ bool PluginClip::ghost(const juce::String& id, Ghost& out) const
     return false;
 }
 
+void PluginClip::log(const juce::String& line) const
+{
+    juce::String s(line);
+    if (region_ != nullptr)
+        s << T(" [айтем: проект ") << juce::String(region_->getStartInPlaybackTime(), 3) << T(" с, от начала звука ")
+          << juce::String(region_->getStartInAudioModificationTime(), 3) << T(" с]");
+    logLine(s);
+}
+
 void PluginClip::setEditedTrack(const juce::String& id)
 {
     for (auto* seq : glinaSequences())

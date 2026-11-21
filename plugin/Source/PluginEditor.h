@@ -37,6 +37,9 @@ public:
     void setBypassed(bool b) override { if (mod_ != nullptr) mod_->bypass.store(b); }
     // REAPER ignores ARA start/stop requests: space & Home go back to REAPER instead.
     bool handlesTransportKeys() const override { return false; }
+    double toProjectSec(double clipSec) const override { return region_ != nullptr ? toSong(clipSec) : clipSec; }
+    double fromProjectSec(double songSec) const override { return region_ != nullptr ? fromSong(songSec) : songSec; }
+    void log(const juce::String& line) const override;
     std::vector<GridLine> hostGrid(double t0, double t1) const override;
     bool hasHostTempo() const override;
     std::vector<TrackRef> tracks() const override;

@@ -963,14 +963,14 @@ public:
             } else {
                 const double anchor = secOf(e.position.x);
                 ed.pps_ = juce::jlimit(2.0, 4000.0, ed.pps_ * std::pow(1.25, dy * 4));
-                ed.scroll_ = std::max(0.0, anchor - (e.position.x - canvas().getX()) / ed.pps_);
+                ed.scroll_ = std::max(std::min(0.0, ed.scroll_), anchor - (e.position.x - canvas().getX()) / ed.pps_);
             }
         } else if (e.mods.isShiftDown()) {
             ed.lo_ += dy * 4;
             ed.hi_ += dy * 4;
         } else {
             const float d = std::abs(dx) > std::abs(dy) ? -dx : dy;
-            ed.scroll_ = std::max(0.0, ed.scroll_ - d * 300.0 / ed.pps_);
+            ed.scroll_ = std::max(std::min(0.0, ed.scroll_), ed.scroll_ - d * 300.0 / ed.pps_); // after a track switch the view may start before this clip
         }
         repaint();
     }
@@ -2203,8 +2203,23 @@ void PitchEditor::switchTrack(const juce::String& id)
         for (const auto& t : h->tracks())
             if (t.current) self->shownTracks_.insert(t.id); // keep seeing the track we leave
         self->shownTracks_.erase(id);
+        // Clip time is measured from the start of each clip's own audio, so the same number
+        // of seconds is a different place in the project on another track (another item
+        // position or trim). Keep the same stretch of the PROJECT in view instead.
+        const double visible = self->roll_->canvas().getWidth() / self->pps_;
+        const double l = h->toProjectSec(self->scroll_), r = h->toProjectSec(self->scroll_ + visible);
+        h->log(T("смена трека: вид ") + juce::String(self->scroll_, 3) + T(" с клипа = ") + juce::String(l, 3) +
+               T(" с проекта"));
         h->setEditedTrack(id);
         self->rebindHost(h);
+        const double nl = h->fromProjectSec(l), nr = h->fromProjectSec(r);
+        if (nr > nl && visible > 0) {
+            self->pps_ = self->pps_ * visible / (nr - nl); // same scale in project time
+            self->scroll_ = nl;
+        }
+        h->log(T("смена трека: вид ") + juce::String(self->scroll_, 3) + T(" с клипа = ") +
+               juce::String(h->toProjectSec(self->scroll_), 3) + T(" с проекта"));
+        self->roll_->repaint();
     });
 }
 

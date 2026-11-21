@@ -84,6 +84,13 @@ public:
         int bar = 1;      // 1-based
         int beat = 1;     // 1-based within the bar
     };
+    // Clip output time <-> project (song) time. The editor keeps the same project
+    // stretch in view when it switches to another clip (track or take).
+    virtual double toProjectSec(double clipSec) const { return clipSec; }
+    virtual double fromProjectSec(double projectSec) const { return projectSec; }
+    // One line into the host's log (the plug-in's glina.log), for diagnostics.
+    virtual void log(const juce::String&) const {}
+
     // Bars/beats between t0 and t1 (clip output time) from the host's tempo map;
     // empty if the host has none (the editor then uses the document's tempo, or seconds).
     virtual std::vector<GridLine> hostGrid(double /*t0*/, double /*t1*/) const { return {}; }
