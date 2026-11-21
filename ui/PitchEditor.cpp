@@ -72,8 +72,8 @@ void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
     p.startNewSubPath(cx + half, top); p.lineTo(r, top); p.lineTo(r, tick);
     g.setColour(c);
     g.strokePath(p, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setFont(juce::FontOptions(a.getHeight() * 0.78f));
-    g.drawText("3", juce::Rectangle<float>(cx - half, top - a.getHeight() * 0.36f, half * 2, a.getHeight() * 0.72f),
+    g.setFont(juce::FontOptions(12.f));
+    g.drawText("3", juce::Rectangle<float>(cx - half, a.getY() - 2.f, half * 2, top - a.getY() + 4.f),
                juce::Justification::centred, false);
 }
 
