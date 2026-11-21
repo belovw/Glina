@@ -1,4 +1,5 @@
 #include "glina/Harmony.h"
+#include "glina/Editing.h"
 #include "glina/Tuning.h"
 
 #include <cmath>
@@ -57,8 +58,7 @@ std::string harmonyIntervalName(const HarmonyVoice& v)
 
 static double leadPitch(const Analysis& a, const EditSet& lead, size_t i)
 {
-    const NoteEdit& e = i < lead.notes.size() ? lead.notes[i] : kNone;
-    return a.notes[i].centerMidi + e.pitchOffset;
+    return editedCenter(a, lead, (int)i); // perceived pitch, tilt included
 }
 
 static double harmonyPitch(const Analysis& a, const EditSet& lead, const Key& key, const HarmonyVoice& v, size_t i)
@@ -82,13 +82,18 @@ EditSet harmonyEdits(const Analysis& a, const EditSet& lead, const Key& key, con
         const NoteEdit& l = i < lead.notes.size() ? lead.notes[i] : kNone;
         NoteEdit& h = e.notes[i];
         h = l;
-        h.pitchOffset = harmonyPitch(a, lead, key, v, i) - a.notes[i].centerMidi;
+        // The voice keeps the lead's tilt: its offset aims the tilted note's centre.
+        h.pitchOffset = harmonyPitch(a, lead, key, v, i) - a.notes[i].centerMidi - tiltMean(a, (int)i, h);
         h.vibratoAmount = l.vibratoAmount * v.vibratoAmount;
+        h.vibrato.depthCents *= v.vibratoAmount; // own auto vibrato, scaled like the singer's
         h.driftAmount = l.driftAmount * v.driftAmount;
         h.formantShift = l.formantShift + v.formantShift;
         const bool on = v.noteMask.empty() || (i < v.noteMask.size() && v.noteMask[i]);
         if (!on) h.gainDb = -120;
     }
+    // Auto vibrato: scaled like the singer's vibrato, and out of step with the lead.
+    e.autoVibrato.depthCents *= v.vibratoAmount;
+    e.vibratoSeed = lead.vibratoSeed ^ (v.seed * 0x9E3779B9u + 0x6A09E667u);
     if (!v.consonants) {
         e.sibilantGainDb = -90;
         e.breathGainDb = -90;

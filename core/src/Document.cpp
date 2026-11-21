@@ -47,7 +47,12 @@ bool splitNote(Document& d, const Analysis& eff, int i, int frame)
     if (d.edits.spans.size() != eff.notes.size()) return false;
     d.edits.spans[(size_t)i].end = frame;
     d.edits.spans.insert(d.edits.spans.begin() + i + 1, NoteSpan{frame, n.endFrame});
-    const NoteEdit copy = d.edits.notes[(size_t)i];
+    NoteEdit copy = d.edits.notes[(size_t)i];
+    // A tilt is split where it is: each half keeps its piece of the same line.
+    const double u = (double)(frame - n.startFrame) / std::max(1, n.endFrame - n.startFrame);
+    const double mid = copy.tiltL + (copy.tiltR - copy.tiltL) * u;
+    d.edits.notes[(size_t)i].tiltR = mid;
+    copy.tiltL = mid;
     d.edits.notes.insert(d.edits.notes.begin() + i + 1, copy);
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) v.noteMask.insert(v.noteMask.begin() + i + 1, v.noteMask[(size_t)i]);
@@ -66,6 +71,7 @@ bool joinNotes(Document& d, const Analysis& eff, int i)
     if (d.edits.spans.size() != eff.notes.size()) return false;
     d.edits.spans[(size_t)i].end = d.edits.spans[(size_t)i + 1].end;
     d.edits.spans.erase(d.edits.spans.begin() + i + 1);
+    d.edits.notes[(size_t)i].tiltR = d.edits.notes[(size_t)i + 1].tiltR; // the joined note ends where the right one did
     d.edits.notes.erase(d.edits.notes.begin() + i + 1);
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) {
@@ -83,7 +89,11 @@ std::string serialize(const Document& d)
     o.imbue(std::locale::classic());
     o << std::setprecision(10);
     const EditSet& e = d.edits;
-    o << "glina-document 3\n";
+    // Version 4 (tilt, auto vibrato) only when they are used: a document without
+    // them is written exactly as before, so render keys of existing projects stay.
+    bool v4 = !(e.autoVibrato == AutoVibrato{}) || e.vibratoSeed != 1;
+    for (const auto& n : e.notes) v4 = v4 || n.tiltL != 0 || n.tiltR != 0 || n.ownVibrato;
+    o << (v4 ? "glina-document 4\n" : "glina-document 3\n");
     o << "key " << d.keyTonic << ' ' << (int)d.keyMinor << ' ' << (int)d.chromatic << '\n';
     o << "lead " << d.leadGainDb << '\n';
     o << "tempo " << d.tempoBpm << ' ' << d.beatsPerBar << ' ' << d.barOffsetSec << '\n';
@@ -93,9 +103,24 @@ std::string serialize(const Document& d)
     for (const auto& s : e.spans) o << ' ' << s.start << ' ' << s.end;
     o << '\n';
     o << "notes " << e.notes.size() << '\n';
-    for (const auto& n : e.notes)
+    auto vib = [&](const AutoVibrato& v) {
+        o << v.depthCents << ' ' << v.rateHz << ' ' << v.delayMs << ' ' << v.onsetPeriods << ' ' << v.variation << ' '
+          << v.tremoloDb;
+    };
+    for (const auto& n : e.notes) {
         o << "n " << n.pitchOffset << ' ' << n.driftAmount << ' ' << n.vibratoAmount << ' ' << n.formantShift << ' '
-          << n.gainDb << ' ' << n.timeOffsetSec << ' ' << n.stretch << ' ' << n.transition << ' ' << (n.consonant ? 1 : 0) << '\n';
+          << n.gainDb << ' ' << n.timeOffsetSec << ' ' << n.stretch << ' ' << n.transition << ' ' << (n.consonant ? 1 : 0);
+        if (v4) {
+            o << ' ' << n.tiltL << ' ' << n.tiltR << ' ' << (n.ownVibrato ? 1 : 0) << ' ';
+            vib(n.vibrato);
+        }
+        o << '\n';
+    }
+    if (v4) {
+        o << "autovib ";
+        vib(e.autoVibrato);
+        o << ' ' << e.vibratoSeed << '\n';
+    }
     o << std::setprecision(6);
     for (const auto& r : e.draw) {
         o << "draw " << r.start << ' ' << r.delta.size();
@@ -121,7 +146,10 @@ bool deserialize(const std::string& text, Document& out)
     in.imbue(std::locale::classic());
     std::string tag;
     int version = 0;
-    if (!(in >> tag >> version) || tag != "glina-document" || version < 1 || version > 3) return false;
+    if (!(in >> tag >> version) || tag != "glina-document" || version < 1 || version > 4) return false;
+    auto readVib = [&](AutoVibrato& v) {
+        in >> v.depthCents >> v.rateHz >> v.delayMs >> v.onsetPeriods >> v.variation >> v.tremoloDb;
+    };
     Document d;
     while (in >> tag) {
         if (tag == "end") { out = std::move(d); return true; }
@@ -154,7 +182,16 @@ bool deserialize(const std::string& text, Document& out)
                 n.stretch;
             if (version >= 2) in >> n.transition;
             if (version >= 3) { int c = 0; in >> c; n.consonant = c != 0; }
+            if (version >= 4) {
+                int own = 0;
+                in >> n.tiltL >> n.tiltR >> own;
+                n.ownVibrato = own != 0;
+                readVib(n.vibrato);
+            }
             d.edits.notes.push_back(n);
+        } else if (tag == "autovib") {
+            readVib(d.edits.autoVibrato);
+            in >> d.edits.vibratoSeed;
         } else if (tag == "draw") {
             DrawRun r;
             size_t c = 0;

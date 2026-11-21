@@ -76,6 +76,23 @@ struct Analysis {
 // Editing model (what the user changes). All edits are non-destructive and
 // applied by the renderer on top of the original audio + analysis.
 
+// Synthetic vibrato that replaces the singer's own (Auto-Tune style). A note
+// uses the track's settings (EditSet::autoVibrato) unless it has its own.
+struct AutoVibrato {
+    double depthCents = 0;     // ± around the note's pitch line; 0 = no pitch vibrato
+    double rateHz = 5.5;
+    double delayMs = 300;      // from the note start; a note shorter than this gets none (0 = operatic)
+    double onsetPeriods = 1.5; // S-curve fade-in after the delay, in vibrato periods
+    double variation = 20;     // %: slow wander of rate and depth (not jitter)
+    double tremoloDb = 0;      // ± level modulation, same rate and phase as the pitch vibrato
+    bool active() const { return depthCents > 0 || tremoloDb > 0; }
+    bool operator==(const AutoVibrato& o) const
+    {
+        return depthCents == o.depthCents && rateHz == o.rateHz && delayMs == o.delayMs &&
+               onsetPeriods == o.onsetPeriods && variation == o.variation && tremoloDb == o.tremoloDb;
+    }
+};
+
 struct NoteEdit {
     double pitchOffset = 0;    // semitones added to the note centre
     double driftAmount = 1;    // 1 = original pitch drift, 0 = flattened
@@ -86,11 +103,16 @@ struct NoteEdit {
     double stretch = 1;        // note duration multiplier
     double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide
     bool consonant = false;    // treated as a consonant: no pitch change, no stretch (moves only)
+    // Tilt of the pitch line: semitones added at the note's left / right edge,
+    // linear in between. Added on top of the line, so drift and vibrato ride on it.
+    double tiltL = 0, tiltR = 0;
+    bool ownVibrato = false;   // true: `vibrato` below; false: the track's EditSet::autoVibrato
+    AutoVibrato vibrato;
 };
 
 // A pencil-drawn stretch of pitch over analysis frames [start, start + delta.size()).
-// Stored relative to (original pitch + the note's pitch offset), so the drawing
-// travels with its note when the note is moved up or down. NaN = not drawn.
+// Stored relative to (original pitch + the note's pitch offset + its tilt), so the
+// drawing travels with its note when the note is moved or tilted. NaN = not drawn.
 struct DrawRun {
     int start = 0;
     std::vector<float> delta;
@@ -114,6 +136,8 @@ struct EditSet {
     double transitionMs = 45;         // ramp width of a note transition at smoothness 0.5
     double edgeTaperMs = 40;          // drift/vibrato edits fade in over note edges
     bool keepLength = true;           // the take keeps its length: the tail after the last note absorbs time edits
+    AutoVibrato autoVibrato;          // track settings for notes without their own (default: off)
+    uint32_t vibratoSeed = 1;         // per-track randomness of the auto vibrato (phase, wander)
 };
 
 } // namespace glina

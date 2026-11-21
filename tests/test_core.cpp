@@ -551,6 +551,241 @@ static void testDocumentV2(const Analysis& a)
               o.edits.notes[0].transition == 0.5, "v1 document did not load");
 }
 
+// Mean rendered pitch (MIDI) over frames [f0, f1) of an analysis of `y`.
+static double renderedPitch(const std::vector<float>& y, double sr, int f0, int f1)
+{
+    const Analysis b = analyze(y.data(), y.size(), sr);
+    double sum = 0; int c = 0;
+    for (int f = f0; f < f1 && f < (int)b.frames.size(); ++f) if (b.frames[(size_t)f].f0 > 0) { sum += b.frames[(size_t)f].midi; ++c; }
+    return c ? sum / c : 0.0;
+}
+
+static void testTilt(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[tilt] corner drag: the opposite edge stays, the middle moves half, drift/vibrato ride on it\n");
+    const int i = 6; // the longest note
+    const Note& n = a.notes[(size_t)i];
+    const int len = n.endFrame - n.startFrame;
+    EditSet flat;
+    flat.notes.resize(a.notes.size());
+    EditSet t = flat;
+    addTilt(t, {i}, true, -1.0);
+    const auto c0 = editedPitchCurve(a, flat), c1 = editedPitchCurve(a, t);
+    double worst = 0;
+    for (int k = n.startFrame; k < n.endFrame; ++k) {
+        if (a.frames[(size_t)k].f0 <= 0) continue;
+        const double want = -1.0 * (k + 0.5 - n.startFrame) / len;
+        worst = std::max(worst, std::abs((c1[(size_t)k] - c0[(size_t)k]) - want));
+    }
+    std::printf("  curve minus untilted curve: worst %.4f st from the straight line\n", worst);
+    CHECK(worst < 0.005, "tilt is not a straight line added to the curve (%.4f st)", worst);
+    const double dc = editedCenter(a, t, i) - editedCenter(a, flat, i);
+    std::printf("  box centre moved %+.3f st (want about -0.5)\n", dc);
+    CHECK(std::abs(dc + 0.5) < 0.08, "centre moved %.3f", dc);
+
+    // Rendered: start unchanged, middle -0.5, end about -0.9.
+    const std::vector<float> y0 = render(s.audio.data(), s.audio.size(), a, flat);
+    const std::vector<float> y1 = render(s.audio.data(), s.audio.size(), a, t);
+    auto at = [&](double u0, double u1) {
+        const int f0 = n.startFrame + (int)(u0 * len), f1 = n.startFrame + (int)(u1 * len);
+        return renderedPitch(y1, sr, f0, f1) - renderedPitch(y0, sr, f0, f1);
+    };
+    const double dStart = at(0.05, 0.15), dMid = at(0.45, 0.55), dEnd = at(0.85, 0.95);
+    std::printf("  rendered: start %+.2f, middle %+.2f, end %+.2f st (want -0.10 / -0.50 / -0.90)\n", dStart, dMid, dEnd);
+    CHECK(std::abs(dStart + 0.10) < 0.07 && std::abs(dMid + 0.50) < 0.07 && std::abs(dEnd + 0.90) < 0.07,
+          "rendered tilt off");
+
+    // Dragging again continues from the current tilt; the left corner keeps the right edge.
+    addTilt(t, {i}, true, -0.5);
+    addTilt(t, {i}, false, 0.25);
+    CHECK(t.notes[(size_t)i].tiltR == -1.5 && t.notes[(size_t)i].tiltL == 0.25, "tilt did not accumulate");
+    EditSet cons = flat;
+    cons.notes[(size_t)i].consonant = true;
+    addTilt(cons, {i}, true, -1.0);
+    CHECK(cons.notes[(size_t)i].tiltR == 0, "a consonant was tilted");
+}
+
+static void testTiltLayout(const Analysis& a)
+{
+    std::printf("[tilt] split keeps the line, pencil and harmonies follow the tilt\n");
+    const int i = 6;
+    const Note n = a.notes[(size_t)i];
+    Document d;
+    conform(d, a);
+    d.edits.notes[(size_t)i].tiltR = -1.0;
+    const auto before = editedPitchCurve(a, d.edits);
+    const int mid = (n.startFrame + n.endFrame) / 2;
+    CHECK(splitNote(d, a, i, mid), "split refused");
+    const Analysis eff = withLayout(a, d.edits.spans);
+    const double u = (double)(mid - n.startFrame) / (n.endFrame - n.startFrame);
+    CHECK(std::abs(d.edits.notes[(size_t)i].tiltR + u) < 1e-9 && std::abs(d.edits.notes[(size_t)i + 1].tiltL + u) < 1e-9 &&
+              d.edits.notes[(size_t)i + 1].tiltR == -1.0, "split halves do not continue the line");
+    const auto after = editedPitchCurve(eff, d.edits);
+    double worst = 0;
+    for (int k = n.startFrame; k < n.endFrame; ++k)
+        if (a.frames[(size_t)k].f0 > 0) worst = std::max(worst, std::abs(after[(size_t)k] - before[(size_t)k]));
+    std::printf("  split: curve changed by at most %.4f st\n", worst);
+    CHECK(worst < 0.01, "split changed the tilted curve by %.4f st", worst);
+    CHECK(joinNotes(d, eff, i), "join refused");
+    CHECK(d.edits.notes[(size_t)i].tiltL == 0 && d.edits.notes[(size_t)i].tiltR == -1.0, "join lost the tilt");
+
+    // Pencil drawn on a tilted note stays where drawn, and moves with further tilt.
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    e.notes[(size_t)i].tiltR = -1.0;
+    const int f0 = n.startFrame + (n.endFrame - n.startFrame) / 3, f1 = f0 + 20;
+    const float target = (float)(n.centerMidi + 0.4);
+    drawPitch(e, a, f0, std::vector<float>((size_t)(f1 - f0), target));
+    const auto c = editedPitchCurve(a, e);
+    const int k = (f0 + f1) / 2;
+    CHECK(std::abs(c[(size_t)k] - target) < 1e-3, "drawn pitch on a tilted note: %.3f (want %.3f)", c[(size_t)k], target);
+    const double r0 = tiltAt(n, e.notes[(size_t)i], k);
+    e.notes[(size_t)i].tiltR = -2.0;
+    const double r1 = tiltAt(n, e.notes[(size_t)i], k);
+    const auto c2 = editedPitchCurve(a, e);
+    CHECK(std::abs((c2[(size_t)k] - c[(size_t)k]) - (r1 - r0)) < 1e-3, "drawing did not follow the tilt");
+
+    // A harmony voice keeps the lead's tilt and lands its centre on the harmony note.
+    EditSet lead;
+    lead.notes.resize(a.notes.size());
+    lead.notes[(size_t)i].tiltR = -1.0;
+    const HarmonyVoice v; // diatonic third above
+    const EditSet h = harmonyEdits(a, lead, a.key, v);
+    const auto want = harmonyNotePitches(a, lead, a.key, v);
+    CHECK(std::abs(editedCenter(a, h, i) - want[(size_t)i]) < 1e-9, "harmony centre %.3f, want %.3f",
+          editedCenter(a, h, i), want[(size_t)i]);
+    CHECK(h.notes[(size_t)i].tiltR == -1.0, "harmony lost the tilt");
+}
+
+static void testAutoVibrato(double sr)
+{
+    std::printf("[auto vibrato] delay, onset, depth, rate, tremolo; short notes and stretched notes\n");
+    const test::SynthResult s = test::synthesize({{57, 0.4, 0, false, 0}, {60, 2.0, 0, false, 0}, {64, 0.25, 0, true, 0}}, sr);
+    const Analysis a = analyseSynth(s, sr);
+    if (a.notes.size() != 3) { CHECK(false, "synthetic take has %zu notes, want 3", a.notes.size()); return; }
+    const int i = 1;
+    const Note& n = a.notes[(size_t)i];
+    const double hopS = (double)a.hop / sr;
+    EditSet e;
+    e.notes.resize(a.notes.size());
+    AutoVibrato v;
+    v.depthCents = 30; v.rateHz = 5.5; v.delayMs = 300; v.onsetPeriods = 1.5; v.variation = 0; v.tremoloDb = 2;
+    setTrackVibrato(e, v, false);
+    const auto curve = editedPitchCurve(a, e);
+    // What is left after taking away the singer's line without his own vibrato.
+    auto resid = [&](const std::vector<double>& cv, int k) {
+        return cv[(size_t)k] - (a.frames[(size_t)k].midi - a.fastDev[(size_t)k] + n.meanFast);
+    };
+    double pre = 0;
+    for (int k = n.startFrame + (int)(0.06 / hopS); k < n.startFrame + (int)(0.28 / hopS); ++k)
+        if (a.frames[(size_t)k].f0 > 0) pre = std::max(pre, std::abs(resid(curve, k)));
+    const int s0 = n.startFrame + (int)((0.30 + 1.5 / 5.5 + 0.03) / hopS);
+    const int s1 = n.endFrame - (int)((1 / 5.5 + 0.03) / hopS);
+    double peak = 0, mean = 0; int cnt = 0, cross = 0;
+    double prev = resid(curve, s0);
+    for (int k = s0; k < s1; ++k) {
+        if (a.frames[(size_t)k].f0 <= 0) continue;
+        const double r = resid(curve, k);
+        peak = std::max(peak, std::abs(r));
+        mean += r; ++cnt;
+        if ((r > 0) != (prev > 0)) ++cross;
+        prev = r;
+    }
+    mean /= std::max(1, cnt);
+    const double rate = cross / (2.0 * (s1 - s0) * hopS);
+    std::printf("  before the delay %.4f st; steady: peak %.3f st (want 0.30), mean %+.3f, rate %.2f Hz (want 5.5)\n",
+                pre, peak, mean, rate);
+    CHECK(pre < 0.005, "vibrato before the delay (%.4f st)", pre);
+    CHECK(std::abs(peak - 0.30) < 0.03, "depth %.3f st", peak);
+    CHECK(std::abs(mean) < 0.03, "vibrato moved the centre (%.3f st)", mean);
+    CHECK(std::abs(rate - 5.5) < 0.4, "rate %.2f Hz", rate);
+    CHECK(std::abs(resid(curve, n.endFrame - 1)) < 0.05, "no fade-out at the note end (%.3f)", resid(curve, n.endFrame - 1));
+
+    const Controls c = buildControls(a, e);
+    double trem = 0;
+    for (int k = s0; k < s1; ++k) trem = std::max(trem, (double)c.gainDb[(size_t)k]);
+    std::printf("  tremolo peak %.2f dB (want 2)\n", trem);
+    CHECK(std::abs(trem - 2.0) < 0.2, "tremolo %.2f dB", trem);
+
+    // A note shorter than the delay keeps its own vibrato and gets none.
+    EditSet none;
+    none.notes.resize(a.notes.size());
+    const auto plain = editedPitchCurve(a, none);
+    const Note& sh = a.notes[2];
+    double shortDiff = 0;
+    for (int k = sh.startFrame; k < sh.endFrame; ++k) shortDiff = std::max(shortDiff, std::abs(curve[(size_t)k] - plain[(size_t)k]));
+    CHECK(shortDiff < 1e-6, "short note changed by %.4f st", shortDiff);
+
+    // Stretching the note keeps the vibrato rate (it is laid on the output timeline).
+    EditSet st = e;
+    st.notes[(size_t)i].stretch = 1.5;
+    const auto cs = editedPitchCurve(a, st);
+    const TimeMap map = TimeMap::build(a, st);
+    const double t0 = map.inToOut(n.startFrame * (double)a.hop) / sr, t1 = map.inToOut(n.endFrame * (double)a.hop) / sr;
+    int crossS = 0; double first = -1, last = -1; double pv = 0; bool have = false;
+    for (int k = n.startFrame; k < n.endFrame; ++k) {
+        if (a.frames[(size_t)k].f0 <= 0) continue;
+        const double t = map.inToOut(k * (double)a.hop) / sr;
+        if (t - t0 < 0.60 || t1 - t < 0.25) continue;
+        const double r = resid(cs, k);
+        if (have && (r > 0) != (pv > 0)) { ++crossS; if (first < 0) first = t; last = t; }
+        pv = r; have = true;
+    }
+    const double rateS = last > first ? (crossS - 1) / (2.0 * (last - first)) : 0;
+    std::printf("  stretched x1.5: rate %.2f Hz (want 5.5)\n", rateS);
+    CHECK(std::abs(rateS - 5.5) < 0.4, "stretched note vibrato rate %.2f Hz", rateS);
+
+    // Variation is deterministic per track seed and differs between tracks.
+    EditSet w1 = e;
+    w1.autoVibrato.variation = 60;
+    EditSet w2 = w1;
+    w2.vibratoSeed = 7;
+    const auto a1 = editedPitchCurve(a, w1), a1b = editedPitchCurve(a, w1), a2 = editedPitchCurve(a, w2);
+    double same = 0, diff = 0;
+    for (size_t k = 0; k < a1.size(); ++k) { same = std::max(same, std::abs(a1[k] - a1b[k])); diff = std::max(diff, std::abs(a1[k] - a2[k])); }
+    CHECK(same == 0, "same seed, different result");
+    CHECK(diff > 0.05, "different seeds, same vibrato");
+
+    // Note settings: own values win; "all selected" resets them to the track.
+    EditSet own = e;
+    AutoVibrato off = v;
+    off.depthCents = 0; off.tremoloDb = 0;
+    setNoteVibrato(own, {i}, off);
+    const auto co = editedPitchCurve(a, own);
+    double ownDiff = 0;
+    for (int k = n.startFrame; k < n.endFrame; ++k) ownDiff = std::max(ownDiff, std::abs(co[(size_t)k] - plain[(size_t)k]));
+    CHECK(ownDiff < 1e-6, "note with its own 'off' still vibrates (%.4f)", ownDiff);
+    setTrackVibrato(own, v, true);
+    CHECK(!own.notes[(size_t)i].ownVibrato, "all-selected did not reset the note");
+}
+
+static void testDocumentV4(const Analysis& a)
+{
+    std::printf("[document v4] tilt and auto vibrato round trip; documents without them stay v3\n");
+    Document d;
+    conform(d, a);
+    const std::string plain = serialize(d);
+    CHECK(plain.rfind("glina-document 3\n", 0) == 0, "document without new features is not v3");
+    d.edits.notes[2].tiltL = 0.25;
+    d.edits.notes[2].tiltR = -0.75;
+    AutoVibrato v;
+    v.depthCents = 35; v.rateHz = 6.1; v.delayMs = 0; v.onsetPeriods = 2; v.variation = 40; v.tremoloDb = 1.5;
+    setTrackVibrato(d.edits, v, false);
+    d.edits.vibratoSeed = 12345;
+    AutoVibrato own = v;
+    own.depthCents = 10;
+    setNoteVibrato(d.edits, {4}, own);
+    const std::string text = serialize(d);
+    CHECK(text.rfind("glina-document 4\n", 0) == 0, "new features not written as v4");
+    Document r;
+    CHECK(deserialize(text, r), "v4 parse failed");
+    CHECK(serialize(r) == text, "v4 round trip differs");
+    CHECK(r.edits.notes[2].tiltR == -0.75 && r.edits.autoVibrato == v && r.edits.vibratoSeed == 12345 &&
+              r.edits.notes[4].ownVibrato && r.edits.notes[4].vibrato == own, "v4 fields lost");
+    Document p;
+    CHECK(deserialize(plain, p) && !p.edits.autoVibrato.active() && p.edits.notes[2].tiltR == 0, "v3 loads with features off");
+}
+
 int main()
 {
     testSines();
@@ -576,6 +811,10 @@ int main()
         testPencil(s, a, sr);
         testConsonant(s, a, sr);
         testDocumentV2(a);
+        testTilt(s, a, sr);
+        testTiltLayout(a);
+        testAutoVibrato(sr);
+        testDocumentV4(a);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

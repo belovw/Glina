@@ -186,6 +186,68 @@ double transitionWidthMs(double s, double baseMs)
     return baseMs * std::pow(300.0 / baseMs, (s - 0.5) / 0.5); // up to a 300 ms glide
 }
 
+// ---- tilt ---------------------------------------------------------------------------
+double tiltAt(const Note& n, const NoteEdit& e, double frame)
+{
+    if (e.consonant || (e.tiltL == 0 && e.tiltR == 0)) return 0.0;
+    const double len = std::max(1, n.endFrame - n.startFrame);
+    const double u = std::clamp((frame + 0.5 - n.startFrame) / len, 0.0, 1.0);
+    return e.tiltL + (e.tiltR - e.tiltL) * u;
+}
+
+double tiltMean(const Analysis& a, int i, const NoteEdit& e)
+{
+    if (i < 0 || i >= (int)a.notes.size() || e.consonant || (e.tiltL == 0 && e.tiltR == 0)) return 0.0;
+    const Note& n = a.notes[(size_t)i];
+    double sum = 0, wsum = 0;
+    for (int k = std::max(0, n.startFrame); k < std::min(n.endFrame, (int)a.frames.size()); ++k) {
+        const Frame& f = a.frames[(size_t)k];
+        if (f.f0 <= 0) continue;
+        const double w = std::pow(10.0, f.rmsDb / 20.0);
+        sum += w * tiltAt(n, e, k);
+        wsum += w;
+    }
+    return wsum > 0 ? sum / wsum : 0.5 * (e.tiltL + e.tiltR);
+}
+
+double editedCenter(const Analysis& a, const EditSet& e, int i)
+{
+    if (i < 0 || i >= (int)a.notes.size()) return 0.0;
+    const NoteEdit& ed = i < (int)e.notes.size() ? e.notes[(size_t)i] : kNoEditE;
+    return a.notes[(size_t)i].centerMidi + ed.pitchOffset + tiltMean(a, i, ed);
+}
+
+void addTilt(EditSet& e, const std::set<int>& notes, bool rightCorner, double semis)
+{
+    for (int i : notes) {
+        if (i < 0 || i >= (int)e.notes.size() || e.notes[(size_t)i].consonant) continue;
+        (rightCorner ? e.notes[(size_t)i].tiltR : e.notes[(size_t)i].tiltL) += semis;
+    }
+}
+
+// ---- auto vibrato -------------------------------------------------------------------------
+const AutoVibrato& vibratoOf(const EditSet& e, int i)
+{
+    if (i >= 0 && i < (int)e.notes.size() && e.notes[(size_t)i].ownVibrato) return e.notes[(size_t)i].vibrato;
+    return e.autoVibrato;
+}
+
+void setTrackVibrato(EditSet& e, const AutoVibrato& v, bool resetNotes)
+{
+    e.autoVibrato = v;
+    if (resetNotes)
+        for (auto& n : e.notes) { n.ownVibrato = false; n.vibrato = AutoVibrato{}; }
+}
+
+void setNoteVibrato(EditSet& e, const std::set<int>& notes, const AutoVibrato& v)
+{
+    for (int i : notes) {
+        if (i < 0 || i >= (int)e.notes.size()) continue;
+        e.notes[(size_t)i].ownVibrato = true;
+        e.notes[(size_t)i].vibrato = v;
+    }
+}
+
 // ---- pencil -------------------------------------------------------------------------
 std::vector<float> drawnDense(const EditSet& e, int numFrames)
 {
@@ -219,7 +281,9 @@ void drawPitch(EditSet& e, const Analysis& a, int firstFrame, const std::vector<
         if (f < 0 || f >= nf || std::isnan(midi[k])) continue;
         const int ni = a.noteOfFrame.empty() ? -1 : a.noteOfFrame[(size_t)f];
         if (ni < 0 || a.frames[(size_t)f].f0 <= 0) continue;
-        const double off = ni < (int)e.notes.size() ? e.notes[(size_t)ni].pitchOffset : 0.0;
+        const double off = ni < (int)e.notes.size()
+                               ? e.notes[(size_t)ni].pitchOffset + tiltAt(a.notes[(size_t)ni], e.notes[(size_t)ni], f)
+                               : 0.0;
         d[(size_t)f] = (float)(midi[k] - (a.frames[(size_t)f].midi + off));
     }
     setDrawnDense(e, d);

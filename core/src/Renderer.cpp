@@ -53,6 +53,26 @@ inline float ctrlAt(const std::vector<float>& v, double frame)
 
 const NoteEdit kNoEdit{};
 
+// Deterministic random value in [-1, 1].
+double hashRand(uint32_t seed, uint32_t a, uint32_t b)
+{
+    uint32_t h = seed * 2654435761u ^ (a * 0x9E3779B9u + 0x7F4A7C15u) ^ (b * 0x85EBCA6Bu);
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+    return (h / 4294967295.0) * 2.0 - 1.0;
+}
+
+// Slow smooth wander in [-1, 1]: random knots `step` seconds apart, raised-cosine
+// interpolation (no steps, no jitter).
+double wander(uint32_t seed, uint32_t note, uint32_t chan, double t, double step)
+{
+    const double x = std::max(0.0, t) / step;
+    const uint32_t i = (uint32_t)x;
+    const double f = x - i;
+    const double w = 0.5 - 0.5 * std::cos(M_PI * f);
+    const uint32_t c = note * 4 + chan;
+    return hashRand(seed, c, i) * (1 - w) + hashRand(seed, c, i + 1) * w;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -110,6 +130,48 @@ double TimeMap::inToOut(double t) const { return identity_ ? t : interpMap(in_, 
 double TimeMap::outToIn(double t) const { return identity_ ? t : interpMap(out_, in_, t); }
 
 // ---------------------------------------------------------------------------
+// Auto vibrato of one note, on the OUTPUT timeline (a stretched note keeps its
+// vibrato rate): envelope 0 until the delay, S-curve onset over `onsetPeriods`,
+// fade-out over the last period. Phase is the integral of the (wandering) rate.
+// Adds pitch (semitones, voiced frames) and level (dB). Returns false when the
+// note is too short to get any vibrato.
+static bool addAutoVibrato(const Analysis& a, const TimeMap& map, const AutoVibrato& v, uint32_t seed, int ni,
+                           std::vector<float>* pitch, std::vector<float>* gain)
+{
+    const Note& nt = a.notes[(size_t)ni];
+    const double sr = a.sampleRate;
+    const double t0 = map.inToOut(nt.startFrame * (double)a.hop) / sr;
+    const double t1 = map.inToOut(nt.endFrame * (double)a.hop) / sr;
+    const double rate = std::clamp(v.rateHz, 0.5, 20.0);
+    const double delay = std::max(0.0, v.delayMs / 1000.0);
+    if (t1 - t0 <= delay) return false;
+    if (!pitch) return true;
+    const double onset = std::max(0.0, v.onsetPeriods) / rate;
+    const double fadeOut = 1.0 / rate;
+    const double var = std::clamp(v.variation / 100.0, 0.0, 1.0);
+    const double depth = std::max(0.0, v.depthCents) / 100.0;
+    const uint32_t note = (uint32_t)ni;
+    double phase = M_PI * (1.0 + hashRand(seed, note, 0xFFFFu)); // own start phase per note and track
+    double prevT = t0 + delay;
+    const int nf = (int)a.frames.size();
+    for (int k = std::max(0, nt.startFrame); k < std::min(nt.endFrame, nf); ++k) {
+        const double t = map.inToOut(k * (double)a.hop) / sr;
+        const double tn = t - t0;
+        if (tn < delay) continue;
+        const double r = rate * (1.0 + 0.10 * var * wander(seed, note, 1, tn, 0.7));
+        phase += 2.0 * M_PI * r * (t - prevT);
+        prevT = t;
+        const double on = onset > 0 ? 0.5 - 0.5 * std::cos(M_PI * std::clamp((tn - delay) / onset, 0.0, 1.0)) : 1.0;
+        const double off = 0.5 - 0.5 * std::cos(M_PI * std::clamp((t1 - t) / fadeOut, 0.0, 1.0));
+        const double env = on * off;
+        const double s = std::sin(phase);
+        if (a.frames[(size_t)k].f0 > 0)
+            (*pitch)[(size_t)k] += (float)(env * depth * (1.0 + 0.30 * var * wander(seed, note, 2, tn, 0.9)) * s);
+        (*gain)[(size_t)k] += (float)(env * v.tremoloDb * s);
+    }
+    return true;
+}
+
 Controls buildControls(const Analysis& a, const EditSet& e)
 {
     const int nf = (int)a.frames.size();
@@ -121,6 +183,22 @@ Controls buildControls(const Analysis& a, const EditSet& e)
 
     std::vector<float> offset(nf, 0.f), shape(nf, 0.f), formant(nf, (float)e.globalFormantShift);
     const double taper = std::max(1.0, e.edgeTaperMs / hopMs);
+
+    // Auto vibrato: which notes get it (long enough, not consonants). Those lose
+    // their own vibrato (it is replaced, not added).
+    std::vector<char> autoOn(a.notes.size(), 0);
+    TimeMap vibMap;
+    bool anyVib = false;
+    for (size_t i = 0; i < a.notes.size() && !anyVib; ++i)
+        anyVib = vibratoOf(e, (int)i).active() && !(i < e.notes.size() && e.notes[i].consonant);
+    if (anyVib) {
+        vibMap = TimeMap::build(a, e);
+        for (size_t i = 0; i < a.notes.size(); ++i) {
+            const AutoVibrato& v = vibratoOf(e, (int)i);
+            if (!v.active() || (i < e.notes.size() && e.notes[i].consonant)) continue;
+            autoOn[i] = addAutoVibrato(a, vibMap, v, e.vibratoSeed, (int)i, nullptr, nullptr) ? 1 : 0;
+        }
+    }
 
     for (int k = 0; k < nf; ++k) {
         const Frame& f = a.frames[k];
@@ -138,10 +216,11 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         const double t = std::clamp(edge / taper, 0.0, 1.0);
         const double w = 0.5 - 0.5 * std::cos(M_PI * t);
         const double drift = 1.0 + (ed.driftAmount - 1.0) * w;
-        const double vib = 1.0 + (ed.vibratoAmount - 1.0) * w;
+        const bool replaced = autoOn[(size_t)ni] && vibratoOf(e, ni).depthCents > 0;
+        const double vib = 1.0 + ((replaced ? 0.0 : ed.vibratoAmount) - 1.0) * w;
         // Scaling drift/vibrato around their own mean keeps the perceived centre where it was.
         if (!ed.consonant) { // consonants are passed through with their own pitch
-            offset[k] = (float)ed.pitchOffset;
+            offset[k] = (float)(ed.pitchOffset + tiltAt(nt, ed, k));
             shape[k] = (float)((drift - 1.0) * (a.slowDev[k] - nt.meanSlow) + (vib - 1.0) * (a.fastDev[k] - nt.meanFast));
         }
         formant[k] += (float)ed.formantShift;
@@ -170,9 +249,21 @@ Controls buildControls(const Analysis& a, const EditSet& e)
             const int h = (int)std::floor(std::min({0.5 * widthFrames, 0.5 * (b - segL), 0.5 * (segR + 1 - b)}));
             if (h <= 0) continue; // hard step
             const float vL = raw[(size_t)b - 1], vR = raw[(size_t)b];
+            // Tilted notes: blend between the two lines extended across the boundary
+            // (slope 0 without tilt, so untilted notes are unchanged).
+            auto slope = [&](int ni) {
+                if (ni < 0 || ni >= (int)e.notes.size()) return 0.0;
+                const NoteEdit& ed = e.notes[(size_t)ni];
+                if (ed.consonant || ed.tiltL == ed.tiltR) return 0.0;
+                return (ed.tiltR - ed.tiltL) / std::max(1, a.notes[(size_t)ni].endFrame - a.notes[(size_t)ni].startFrame);
+            };
+            const double sL = slope(noteAt(b - 1)), sR = slope(noteAt(b));
             for (int j = b - h; j < b + h; ++j) {
                 const double t = (j - (b - h) + 0.5) / (2.0 * h);
-                offset[(size_t)j] = (float)(vL + (vR - vL) * (0.5 - 0.5 * std::cos(M_PI * t)));
+                const double S = 0.5 - 0.5 * std::cos(M_PI * t);
+                if (sL == 0 && sR == 0) { offset[(size_t)j] = (float)(vL + (vR - vL) * S); continue; }
+                const double lineL = vL + sL * (j - (b - 1)), lineR = vR + sR * (j - b);
+                offset[(size_t)j] = (float)(lineL + (lineR - lineL) * S);
             }
         }
         smoothRange(formant, k, en, half);
@@ -208,7 +299,9 @@ Controls buildControls(const Analysis& a, const EditSet& e)
             const double limL = 0.5 * (b - L.startFrame), limR = 0.5 * (Rn.endFrame - b);
             const double half = std::min({0.5 * transitionWidthMs(eR.transition, e.transitionMs) / hopMs, limL, limR});
             const double inner = std::max(half, natHalf);
-            const double lvL = L.centerMidi + eL.pitchOffset, lvR = Rn.centerMidi + eR.pitchOffset;
+            // From the (tilted) end of the left note to the (tilted) start of the right one.
+            const double lvL = L.centerMidi + eL.pitchOffset + tiltAt(L, eL, L.endFrame - 1);
+            const double lvR = Rn.centerMidi + eR.pitchOffset + tiltAt(Rn, eR, Rn.startFrame);
             const int k0 = std::max(L.startFrame, b - (int)std::ceil(std::min(inner + fade, limL)));
             const int k1 = std::min(Rn.endFrame, b + (int)std::ceil(std::min(inner + fade, limR)));
             for (int k = k0; k < k1; ++k) {
@@ -227,6 +320,11 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         }
     }
 
+    // Auto vibrato rides on the line (after the transitions, under the pencil).
+    if (anyVib)
+        for (size_t i = 0; i < a.notes.size(); ++i)
+            if (autoOn[i]) addAutoVibrato(a, vibMap, vibratoOf(e, (int)i), e.vibratoSeed, (int)i, &c.pitchSemis, &c.gainDb);
+
     // Pencil: drawn pitch replaces the computed curve, blended in over ~30 ms at
     // the ends of each drawn stretch so it joins the rest without a jump.
     for (const DrawRun& r : e.draw) {
@@ -237,7 +335,9 @@ Controls buildControls(const Analysis& a, const EditSet& e)
             if (k < 0 || k >= nf || a.frames[k].f0 <= 0 || std::isnan(r.delta[(size_t)q])) continue;
             const int ni = noteAt(k);
             if (ni >= 0 && ni < (int)e.notes.size() && e.notes[(size_t)ni].consonant) continue;
-            const double noteOff = (ni >= 0 && ni < (int)e.notes.size()) ? e.notes[(size_t)ni].pitchOffset : 0.0;
+            const double noteOff = (ni >= 0 && ni < (int)e.notes.size())
+                                       ? e.notes[(size_t)ni].pitchOffset + tiltAt(a.notes[(size_t)ni], e.notes[(size_t)ni], k)
+                                       : 0.0;
             const double drawn = noteOff + r.delta[(size_t)q];
             const double edgeDist = std::min(q, len - 1 - q) + 1.0;
             const double w = edgeDist >= blend ? 1.0 : 0.5 - 0.5 * std::cos(M_PI * edgeDist / blend);
