@@ -150,8 +150,11 @@ private:
         std::vector<ThreadFrame> tgt, ref; // this clip's thread, the reference's (this clip's timeline)
         Warp warp;
         AlignInfo info;
+        std::vector<NoteFix> fixes;        // wrong notes found through the links (step 2)
+        int toFix = 0;                     // notes F would move
     };
     Links links_;
+    void applyLinkFixes(); // F: move the wrong notes by whole semitones (one undo step)
     std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
     struct GhostView {
         juce::String id;     // the track (ClipHost::TrackRef id)

@@ -181,6 +181,7 @@ public:
             "  G — линии сетки 1/4 → 1/8 → 1/16    L — показать локатор\n"
             "  T — треки: ноты других треков поверх этого, переключение редактирования\n"
             "  N — связи с первым показанным треком: где их нитки совпадают по времени (звук не меняется)\n"
+            "  F — при связях: неверные ноты (на полутон и больше от того трека) сдвинуть целыми полутонами\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -425,6 +426,7 @@ public:
                         if (ed.links_.info.octave != 0)
                             st << T(", октава ") << (ed.links_.info.octave > 0 ? "+" : "") << ed.links_.info.octave;
                         if (ed.links_.info.part) st << T(", другая партия");
+                        if (ed.links_.toFix > 0) st << T(" · неверных нот: ") << ed.links_.toFix << T(" (F — исправить)");
                     }
                 }
                 if (ed.host_->isRendering()) st << T(" · рендер…");
@@ -685,6 +687,20 @@ public:
         g.strokePath(p, juce::PathStrokeType(1.2f));
         g.setColour(link);
         g.fillPath(dots);
+
+        // Wrong notes F would move: "+2" / "−5" above the note.
+        g.setFont(juce::FontOptions(11.f, juce::Font::bold));
+        for (const auto& f : L.fixes) {
+            if (f.semis == 0 || f.note < 0 || f.note >= (int)ed.eff_->notes.size()) continue;
+            const auto r = noteRect(f.note);
+            if (r.getRight() < c.getX() || r.getX() > c.getRight()) continue;
+            const juce::String txt = (f.semis > 0 ? "+" : juce::String::fromUTF8("\xe2\x88\x92")) + juce::String(std::abs(f.semis)) + T(" пт");
+            const auto box = juce::Rectangle<float>(r.getX(), r.getY() - 17.f, 40.f, 15.f);
+            g.setColour(link.withAlpha(0.9f));
+            g.fillRoundedRectangle(box, 3.f);
+            g.setColour(col::bg);
+            g.drawText(txt, box, juce::Justification::centred);
+        }
     }
 
     void drawGhosts(juce::Graphics& g)
@@ -1039,6 +1055,7 @@ public:
         m.addItem(5, T("Дрейф убрать / вернуть\tD"), true);
         m.addItem(6, T("Вибрато 100 / 50 / 0 %\tV"), true);
         m.addItem(9, T("Автовибрато вкл / выкл\tShift+V"), true);
+        m.addItem(30, T("Исправить неверные ноты по связям\tF"), ed.links_.ok && ed.links_.toFix > 0);
         m.addItem(7, T("Стереть карандаш в выделенных"), any && ed.doc() != nullptr && !ed.doc()->edits.draw.empty());
         bool allCons = any && ed.doc() != nullptr;
         if (allCons)
@@ -1068,6 +1085,7 @@ public:
             else if (r == 7) ed.erasePencilInSelection();
             else if (r == 8) ed.toggleConsonant();
             else if (r == 9) ed.toggleAutoVibrato();
+            else if (r == 30) ed.applyLinkFixes();
             else if (r >= 10 && r < 30) {
                 const int j = r % 10;
                 const bool on = r < 20;
@@ -2244,6 +2262,17 @@ void PitchEditor::refreshLinks()
     links_.ref = std::move(ref);
     links_.name = gv.name;
     links_.ok = !links_.warp.empty();
+    if (links_.ok) {
+        links_.fixes = planPitchFix(*eff_, doc()->edits, links_.ref, links_.warp, links_.info);
+        for (const auto& f : links_.fixes) if (f.semis != 0) ++links_.toFix;
+    }
+}
+
+void PitchEditor::applyLinkFixes()
+{
+    if (!links_.ok || links_.toFix == 0) return;
+    const std::vector<NoteFix> fixes = links_.fixes;
+    edit([&](Document& d) { applyPitchFix(d.edits, fixes); });
 }
 
 float PitchEditor::linkRefMidi(double t) const
@@ -2682,6 +2711,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         case 'h': showHarmonies_ = !showHarmonies_; resized(); updateToolbar(); return true;
         case 't': toggleTracks(); return true;
         case 'n': toggleLinks(); return true;
+        case 'f': applyLinkFixes(); return true;
         case '0': fitView(); return true;
         case '+': case '=': pps_ = std::min(4000.0, pps_ * 1.4); roll_->repaint(); return true;
         case '-': pps_ = std::max(2.0, pps_ / 1.4); roll_->repaint(); return true;
