@@ -570,7 +570,7 @@ static void testTilt(const test::SynthResult& s, const Analysis& a, double sr)
     EditSet flat;
     flat.notes.resize(a.notes.size());
     EditSet t = flat;
-    addTilt(t, {i}, true, -1.0);
+    addTilt(t, a, {i}, true, -1.0);
     const auto c0 = editedPitchCurve(a, flat), c1 = editedPitchCurve(a, t);
     double worst = 0;
     for (int k = n.startFrame; k < n.endFrame; ++k) {
@@ -597,13 +597,33 @@ static void testTilt(const test::SynthResult& s, const Analysis& a, double sr)
           "rendered tilt off");
 
     // Dragging again continues from the current tilt; the left corner keeps the right edge.
-    addTilt(t, {i}, true, -0.5);
-    addTilt(t, {i}, false, 0.25);
+    addTilt(t, a, {i}, true, -0.5);
+    addTilt(t, a, {i}, false, 0.25);
     CHECK(t.notes[(size_t)i].tiltR == -1.5 && t.notes[(size_t)i].tiltL == 0.25, "tilt did not accumulate");
     EditSet cons = flat;
     cons.notes[(size_t)i].consonant = true;
-    addTilt(cons, {i}, true, -1.0);
+    addTilt(cons, a, {i}, true, -1.0);
     CHECK(cons.notes[(size_t)i].tiltR == 0, "a consonant was tilted");
+
+    // Several notes tilt as one: one straight line over the group, its left edge stays.
+    const std::set<int> group = {6, 7, 8};
+    const int g0 = a.notes[6].startFrame, g1 = a.notes[8].endFrame;
+    EditSet gt = flat;
+    addTilt(gt, a, group, true, -1.0);
+    const auto cg = editedPitchCurve(a, gt);
+    double gWorst = 0;
+    for (int k = g0; k < g1; ++k) {
+        const int ni = a.noteOfFrame[(size_t)k];
+        if (a.frames[(size_t)k].f0 <= 0 || !group.count(ni)) continue;
+        const double want = -1.0 * (k + 0.5 - g0) / (g1 - g0);
+        gWorst = std::max(gWorst, std::abs((cg[(size_t)k] - c0[(size_t)k]) - want));
+    }
+    std::printf("  group of 3 notes, right end -1 st: worst %.4f st from one straight line; ends %+.2f / %+.2f\n", gWorst,
+                gt.notes[6].tiltL, gt.notes[8].tiltR);
+    CHECK(gWorst < 0.005, "group tilt is not one straight line (%.4f st)", gWorst);
+    CHECK(gt.notes[6].tiltL == 0 && std::abs(gt.notes[8].tiltR + 1.0) < 1e-12, "group ends wrong");
+    CHECK(editedCenter(a, gt, 6) > editedCenter(a, gt, 8) - a.notes[8].centerMidi + a.notes[6].centerMidi,
+          "the first note of the group should drop less than the last");
 }
 
 static void testTiltLayout(const Analysis& a)

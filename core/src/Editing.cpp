@@ -217,11 +217,25 @@ double editedCenter(const Analysis& a, const EditSet& e, int i)
     return a.notes[(size_t)i].centerMidi + ed.pitchOffset + tiltMean(a, i, ed);
 }
 
-void addTilt(EditSet& e, const std::set<int>& notes, bool rightCorner, double semis)
+void addTilt(EditSet& e, const Analysis& a, const std::set<int>& notes, bool rightCorner, double semis)
 {
+    auto usable = [&](int i) {
+        return i >= 0 && i < (int)e.notes.size() && i < (int)a.notes.size() && !e.notes[(size_t)i].consonant;
+    };
+    int g0 = std::numeric_limits<int>::max(), g1 = std::numeric_limits<int>::min();
+    for (int i : notes)
+        if (usable(i)) { g0 = std::min(g0, a.notes[(size_t)i].startFrame); g1 = std::max(g1, a.notes[(size_t)i].endFrame); }
+    if (g1 <= g0) return;
+    // The line in frames, as tiltAt() measures each note: edges at startFrame and endFrame.
+    auto line = [&](double frame) {
+        const double u = (frame - g0) / (double)(g1 - g0);
+        return semis * (rightCorner ? u : 1.0 - u);
+    };
     for (int i : notes) {
-        if (i < 0 || i >= (int)e.notes.size() || e.notes[(size_t)i].consonant) continue;
-        (rightCorner ? e.notes[(size_t)i].tiltR : e.notes[(size_t)i].tiltL) += semis;
+        if (!usable(i)) continue;
+        NoteEdit& n = e.notes[(size_t)i];
+        n.tiltL += line(a.notes[(size_t)i].startFrame);
+        n.tiltR += line(a.notes[(size_t)i].endFrame);
     }
 }
 

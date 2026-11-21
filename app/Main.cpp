@@ -512,6 +512,26 @@ private:
                     check(e1.tiltR == e0.tiltR && e1.tiltL == e0.tiltL, "narrow note: no tilt area");
                 }
                 undoIfChanged(snap);
+
+                // Two selected notes tilt as one: one line, the first note's left edge stays,
+                // the line runs on through the join.
+                const auto r2 = ed.noteRectForTest(i + 1);
+                if (zoomed && r2.getWidth() >= 40) {
+                    snap = serialize(s.document());
+                    ed.setSelection({i, i + 1});
+                    const float edge2 = std::min(7.f, r2.getWidth() * 0.25f);
+                    const juce::Point<float> f2(r2.getRight() - edge2 - 4.f, r2.getCentreY());
+                    ed.dragForTest(f2, f2 + juce::Point<float>(0.f, (float)hh));
+                    const NoteEdit& a0 = s.document().edits.notes[(size_t)i];
+                    const NoteEdit& a1 = s.document().edits.notes[(size_t)i + 1];
+                    std::printf("    two notes, right corner down 1 st: %+.2f..%+.2f | %+.2f..%+.2f\n", a0.tiltL, a0.tiltR,
+                                a1.tiltL, a1.tiltR);
+                    check(a0.tiltL == 0 && std::abs(a1.tiltR + 1.0) < 0.1 && a0.tiltR < 0 && a1.tiltL <= a0.tiltR + 1e-9 &&
+                              a1.tiltL > a1.tiltR,
+                          "two selected notes tilt as one line");
+                    undoIfChanged(snap);
+                    ed.setSelection({});
+                }
             }
 
             const float in = std::min(2.f, r.getWidth() * 0.1f);

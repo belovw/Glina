@@ -160,7 +160,7 @@ public:
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
             "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
             "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
-            "  Крайняя пятая часть ноты вверх/вниз — наклон нитки вокруг другого края (Shift — тоньше)\n"
+            "  Крайняя пятая часть ноты вверх/вниз — наклон нитки вокруг другого края; выделенные — как одна нота (Shift — тоньше)\n"
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
@@ -884,13 +884,14 @@ public:
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
         } else if (gesture == G::Tilt) {
-            // Free in cents (Shift: finer). Every selected note tilts by the same amount,
-            // each around its own opposite edge; a new drag continues from the current tilt.
+            // Free in cents (Shift: finer). Selected notes tilt as one note: one line over the
+            // group, the group's far edge stays, its near edge follows the mouse; each note gets
+            // its piece of the line. A new drag continues from the current tilt.
             const double delta = -off.y / semi() * (e.mods.isShiftDown() ? 0.25 : 1.0);
             d->edits = before.edits;
             std::set<int> notes;
             for (auto& kv : start) notes.insert(kv.first);
-            addTilt(d->edits, notes, tiltRight, delta);
+            addTilt(d->edits, *ed.eff_, notes, tiltRight, delta);
         } else if (gesture == G::Smooth) {
             // Vertical: up = smoother (more), down = sharper (less). 0.5 % per pixel (Shift: 0.15 %),
             // relative to where the drag started.
