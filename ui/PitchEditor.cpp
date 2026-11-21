@@ -651,21 +651,22 @@ public:
         const auto c = canvas();
         const juce::Font font(juce::FontOptions(12.f));
         g.setFont(font);
-        auto label = [&](const juce::String& txt, juce::Colour textCol, float y) {
+        auto label = [&](const juce::String& txt, juce::Colour textCol, juce::Colour boxCol, float y) {
             juce::GlyphArrangement ga;
             ga.addLineOfText(font, txt, 0.f, 0.f);
             const float w = ga.getBoundingBox(0, ga.getNumGlyphs(), true).getWidth() + 16.f;
             const auto box = juce::Rectangle<float>(c.getX() + 8.f, y, w, 20.f);
-            g.setColour(col::panel.withAlpha(0.85f));
+            g.setColour(boxCol);
             g.fillRoundedRectangle(box, 4.f);
             g.setColour(textCol);
             g.drawText(txt, box.reduced(8.f, 0.f), juce::Justification::centredLeft, false);
         };
+        // The edited track: bright text on a bordered box. Ghosts: dimmer, no border.
         float y = c.getY() + 6.f;
-        label(ed.editedName_, col::text, y);
+        label(ed.editedName_, juce::Colours::white, col::select.withAlpha(0.35f), y);
         for (const auto& gv : ed.ghosts_) {
             y += 24.f;
-            label(gv.name, juce::Colour(0xffa7aec0), y);
+            label(gv.name, juce::Colour(0xff7f8799), col::panel.withAlpha(0.85f), y);
         }
     }
 
