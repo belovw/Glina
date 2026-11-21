@@ -65,16 +65,16 @@ void curvedArrow(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bo
 // Triplet mark: a bracket with a "3" in the gap of its top line. Everything stays inside the icon area.
 void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
 {
-    const float h = a.getHeight();
-    const float top = a.getY() + h * 0.46f, tick = a.getY() + h * 0.94f;
-    const float l = a.getX(), r = a.getRight(), cx = a.getCentreX(), half = a.getWidth() * 0.26f;
+    const float h = a.getHeight(), w = a.getWidth();
+    const float top = a.getY() + h * 0.40f, tick = a.getY() + h * 0.90f;
+    const float l = a.getX(), r = a.getRight(), cx = a.getCentreX(), half = w * 0.22f;
     juce::Path p;
     p.startNewSubPath(l, tick); p.lineTo(l, top); p.lineTo(cx - half, top);
     p.startNewSubPath(cx + half, top); p.lineTo(r, top); p.lineTo(r, tick);
     g.setColour(c);
     g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setFont(juce::FontOptions(h * 0.62f));
-    g.drawText("3", juce::Rectangle<float>(cx - half, a.getY(), half * 2.f, h * 0.92f),
+    g.setFont(juce::FontOptions(h * 0.50f));
+    g.drawText("3", juce::Rectangle<float>(cx - half, top - h * 0.40f, half * 2.f, h * 0.80f),
                juce::Justification::centred, false);
 }
 
