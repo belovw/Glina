@@ -77,36 +77,38 @@ void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
                juce::Justification::centred, false);
 }
 
-// Up arrow for the ghost shift. When on, the head is filled.
+// One stroke weight for the glyphs that sit side by side (tracks bars and shift arrow).
+constexpr float kIconStroke = 2.2f;
+
+// Tracks: three equal bars, each shifted 6 % of the bar length from the one above.
+void tracksLanes(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
+{
+    g.setColour(c);
+    const float len = a.getWidth();
+    for (int i = 0; i < 3; ++i) {
+        const float y = a.getY() + a.getHeight() * (0.10f + 0.40f * (float)i) - kIconStroke * 0.5f;
+        const float x = a.getX() + 0.06f * len * (float)i;
+        g.fillRect(juce::Rectangle<float>(x, y, len, kIconStroke));
+    }
+}
+
+// Up arrow for the ghost shift: stem meets the apex of the head. When on, the head is filled.
 void shiftUp(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool on)
 {
     const float cx = a.getCentreX(), top = a.getY() + a.getHeight() * 0.10f, bot = a.getBottom();
     const float hw = a.getWidth() * 0.34f, hh = a.getHeight() * 0.40f;
     juce::Path stem;
     stem.startNewSubPath(cx, bot);
-    stem.lineTo(cx, top + hh * 0.5f);
+    stem.lineTo(cx, top);
     juce::Path head;
     head.startNewSubPath(cx - hw, top + hh);
     head.lineTo(cx, top);
     head.lineTo(cx + hw, top + hh);
     g.setColour(c);
-    const juce::PathStrokeType st(1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+    const juce::PathStrokeType st(kIconStroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
     g.strokePath(stem, st);
     if (on) { head.closeSubPath(); g.fillPath(head); }
     else g.strokePath(head, st);
-}
-
-// Tracks: three lanes, each a small square head and a bar.
-void lanesMarks(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
-{
-    g.setColour(c);
-    const float sq = a.getHeight() * 0.22f;
-    for (int i = 0; i < 3; ++i) {
-        const float y = a.getY() + a.getHeight() * (0.02f + 0.38f * (float)i);
-        g.fillRect(juce::Rectangle<float>(a.getX(), y, sq, sq));
-        g.fillRect(juce::Rectangle<float>(a.getX() + a.getWidth() * 0.42f, y + sq * 0.25f,
-                                          a.getWidth() * 0.58f, sq * 0.5f));
-    }
 }
 
 // A stack of `n` rectangles. Off: diagonal, the front one bright and the others shaded.
@@ -1645,7 +1647,7 @@ PitchEditor::PitchEditor()
     });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
     iconBtn(tracksBtn_, "Другие треки с Glina: показать поверх или редактировать (T)",
-            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::lanesMarks(g, a, c); },
+            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::tracksLanes(g, a, c); },
             [this] { toggleTracks(); });
     iconBtn(shiftBtn_, "Призраки визуально подняты на 3 полутона каждый относительно предыдущего",
             [this](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::shiftUp(g, a, c, ghostShift_); },
