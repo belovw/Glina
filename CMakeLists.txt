@@ -34,7 +34,8 @@ add_library(glina_core STATIC
   core/src/Harmony.cpp
   core/src/Document.cpp
   core/src/Editing.cpp
-  core/src/Transfer.cpp)
+  core/src/Transfer.cpp
+  core/src/Thread.cpp)
 target_include_directories(glina_core PUBLIC core/include)
 find_package(Threads REQUIRED)
 target_link_libraries(glina_core PUBLIC Threads::Threads)

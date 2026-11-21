@@ -7,6 +7,7 @@
 #include "glina/Notes.h"
 #include "glina/Editing.h"
 #include "glina/Transfer.h"
+#include "glina/Thread.h"
 
 #include <cmath>
 #include <cstdio>
@@ -843,10 +844,114 @@ static void testTransfer(const Analysis& a)
     CHECK(!transferNoteEdits(other, target, a, {1, 1}), "mismatched note count accepted");
 }
 
+// Thread alignment against the synthetic singer's ground truth: target note k must land
+// on reference note refOf[k] (-1 = not checked). Prints and returns the worst note-start error.
+static double alignError(const test::SynthResult& ref, const test::SynthResult& tgt, double tgtOffset, const Warp& w,
+                         const std::vector<int>& refOf, bool* midsInside)
+{
+    double worst = 0;
+    bool inside = true;
+    for (size_t k = 0; k < tgt.noteStart.size() && k < refOf.size(); ++k) {
+        const int r = refOf[k];
+        if (r < 0) continue;
+        const double mid = 0.5 * (tgt.noteStart[k] + tgt.noteEnd[k]) + tgtOffset;
+        const double m = w.map(mid);
+        if (m < ref.noteStart[(size_t)r] || m > ref.noteEnd[(size_t)r]) inside = false;
+        if (k > 0 && refOf[k - 1] == r) continue; // second half of a split note: no start of its own
+        worst = std::max(worst, std::abs(w.map(tgt.noteStart[k] + tgtOffset) - ref.noteStart[(size_t)r]));
+    }
+    if (midsInside) *midsInside = inside;
+    return worst;
+}
+
+static void testThreadAlign()
+{
+    std::printf("[thread] alignment by the pitch line: shift, tempo, octave, other part, split note, pin\n");
+    const double sr = 48000;
+    auto thread = [](const Analysis& a, double offset) {
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        return threadOf(a, e, [offset](double t) { return t + offset; }, 0.0, (double)a.numSamples / a.sampleRate);
+    };
+    const test::SynthResult ref = test::synthesize(test::demoMelody(), sr);
+    const Analysis ra = analyze(ref.audio.data(), ref.audio.size(), sr);
+    const auto refT = thread(ra, 0.0);
+    std::vector<int> same;
+    for (int k = 0; k < (int)ref.noteStart.size(); ++k) same.push_back(k);
+    auto report = [&](const char* name, const test::SynthResult& tgt, double off, const Warp& w,
+                      const std::vector<int>& refOf, double tol, const AlignInfo& inf) {
+        bool inside = false;
+        const double e = alignError(ref, tgt, off, w, refOf, &inside);
+        std::printf("  %-34s note starts within %5.1f ms, middles %s, octave %+d, coarse %+.3f s, cost %.3f\n", name,
+                    e * 1000, inside ? "on the right notes" : "OFF", inf.octave, inf.coarseSec, inf.meanCost);
+        CHECK(!w.empty(), "%s: no alignment", name);
+        CHECK(e < tol, "%s: note start off by %.1f ms", name, e * 1000);
+        CHECK(inside, "%s: a note middle maps onto another note", name);
+    };
+
+    { // the same take, its item placed 80 ms later
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(ra, 0.08), refT, {}, {}, &inf);
+        report("same take, 80 ms later", ref, 0.08, w, same, 0.012, inf);
+    }
+    // Another performance: 10 % slower, other intonation and vibrato.
+    std::vector<test::SynthNote> slow = test::demoMelody();
+    for (size_t k = 0; k < slow.size(); ++k) { slow[k].dur *= 1.1; slow[k].detuneCents = (k % 2 ? 1 : -1) * 20.0; }
+    const test::SynthResult sl = test::synthesize(slow, sr, 25, 5.1, 777);
+    const Analysis sa = analyze(sl.audio.data(), sl.audio.size(), sr);
+    Warp slowW;
+    {
+        AlignInfo inf;
+        slowW = alignThreads(thread(sa, 0.0), refT, {}, {}, &inf);
+        report("another take, 10 % slower", sl, 0.0, slowW, same, 0.035, inf);
+    }
+    { // an octave lower, 50 ms later
+        std::vector<test::SynthNote> low = test::demoMelody();
+        for (auto& n : low) n.midi -= 12;
+        const test::SynthResult lo = test::synthesize(low, sr, 30, 5.4, 4242);
+        const Analysis la = analyze(lo.audio.data(), lo.audio.size(), sr);
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(la, 0.05), refT, {}, {}, &inf);
+        report("an octave lower, 50 ms later", lo, 0.05, w, same, 0.02, inf);
+        CHECK(inf.octave == 1, "octave found %+d, want +1", inf.octave);
+    }
+    { // another part: a fourth above (shape only)
+        std::vector<test::SynthNote> part = test::demoMelody();
+        for (auto& n : part) n.midi += 5;
+        const test::SynthResult pt = test::synthesize(part, sr, 35, 5.8, 99);
+        const Analysis pa = analyze(pt.audio.data(), pt.audio.size(), sr);
+        AlignOptions o;
+        o.unison = false;
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(pa, 0.0), refT, o, {}, &inf);
+        report("another part, a fourth above", pt, 0.0, w, same, 0.035, inf);
+    }
+    { // the third note sung as two syllables ("s" in the middle)
+        std::vector<test::SynthNote> split = test::demoMelody();
+        split[2].dur = 0.3;
+        split.insert(split.begin() + 3, test::SynthNote{64, 0.3, -32, true, 1});
+        const test::SynthResult sp = test::synthesize(split, sr, 35, 5.6, 31337);
+        const Analysis spa = analyze(sp.audio.data(), sp.audio.size(), sr);
+        std::vector<int> refOf = {0, 1, 2, 2};
+        for (int k = 3; k < (int)ref.noteStart.size(); ++k) refOf.push_back(k);
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(spa, 0.0), refT, {}, {}, &inf);
+        report("a note split by an extra syllable", sp, 0.0, w, refOf, 0.04, inf);
+    }
+    { // a pin: target note 5 starts where the user says
+        const Pin p{sl.noteStart[5], ref.noteStart[5] + 0.06};
+        const Warp w = alignThreads(thread(sa, 0.0), refT, {}, {p});
+        const double e = std::abs(w.map(p.tgt) - p.ref);
+        std::printf("  pin: passes %.1f ms from the pinned point\n", e * 1000);
+        CHECK(e < 0.012, "pin missed by %.1f ms", e * 1000);
+    }
+}
+
 int main()
 {
     testSines();
     testSilenceAndNoise();
+    testThreadAlign();
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
         const test::SynthResult s = test::synthesize(test::demoMelody(), sr);
