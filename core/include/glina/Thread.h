@@ -64,4 +64,32 @@ struct AlignInfo {
 Warp alignThreads(const std::vector<ThreadFrame>& tgt, const std::vector<ThreadFrame>& ref, const AlignOptions& opt = {},
                   const std::vector<Pin>& pins = {}, AlignInfo* info = nullptr);
 
+// ---- step 2: wrong notes ---------------------------------------------------------------
+// For each note of the target: what the reference sings over it (through the warp),
+// and whether the note is a wrong note. A note within `keepCents` of the reference is
+// the singer's own intonation and stays; one at least `wrongCents` away is moved by a
+// whole number of semitones toward the reference, keeping its own cents. In between:
+// left alone. Notes the user already edited (pitch, tilt, pencil) and consonants are
+// never touched, nor anything when the reference is another part.
+struct NoteFix {
+    int note = -1;
+    int semis = 0;          // whole semitones to add (0 = leave the note)
+    double refMidi = 0;     // reference over the note, octave-folded to the target's octave
+    double diff = 0;        // reference minus the note's centre, semitones
+    bool edited = false;    // the user already edited it: never touched
+    bool unsteady = false;  // the reference changes notes over it (our note spans two of theirs): left alone
+};
+struct FixOptions {
+    double keepCents = 50;
+    double wrongCents = 100;
+    double minCover = 0.4;  // share of the note's middle where the reference sings
+    double minSteady = 0.7; // share of those frames within half a semitone of the reference's median
+};
+// `tgtA`/`tgtE`: the target clip (its threads were taken on its own output timeline);
+// `ref`, `warp`, `info`: from alignThreads(threadOf(tgtA, tgtE, ...), ref, ...).
+std::vector<NoteFix> planPitchFix(const Analysis& tgtA, const EditSet& tgtE, const std::vector<ThreadFrame>& ref,
+                                  const Warp& warp, const AlignInfo& info, const FixOptions& opt = {});
+// Adds the planned semitones to the notes' pitch offsets.
+void applyPitchFix(EditSet& e, const std::vector<NoteFix>& fixes);
+
 } // namespace glina

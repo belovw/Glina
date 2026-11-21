@@ -11,6 +11,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <string>
 
 using namespace glina;
@@ -952,11 +954,126 @@ static void testThreadAlign()
     }
 }
 
+static void testThreadFix()
+{
+    std::printf("[thread] wrong notes: whole semitones toward the reference, own cents kept, edits left alone\n");
+    const double sr = 48000;
+    auto thread = [](const Analysis& a, const EditSet& e) {
+        return threadOf(a, e, nullptr, 0.0, (double)a.numSamples / a.sampleRate);
+    };
+    const test::SynthResult ref = test::synthesize(test::demoMelody(), sr);
+    const Analysis ra = analyze(ref.audio.data(), ref.audio.size(), sr);
+    EditSet re;
+    re.notes.resize(ra.notes.size());
+    const auto refT = thread(ra, re);
+
+    // Another take: note 3 a fourth too high, note 6 1.75 st low, the rest within ~30 cents.
+    std::vector<test::SynthNote> mel = test::demoMelody();
+    for (size_t k = 0; k < mel.size(); ++k) mel[k].detuneCents += (k % 2 ? -12.0 : 14.0);
+    mel[3].midi += 5;
+    mel[6].midi -= 2;
+    mel[6].detuneCents = -15 + 25; // 57 - 0.15 sung by the reference; 55 + 0.10 here: 1.75 st low
+    auto run = [&](const std::vector<test::SynthNote>& m, double octaveShift, const char* name, const AlignOptions& o,
+                   EditSet* edits, std::vector<NoteFix>* outFixes, const Analysis** outA) {
+        std::vector<test::SynthNote> mm = m;
+        for (auto& n : mm) n.midi += octaveShift;
+        static std::vector<std::unique_ptr<Analysis>> keep;
+        const test::SynthResult s = test::synthesize(mm, sr, 28, 5.3, 2024);
+        keep.push_back(std::make_unique<Analysis>(analyze(s.audio.data(), s.audio.size(), sr)));
+        const Analysis& a = *keep.back();
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        if (edits) { *edits = e; }
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(a, e), refT, o, {}, &inf);
+        std::vector<NoteFix> f = planPitchFix(a, edits ? *edits : e, refT, w, inf);
+        std::printf("  %-30s", name);
+        for (const auto& x : f) std::printf(" %+d", x.semis);
+        std::printf("   (octave %+d%s)\n", inf.octave, inf.part ? ", another part" : "");
+        if (outFixes) *outFixes = f;
+        if (outA) *outA = &a;
+        return f;
+    };
+    auto only = [](const std::vector<NoteFix>& f, std::map<int, int> want) {
+        for (const auto& x : f) {
+            const int w = want.count(x.note) ? want[x.note] : 0;
+            if (x.semis != w) return false;
+        }
+        return !f.empty();
+    };
+
+    const Analysis* a = nullptr;
+    std::vector<NoteFix> fixes;
+    run(mel, 0, "two wrong notes", {}, nullptr, &fixes, &a);
+    CHECK(only(fixes, {{3, -5}, {6, 2}}), "want -5 on note 3 and +2 on note 6 only");
+    if (a != nullptr && fixes.size() == a->notes.size()) {
+        EditSet e;
+        e.notes.resize(a->notes.size());
+        applyPitchFix(e, fixes);
+        const double c3 = editedCenter(*a, e, 3), c6 = editedCenter(*a, e, 6);
+        const double r3 = 62 + 0.12, r6 = 57 - 0.15; // what the reference sings
+        std::printf("    after: note 3 %+.0f cents from the reference, note 6 %+.0f (own intonation kept)\n",
+                    (c3 - r3) * 100, (c6 - r6) * 100);
+        CHECK(std::abs(c3 - r3) < 0.5 && std::abs(c6 - r6) < 0.5, "fixed notes not on the reference's notes");
+        CHECK(std::abs((c6 - r6) - 0.25) < 0.1, "note 6 lost its own cents (%.2f)", c6 - r6);
+    }
+    {
+        std::vector<NoteFix> f = run(mel, -12, "the same an octave lower", {}, nullptr, nullptr, nullptr);
+        CHECK(only(f, {{3, -5}, {6, 2}}), "octave lower: want -5 on note 3 and +2 on note 6 only");
+    }
+    {
+        std::vector<test::SynthNote> part = test::demoMelody();
+        std::vector<NoteFix> f = run(part, 5, "another part (fourth above)", {}, nullptr, nullptr, nullptr);
+        CHECK(only(f, {}), "another part must not be pitch-fixed");
+    }
+    {
+        // A note the user already moved stays as the user left it.
+        const test::SynthResult s = test::synthesize(mel, sr, 28, 5.3, 2024);
+        const Analysis ea = analyze(s.audio.data(), s.audio.size(), sr);
+        EditSet e;
+        e.notes.resize(ea.notes.size());
+        e.notes[3].pitchOffset = 0.3;
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(ea, e), refT, {}, {}, &inf);
+        const auto f = planPitchFix(ea, e, refT, w, inf);
+        CHECK(f.size() == ea.notes.size() && f[3].edited && f[3].semis == 0 && f[6].semis == 2,
+              "an edited note was planned for a fix, or the other wrong note was missed");
+    }
+    {
+        // One note of ours where the reference sings two (64 then 61): the reference is not
+        // steady over it, so it must not be moved as a whole.
+        std::vector<test::SynthNote> two = test::demoMelody();
+        two[2].dur = 0.3;
+        two.insert(two.begin() + 3, test::SynthNote{61, 0.3, 0, false, 1});
+        const test::SynthResult rs = test::synthesize(two, sr);
+        const Analysis r2 = analyze(rs.audio.data(), rs.audio.size(), sr);
+        EditSet r2e;
+        r2e.notes.resize(r2.notes.size());
+        const auto ref2 = thread(r2, r2e);
+        const test::SynthResult ts = test::synthesize(test::demoMelody(), sr, 28, 5.3, 2024);
+        const Analysis ta = analyze(ts.audio.data(), ts.audio.size(), sr);
+        EditSet te;
+        te.notes.resize(ta.notes.size());
+        // The two takes start together, so the true map is the identity (DTW may instead
+        // squeeze our long note into their first one, which is also a fair reading).
+        Warp w;
+        w.tgt = {0.0, 10.0};
+        w.ref = {0.0, 10.0};
+        const auto f = planPitchFix(ta, te, ref2, w, AlignInfo{});
+        bool moved = false;
+        for (const auto& x : f) moved = moved || x.semis != 0;
+        std::printf("  one note over two of the reference: note 2 %s, nothing moved: %s\n",
+                    f.size() > 2 && f[2].unsteady ? "flagged unsteady" : "NOT flagged", moved ? "no" : "yes");
+        CHECK(f.size() > 2 && f[2].unsteady && !moved, "a note spanning two reference notes was moved or not flagged");
+    }
+}
+
 int main()
 {
     testSines();
     testSilenceAndNoise();
     testThreadAlign();
+    testThreadFix();
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
         const test::SynthResult s = test::synthesize(test::demoMelody(), sr);

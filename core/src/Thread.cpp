@@ -1,4 +1,5 @@
 #include "glina/Thread.h"
+#include "glina/Editing.h"
 #include "glina/Renderer.h"
 
 #include <algorithm>
@@ -385,6 +386,66 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
         info->medianDiff = medianDiff;
     }
     return w;
+}
+
+// ---- step 2: wrong notes ---------------------------------------------------------------
+std::vector<NoteFix> planPitchFix(const Analysis& a, const EditSet& e, const std::vector<ThreadFrame>& ref,
+                                  const Warp& warp, const AlignInfo& info, const FixOptions& opt)
+{
+    std::vector<NoteFix> out;
+    if (warp.empty() || ref.empty()) return out;
+    const TimeMap map = TimeMap::build(a, e);
+    const double sr = a.sampleRate;
+    const int nf = (int)a.frames.size();
+    const std::vector<float> drawn = drawnDense(e, nf);
+    // Reference pitch at a time (nearest frame within 15 ms; 0 = none).
+    auto refAt = [&](double t) -> float {
+        const auto it = std::lower_bound(ref.begin(), ref.end(), t, [](const ThreadFrame& f, double x) { return f.t < x; });
+        const ThreadFrame* best = nullptr;
+        if (it != ref.end()) best = &*it;
+        if (it != ref.begin() && (best == nullptr || t - std::prev(it)->t < best->t - t)) best = &*std::prev(it);
+        return (best != nullptr && std::abs(best->t - t) <= 0.015) ? best->midi : 0.f;
+    };
+    const NoteEdit none{};
+    for (int i = 0; i < (int)a.notes.size(); ++i) {
+        NoteFix f;
+        f.note = i;
+        const Note& n = a.notes[(size_t)i];
+        const NoteEdit& ed = i < (int)e.notes.size() ? e.notes[(size_t)i] : none;
+        bool edited = ed.pitchOffset != 0 || ed.tiltL != 0 || ed.tiltR != 0;
+        for (int k = std::max(0, n.startFrame); k < std::min(n.endFrame, nf) && !edited; ++k)
+            if (!std::isnan(drawn[(size_t)k])) edited = true;
+        f.edited = edited;
+        if (edited || ed.consonant || info.part) { out.push_back(f); continue; }
+        // The middle of the note (glides at its ends belong to the transitions).
+        const int len = n.endFrame - n.startFrame;
+        const int k0 = n.startFrame + len / 5, k1 = n.endFrame - len / 5;
+        std::vector<float> d;
+        int voiced = 0;
+        for (int k = std::max(0, k0); k < std::min(k1, nf); ++k) {
+            if (a.frames[(size_t)k].f0 <= 0) continue;
+            ++voiced;
+            const double t = map.inToOut(k * (double)a.hop) / sr;
+            const float r = refAt(warp.map(t));
+            if (r > 0) d.push_back(r - 12.f * (float)info.octave);
+        }
+        if (voiced == 0 || (double)d.size() < opt.minCover * voiced) { out.push_back(f); continue; }
+        std::nth_element(d.begin(), d.begin() + (long)d.size() / 2, d.end());
+        f.refMidi = d[d.size() / 2];
+        f.diff = f.refMidi - n.centerMidi;
+        int steady = 0;
+        for (float x : d) if (std::abs(x - f.refMidi) <= 0.5f) ++steady;
+        if ((double)steady < opt.minSteady * (double)d.size()) { f.unsteady = true; out.push_back(f); continue; }
+        if (std::abs(f.diff) * 100.0 >= opt.wrongCents) f.semis = (int)std::lround(f.diff);
+        out.push_back(f);
+    }
+    return out;
+}
+
+void applyPitchFix(EditSet& e, const std::vector<NoteFix>& fixes)
+{
+    for (const NoteFix& f : fixes)
+        if (f.semis != 0 && !f.edited && f.note >= 0 && f.note < (int)e.notes.size()) e.notes[(size_t)f.note].pitchOffset += f.semis;
 }
 
 } // namespace glina
