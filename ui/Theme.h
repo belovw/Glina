@@ -8,10 +8,10 @@ inline juce::String T(const char* utf8) { return juce::String::fromUTF8(utf8); }
 
 namespace col {
 const juce::Colour bg { 0xff131519 }, panel { 0xff1a1d23 }, panelLine { 0xff2a2e37 },
-    laneWhite { 0xff1b1e24 }, laneBlack { 0xff17191e }, laneScale { 0xff1e2229 }, grid { 0xff262a32 },
+    laneWhite { 0xff16181d }, laneBlack { 0xff121418 }, laneScale { 0xff181b21 }, grid { 0xff262a32 },
     keyWhite { 0xffd8dade }, keyBlack { 0xff2a2d33 }, text { 0xffc9ccd3 }, dim { 0xff7d828c },
     pitchOrig { 0x80a0a6b0 }, pitchEdit { 0xfff2f4f8 }, playhead { 0xff4fb3ff },
-    inTune { 0xff57c785 }, nearTune { 0xffe8c547 }, offTune { 0xffe8803d }, select { 0xffffffff },
+    inTune { 0xff57c785 }, nearTune { 0xffe8c547 }, offTune { 0xffc492e8 }, select { 0xffffffff },
     sibilant { 0xffb36bd6 }, breath { 0xff5c7a99 }, accent { 0xff4fb3ff }, warn { 0xffe8803d },
     drawn { 0xffffa53d };
 inline juce::Colour voice(int i)

@@ -490,8 +490,8 @@ public:
             p.closeSubPath();
             g.setColour(fill.withAlpha(sel ? 0.62f : 0.36f));
             g.fillPath(p);
-            g.setColour(sel ? col::select : fill.withAlpha(0.9f));
-            g.strokePath(p, juce::PathStrokeType(sel ? 1.6f : 1.f));
+            g.setColour(sel ? col::select : fill.withAlpha(0.6f)); // thin, quiet outline: the fill carries the colour
+            g.strokePath(p, juce::PathStrokeType(sel ? 1.6f : 0.6f));
 
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
                 e.vibratoAmount != 1 || e.tiltL != 0 || e.tiltR != 0 || e.ownVibrato) {
