@@ -67,10 +67,12 @@ void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
 {
     const float h = a.getHeight(), w = a.getWidth();
     const float top = a.getY() + h * 0.50f, tick = a.getY() + h * 0.70f;
-    const float l = a.getX() - w * 0.12f - 4.f, r = a.getRight() + w * 0.12f, cx = a.getCentreX(), half = w * 0.24f;
+    const float l = a.getX() - w * 0.12f, r = a.getRight() + w * 0.12f, cx = a.getCentreX(), half = w * 0.24f;
+    const float sh = 1.f; // the left bracket moves 1 px left as a whole, keeping its length
     juce::Path p;
-    p.startNewSubPath(l, tick); p.lineTo(l, top); p.lineTo(cx - half, top);
-    p.startNewSubPath(cx + half, top); p.lineTo(r, top); p.lineTo(r, tick);
+    p.startNewSubPath(l - sh, tick); p.lineTo(l - sh, top); p.lineTo(cx - half - sh, top);
+    const float shR = 1.f; // the right bracket moves 1 px right as a whole, keeping its length
+    p.startNewSubPath(cx + half + shR, top); p.lineTo(r + shR, top); p.lineTo(r + shR, tick);
     g.setColour(c);
     g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     // The digit is centred on the bracket line, in the gap.
