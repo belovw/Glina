@@ -96,12 +96,17 @@ void shiftUp(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool o
     else g.strokePath(head, st);
 }
 
-// Letter T for the tracks panel.
-void letterT(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
+// Tracks: three lanes, each a small square head and a bar.
+void lanesMarks(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
 {
     g.setColour(c);
-    g.setFont(juce::FontOptions(a.getHeight() * 1.0f));
-    g.drawText("T", a, juce::Justification::centred, false);
+    const float sq = a.getHeight() * 0.22f;
+    for (int i = 0; i < 3; ++i) {
+        const float y = a.getY() + a.getHeight() * (0.02f + 0.38f * (float)i);
+        g.fillRect(juce::Rectangle<float>(a.getX(), y, sq, sq));
+        g.fillRect(juce::Rectangle<float>(a.getX() + a.getWidth() * 0.42f, y + sq * 0.25f,
+                                          a.getWidth() * 0.58f, sq * 0.5f));
+    }
 }
 
 // A stack of `n` rectangles. Off: diagonal, the front one bright and the others shaded.
@@ -1640,7 +1645,7 @@ PitchEditor::PitchEditor()
     });
     button(abBtn_, "A/B", "Слушать оригинал (B)", [this] { toggleBypass(); });
     iconBtn(tracksBtn_, "Другие треки с Glina: показать поверх или редактировать (T)",
-            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::letterT(g, a, c); },
+            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::lanesMarks(g, a, c); },
             [this] { toggleTracks(); });
     iconBtn(shiftBtn_, "Призраки визуально подняты на 3 полутона каждый относительно предыдущего",
             [this](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::shiftUp(g, a, c, ghostShift_); },
