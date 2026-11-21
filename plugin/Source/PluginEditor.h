@@ -44,6 +44,7 @@ public:
     bool hasHostTempo() const override;
     std::vector<TrackRef> tracks() const override;
     bool ghost(const juce::String& id, Ghost& out) const override;
+    bool thread(const juce::String& id, std::vector<ThreadFrame>& out) const override;
     void setEditedTrack(const juce::String& id) override;
     bool hasRenderOptions() const override;
     bool savesRender() const override;

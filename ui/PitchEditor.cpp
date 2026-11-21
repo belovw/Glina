@@ -180,6 +180,7 @@ public:
             "  C — согласная (не растягивать, высоту не менять)    Shift+V — автовибрато вкл / выкл\n"
             "  G — линии сетки 1/4 → 1/8 → 1/16    L — показать локатор\n"
             "  T — треки: ноты других треков поверх этого, переключение редактирования\n"
+            "  N — связи с первым показанным треком: где их нитки совпадают по времени (звук не меняется)\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -301,6 +302,7 @@ public:
             juce::Graphics::ScopedSaveState clip(g);
             g.reduceClipRegion(c.toNearestInt());
             drawGhosts(g);
+            drawLinks(g);
             drawTrackName(g);
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
@@ -416,6 +418,15 @@ public:
                 st << (int)ed.eff_->notes.size() << T(" нот · ")
                    << (ed.doc()->chromatic ? T("хроматика") : ed.keyLabel(k.tonic, k.minor));
                 if (!ed.selection_.empty()) st << T(" · выделено ") << (int)ed.selection_.size();
+                if (ed.showLinks_) {
+                    if (!ed.links_.ok) st << T(" · связи: покажите трек (T)");
+                    else {
+                        st << T(" · связи с «") << ed.links_.name << T("»");
+                        if (ed.links_.info.octave != 0)
+                            st << T(", октава ") << (ed.links_.info.octave > 0 ? "+" : "") << ed.links_.info.octave;
+                        if (ed.links_.info.part) st << T(", другая партия");
+                    }
+                }
                 if (ed.host_->isRendering()) st << T(" · рендер…");
                 else if (const auto o = ed.host_->renderOrigin(); o.isNotEmpty()) st << " · " << o;
                 if (ed.host_->isBypassed()) st << T(" · ОРИГИНАЛ (A/B)");
@@ -641,6 +652,39 @@ public:
             }
         }
         return -1;
+    }
+
+    // Thin lines from this track's thread to the matching point of the reference's
+    // (the first shown track), one every ~14 px: where the alignment says they meet.
+    void drawLinks(juce::Graphics& g)
+    {
+        const auto& L = ed.links_;
+        if (!L.ok) return;
+        const auto c = canvas();
+        const double sh = ed.ghostShift_ ? ghostShift(0) : 0.0;
+        const double every = std::max(0.08, 14.0 / ed.pps_);
+        double next = -1e9;
+        juce::Path p, dots;
+        for (const auto& f : L.tgt) {
+            if (f.midi <= 0 || f.t < next) continue;
+            const float x0 = xOf(f.t);
+            if (x0 < c.getX() - 60) continue;
+            if (x0 > c.getRight() + 60) break;
+            const double rt = L.warp.map(f.t);
+            const float rm = ed.linkRefMidi(rt);
+            if (rm <= 0) continue;
+            const juce::Point<float> a(x0, yOf(f.midi)), b(xOf(rt), yOf(rm + sh));
+            p.startNewSubPath(a);
+            p.lineTo(b);
+            dots.addEllipse(a.x - 1.5f, a.y - 1.5f, 3.f, 3.f);
+            dots.addEllipse(b.x - 1.5f, b.y - 1.5f, 3.f, 3.f);
+            next = f.t + every;
+        }
+        const juce::Colour link(0xffffb547);
+        g.setColour(link.withAlpha(0.8f));
+        g.strokePath(p, juce::PathStrokeType(1.2f));
+        g.setColour(link);
+        g.fillPath(dots);
     }
 
     void drawGhosts(juce::Graphics& g)
@@ -2127,6 +2171,13 @@ juce::Point<float> PitchEditor::threadHandleForTest(int i) const
 
 int PitchEditor::hitThreadForTest(juce::Point<float> p) const { return roll_->hitThread(p); }
 
+void PitchEditor::setGhostShiftForTest(bool on)
+{
+    ghostShift_ = on;
+    updateToolbar();
+    roll_->repaint();
+}
+
 void PitchEditor::zoomForTest(double pixelsPerSecond, double scrollSec)
 {
     pps_ = pixelsPerSecond;
@@ -2177,6 +2228,39 @@ void PitchEditor::refreshGhosts()
         ClipHost::Ghost g;
         if (host_->ghost(t.id, g)) ghosts_.push_back({t.id, trackColour(t, (int)i), std::move(g), t.name});
     }
+    refreshLinks();
+}
+
+void PitchEditor::refreshLinks()
+{
+    links_ = Links{};
+    if (!showLinks_ || host_ == nullptr || eff_ == nullptr || doc() == nullptr || ghosts_.empty()) return;
+    const auto& gv = ghosts_.front();
+    std::vector<ThreadFrame> ref;
+    if (!host_->thread(gv.id, ref) || ref.size() < 4) return;
+    const double len = TimeMap::build(*eff_, doc()->edits).inToOut((double)eff_->numSamples) / eff_->sampleRate;
+    links_.tgt = threadOf(*eff_, doc()->edits, nullptr, 0.0, len);
+    links_.warp = alignThreads(links_.tgt, ref, {}, {}, &links_.info);
+    links_.ref = std::move(ref);
+    links_.name = gv.name;
+    links_.ok = !links_.warp.empty();
+}
+
+float PitchEditor::linkRefMidi(double t) const
+{
+    const auto& r = links_.ref;
+    if (r.empty()) return 0.f;
+    const auto it = std::lower_bound(r.begin(), r.end(), t, [](const ThreadFrame& f, double x) { return f.t < x; });
+    if (it == r.end()) return r.back().t - t < 0.015 ? r.back().midi : 0.f;
+    if (it != r.begin() && t - std::prev(it)->t < it->t - t) return std::prev(it)->midi;
+    return it->midi;
+}
+
+void PitchEditor::toggleLinks()
+{
+    showLinks_ = !showLinks_;
+    refreshLinks();
+    roll_->repaint();
 }
 
 void PitchEditor::pollTracks()
@@ -2597,6 +2681,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         case 'b': toggleBypass(); return true;
         case 'h': showHarmonies_ = !showHarmonies_; resized(); updateToolbar(); return true;
         case 't': toggleTracks(); return true;
+        case 'n': toggleLinks(); return true;
         case '0': fitView(); return true;
         case '+': case '=': pps_ = std::min(4000.0, pps_ * 1.4); roll_->repaint(); return true;
         case '-': pps_ = std::max(2.0, pps_ / 1.4); roll_->repaint(); return true;

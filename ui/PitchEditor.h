@@ -36,6 +36,7 @@ public:
     juce::Point<float> threadHandleForTest(int note) const; // join before `note`; (-1,-1) = none
     int hitThreadForTest(juce::Point<float> p) const;
     void zoomForTest(double pixelsPerSecond, double scrollSec);
+    void setGhostShiftForTest(bool on);
     void dragForTest(juce::Point<float> from, juce::Point<float> to);
 
     void paint(juce::Graphics&) override;
@@ -78,6 +79,11 @@ private:
     void layoutInspector(); // size the inspector to its controls inside its scrolling view
     // ---- other tracks ("ghosts") --------------------------------------------------
     void refreshGhosts();
+    // Links to the first shown track: the target -> reference time map found by the
+    // thread alignment (transfer by the thread, step 1: nothing is changed yet).
+    void toggleLinks();
+    void refreshLinks();
+    float linkRefMidi(double t) const; // reference pitch at time t (0 = none)
     void pollTracks();
     void switchTrack(const juce::String& id);
     void toggleTracks();
@@ -137,6 +143,15 @@ private:
     IconButton tracksBtn_;
     IconButton shiftBtn_;   // visual +3 semitone shift of the ghosts
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
+    bool showLinks_ = false;
+    struct Links {
+        bool ok = false;
+        juce::String name;                 // the reference track
+        std::vector<ThreadFrame> tgt, ref; // this clip's thread, the reference's (this clip's timeline)
+        Warp warp;
+        AlignInfo info;
+    };
+    Links links_;
     std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
     struct GhostView {
         juce::String id;     // the track (ClipHost::TrackRef id)

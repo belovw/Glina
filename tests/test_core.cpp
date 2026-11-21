@@ -904,6 +904,7 @@ static void testThreadAlign()
         AlignInfo inf;
         slowW = alignThreads(thread(sa, 0.0), refT, {}, {}, &inf);
         report("another take, 10 % slower", sl, 0.0, slowW, same, 0.035, inf);
+        CHECK(!inf.part, "a unison take taken for another part (median %.2f st)", inf.medianDiff);
     }
     { // an octave lower, 50 ms later
         std::vector<test::SynthNote> low = test::demoMelody();
@@ -925,6 +926,10 @@ static void testThreadAlign()
         AlignInfo inf;
         const Warp w = alignThreads(thread(pa, 0.0), refT, o, {}, &inf);
         report("another part, a fourth above", pt, 0.0, w, same, 0.035, inf);
+        AlignInfo autoInf;
+        const Warp wa = alignThreads(thread(pa, 0.0), refT, {}, {}, &autoInf);
+        report("  the same, part found by itself", pt, 0.0, wa, same, 0.035, autoInf);
+        CHECK(autoInf.part, "another part not recognised (median %.2f st)", autoInf.medianDiff);
     }
     { // the third note sung as two syllables ("s" in the middle)
         std::vector<test::SynthNote> split = test::demoMelody();

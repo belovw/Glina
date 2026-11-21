@@ -37,6 +37,7 @@ struct AlignOptions {
     double bandSec = 0.5;    // how far the alignment may wander from the coarse shift
     double coarseSec = 1.0;  // search range of the coarse shift
     bool unison = true;      // false: another part (alto, tenor): only the shape of the line counts
+    bool autoPart = true;    // unison asked, but the lines are > 1 semitone apart (octave folded): treat as another part
     int octave = kAutoOctave; // reference minus target, octaves
     static constexpr int kAutoOctave = 0x7fff;
 };
@@ -53,6 +54,8 @@ struct AlignInfo {
     double coarseSec = 0;    // coarse shift, reference minus target, seconds
     double meanCost = 0;     // per matched frame; 0 = identical threads
     int frames = 0;          // target frames that were aligned
+    bool part = false;       // aligned as another part (shape only)
+    double medianDiff = 0;   // median |reference - target| in semitones, octave folded (after the coarse shift)
 };
 
 // DTW over the frames' kind, level onsets and pitch (octave-folded in unison,

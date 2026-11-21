@@ -49,6 +49,7 @@ public:
     // The edited file and, if loaded, a reference recording shown as a read-only ghost.
     std::vector<TrackRef> tracks() const override;
     bool ghost(const juce::String& id, Ghost& out) const override;
+    bool thread(const juce::String& id, std::vector<ThreadFrame>& out) const override;
     bool canOpenReference() const override { return true; }
     void openReference() override;
 

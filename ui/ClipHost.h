@@ -9,6 +9,7 @@
 #include "glina/Document.h"
 #include "glina/Editing.h"
 #include "glina/Renderer.h"
+#include "glina/Thread.h"
 
 #include <cmath>
 #include <functional>
@@ -113,6 +114,9 @@ public:
     virtual std::vector<TrackRef> tracks() const { return {}; }
     virtual bool ghost(const juce::String& /*id*/, Ghost& /*out*/) const { return false; }
     virtual void setEditedTrack(const juce::String& /*id*/) {}
+    // The thread of another track (edited pitch line, kind, level; every 10 ms) on THIS
+    // clip's output timeline, for aligning the two (transfer by the thread).
+    virtual bool thread(const juce::String& /*id*/, std::vector<ThreadFrame>& /*out*/) const { return false; }
     // Standalone: load a reference recording to show as a ghost.
     virtual bool canOpenReference() const { return false; }
     virtual void openReference() {}
@@ -129,6 +133,20 @@ public:
     // Fired (asynchronously) when analysis/render finished or the clip changed.
     juce::ChangeBroadcaster changes;
 };
+
+// Appends one clip's thread to a track's thread: later clips only past the end of what
+// is there, the gap between them filled with silence (so alignment sees the pause).
+inline void appendThread(std::vector<ThreadFrame>& out, const std::vector<ThreadFrame>& piece, double step = 0.010)
+{
+    for (const auto& f : piece) {
+        if (!out.empty() && f.t <= out.back().t) continue;
+        if (!out.empty() && f.t - out.back().t > 1.5 * step) {
+            ThreadFrame gap;
+            for (double t = out.back().t + step; t < f.t - 0.5 * step; t += step) { gap.t = t; out.push_back(gap); }
+        }
+        out.push_back(f);
+    }
+}
 
 // Notes and edited pitch line of a clip (a, e), placed on the edited clip's
 // timeline by `toLocal` (ghost output time -> edited clip output time). Only

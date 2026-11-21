@@ -229,6 +229,29 @@ bool PluginClip::ghostOfItem(juce::ARAPlaybackRegion* r, Ghost& out) const
     return true;
 }
 
+bool PluginClip::thread(const juce::String& id, std::vector<ThreadFrame>& out) const
+{
+    if (region_ == nullptr) return false;
+    for (auto* seq : glinaSequences()) {
+        if (idOf(seq) != id) continue;
+        out.clear();
+        auto items = glinaItemsOf(seq);
+        std::stable_sort(items.begin(), items.end(),
+                         [](auto* a, auto* b) { return a->getStartInPlaybackTime() < b->getStartInPlaybackTime(); });
+        for (auto* r : items) {
+            auto* m = dynamic_cast<GlinaAudioModification*>(r->getAudioModification());
+            if (m == nullptr || !m->getGlinaSource()->data->analysisReady || m->effective == nullptr) continue;
+            const double md = r->getDurationInAudioModificationTime();
+            const double ratio = md > 0 ? r->getDurationInPlaybackTime() / md : 1.0;
+            const double ms = r->getStartInAudioModificationTime(), ps = r->getStartInPlaybackTime();
+            auto toLocal = [&](double t) { return fromSong(ps + (t - ms) * ratio); };
+            ui::appendThread(out, threadOf(*m->effective, m->doc.edits, toLocal, ms, r->getEndInAudioModificationTime()));
+        }
+        return !out.empty();
+    }
+    return false;
+}
+
 bool PluginClip::ghost(const juce::String& id, Ghost& out) const
 {
     if (region_ == nullptr) return false;

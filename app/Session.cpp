@@ -243,6 +243,14 @@ bool Session::ghost(const juce::String& id, Ghost& out) const
     return true;
 }
 
+bool Session::thread(const juce::String& id, std::vector<ThreadFrame>& out) const
+{
+    if (id != "reference" || ref_ == nullptr) return false;
+    const double len = (double)ref_->numSamples / ref_->sampleRate;
+    out = threadOf(*ref_, EditSet{}, [](double t) { return t; }, 0.0, len);
+    return !out.empty();
+}
+
 // ---- analysis / rendering ------------------------------------------------------------
 void Session::startAnalysis()
 {

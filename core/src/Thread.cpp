@@ -289,6 +289,23 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
         }
     }
 
+    // Another part? Median distance of the lines, octave folded.
+    bool unison = opt.unison;
+    double medianDiff = 0;
+    {
+        std::vector<float> d;
+        for (size_t i = 0; i < N; ++i) {
+            const long j = (long)i + base + lag;
+            if (j < 0 || j >= (long)M || tgt[i].midi <= 0 || ref[(size_t)j].midi <= 0) continue;
+            d.push_back(std::abs(ref[(size_t)j].midi - 12.f * (float)octave - tgt[i].midi));
+        }
+        if (!d.empty()) {
+            std::nth_element(d.begin(), d.begin() + (long)d.size() / 2, d.end());
+            medianDiff = d[d.size() / 2];
+        }
+        if (unison && opt.autoPart && medianDiff > 1.0) unison = false;
+    }
+
     std::vector<std::pair<double, double>> pinRows; // (target row, reference column), sorted
     for (const Pin& p : pins) {
         const double ip = (p.tgt - t0) / step, jp = (p.ref - r0) / step;
@@ -313,7 +330,7 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
     const size_t F = std::max<size_t>(1, (size_t)std::lround(0.1 / step));
     const std::vector<ThreadFrame> T1 = decimate(tgt, F), R1 = decimate(ref, F);
     Pass p1(T1, R1);
-    p1.unison = opt.unison;
+    p1.unison = unison;
     p1.shift = 12.f * (float)octave;
     p1.onsetLag = 1;
     p1.slopeLag = 1;
@@ -325,7 +342,7 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
 
     // ---- pass 2: frame by frame, +-bandSec around the coarse path ---------------------------
     Pass p2(tgt, ref);
-    p2.unison = opt.unison;
+    p2.unison = unison;
     p2.shift = 12.f * (float)octave;
     p2.pins = pinRows;
     if (coarseOk) p2.centre = [&](long i) { return p1.colAt((double)i / F) * F; };
@@ -364,6 +381,8 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
         info->coarseSec = lag * step; // reference minus target
         info->frames = (int)rows;
         info->meanCost = p2.cost;
+        info->part = !unison;
+        info->medianDiff = medianDiff;
     }
     return w;
 }

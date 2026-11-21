@@ -287,6 +287,7 @@ public:
             if (args[i] == "--screenshot" && i + 1 < args.size()) { shotFile_ = juce::File(args[++i]); continue; }
             if (args[i] == "--demo-edits") { demo_ = true; continue; }
             if (args[i] == "--selftest") { selftest_ = true; continue; }
+            if (args[i] == "--links") { links_ = true; continue; }
             if (args[i] == "--reference" && i + 1 < args.size()) { refFile_ = juce::File::getCurrentWorkingDirectory().getChildFile(args[++i]); continue; }
             if (args[i] == "--size" && i + 1 < args.size()) {
                 const auto wh = juce::StringArray::fromTokens(args[++i], "x", "");
@@ -345,6 +346,12 @@ private:
             if (!m.session().isIdle()) return;
             if (refFile_ != juce::File() && !m.session().hasReference()) return;
             if (refFile_ != juce::File() && !tracksShown_) { tracksShown_ = true; m.editor().keyPressed(juce::KeyPress('t', {}, 't')); return; }
+            if (links_ && !linksShown_) {
+                linksShown_ = true;
+                m.editor().setGhostShiftForTest(true); // links read better when the ghost is lifted
+                m.editor().keyPressed(juce::KeyPress('n', {}, 'n'));
+                return;
+            }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
                 demoDone_ = true;
@@ -710,7 +717,7 @@ private:
     std::unique_ptr<Window> window_;
     std::unique_ptr<juce::Timer> poll_;
     juce::File shotFile_;
-    bool demo_ = false, demoDone_ = false, selftest_ = false;
+    bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false;
     juce::File refFile_;
     bool tracksShown_ = false;
     int step_ = 0, n0_ = 0, joinAt_ = -1, failures_ = 0;
