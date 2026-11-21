@@ -513,6 +513,25 @@ private:
                 }
                 undoIfChanged(snap);
 
+                // The top corner itself (any note width): down tilts, sideways stretches.
+                {
+                    snap = serialize(s.document());
+                    const NoteEdit c0 = s.document().edits.notes[(size_t)i];
+                    const juce::Point<float> corner(r.getRight() - 2.f, r.getY() + 3.f);
+                    ed.dragForTest(corner, corner + juce::Point<float>(0.f, (float)hh));
+                    const NoteEdit c1 = s.document().edits.notes[(size_t)i];
+                    std::printf("    top right corner down 1 st: tilt R %+.2f\n", c1.tiltR - c0.tiltR);
+                    check(std::abs(c1.tiltR - c0.tiltR + 1.0) < 0.1 && c1.tiltL == c0.tiltL,
+                          zoomed ? "top corner drag tilts (normal zoom)" : "top corner drag tilts (short notes)");
+                    undoIfChanged(snap);
+                    snap = serialize(s.document());
+                    const double e0 = times()[(size_t)i].outEnd;
+                    ed.dragForTest(corner, corner + juce::Point<float>(20.f, 0.f));
+                    const double de = times()[(size_t)i].outEnd - e0;
+                    check(de > 0.5 * 20 * px, zoomed ? "top corner sideways stretches (normal zoom)" : "top corner sideways stretches (short notes)");
+                    undoIfChanged(snap);
+                }
+
                 // Two selected notes tilt as one: one line, the first note's left edge stays,
                 // the line runs on through the join.
                 const auto r2 = ed.noteRectForTest(i + 1);

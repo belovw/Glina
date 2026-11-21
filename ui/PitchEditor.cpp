@@ -160,7 +160,8 @@ public:
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
             "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
             "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
-            "  Крайняя пятая часть ноты вверх/вниз — наклон нитки вокруг другого края; выделенные — как одна нота (Shift — тоньше)\n"
+            "  Крайняя пятая часть ноты или верхний угол вверх/вниз — наклон нитки вокруг другого края; выделенные — как одна нота\n"
+            "  (Shift — тоньше; угол вбок — граница ноты, как край)\n"
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
@@ -231,17 +232,19 @@ public:
     }
 
     // Edge strips stretch; on notes wide enough on screen the outer fifths (whole
-    // height, past the edge strip) tilt the line around the opposite edge.
+    // height, past the edge strip) tilt the line around the opposite edge. The top
+    // corner of an edge strip does both (any width): up/down tilts, sideways stretches.
     static constexpr float kTiltMinW = 40;
-    enum class Zone { Body, Left, Right, TiltL, TiltR };
+    enum class Zone { Body, Left, Right, TiltL, TiltR, CornerL, CornerR };
     Zone zoneOf(int i, juce::Point<float> p) const
     {
         const auto r = noteRect(i);
         const float edge = std::min(7.f, r.getWidth() * 0.25f);
-        if (p.x < r.getX() + edge) return Zone::Left;
-        if (p.x > r.getRight() - edge) return Zone::Right;
         const bool cons = ed.doc() != nullptr && (size_t)i < ed.doc()->edits.notes.size() &&
                           ed.doc()->edits.notes[(size_t)i].consonant;
+        const bool top = !cons && p.y < r.getY() + r.getHeight() * 0.4f;
+        if (p.x < r.getX() + edge) return top ? Zone::CornerL : Zone::Left;
+        if (p.x > r.getRight() - edge) return top ? Zone::CornerR : Zone::Right;
         if (r.getWidth() >= kTiltMinW && !cons) {
             // Past the edge strip: a fifth of the note, but never thinner than 8 px.
             const float zone = edge + std::max(r.getWidth() / 5.f - edge, 8.f);
@@ -752,9 +755,9 @@ public:
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
         const Zone z = zoneOf(i, e.position);
         setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
-                       : z == Zone::TiltL ? juce::MouseCursor::TopLeftCornerResizeCursor
-                       : z == Zone::TiltR ? juce::MouseCursor::TopRightCornerResizeCursor
-                                          : juce::MouseCursor::LeftRightResizeCursor);
+                       : (z == Zone::TiltL || z == Zone::CornerL) ? juce::MouseCursor::TopLeftCornerResizeCursor
+                       : (z == Zone::TiltR || z == Zone::CornerR) ? juce::MouseCursor::TopRightCornerResizeCursor
+                                                                  : juce::MouseCursor::LeftRightResizeCursor);
     }
 
     void mouseExit(const juce::MouseEvent&) override
@@ -825,9 +828,10 @@ public:
         for (int k : ed.selection_) start[k] = ed.doc()->edits.notes[(size_t)k];
         start[i] = ed.doc()->edits.notes[(size_t)i];
         const Zone z = zoneOf(i, e.position);
-        tiltRight = z == Zone::TiltR;
+        tiltRight = z == Zone::TiltR || z == Zone::CornerR;
         gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR
-                : (z == Zone::TiltL || z == Zone::TiltR) ? G::PendingTilt : G::Pending;
+                : (z == Zone::TiltL || z == Zone::TiltR) ? G::PendingTilt
+                : (z == Zone::CornerL || z == Zone::CornerR) ? G::PendingCorner : G::Pending;
         ed.refresh();
     }
 
@@ -856,6 +860,10 @@ public:
             case G::PendingTilt: // corner area: up/down tilts, sideways moves the note like the body
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : G::Move;
+                break;
+            case G::PendingCorner: // the corner itself: up/down tilts, sideways stretches like the edge
+                if (off.getDistanceFromOrigin() < 4) return;
+                gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : (tiltRight ? G::StretchR : G::StretchL);
                 break;
             case G::Draw:
             case G::Erase: {
@@ -1064,7 +1072,7 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, PendingTilt, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase };
+    enum class G { None, Pending, PendingTilt, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase };
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
