@@ -160,10 +160,11 @@ public:
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
             "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
             "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
+            "  Крайняя пятая часть ноты вверх/вниз — наклон нитки вокруг другого края (Shift — тоньше)\n"
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
-            "  Нитка между нотами — тянуть вбок: вправо плавнее, влево резче (Shift — тоньше, двойной клик — как спето)\n"
+            "  Нитка между нотами — тянуть вверх/вниз: вверх плавнее, вниз резче (Shift — тоньше, двойной клик — как спето)\n"
             "  Клик по линейке — позиция воспроизведения;  правая кнопка — меню ноты\n"
             "  Колесо — прокрутка;  Ctrl+колесо — масштаб;  Shift+колесо — по высоте\n"
             "\n"
@@ -175,7 +176,7 @@ public:
             "  Ctrl+A — все ноты    Esc — снять выделение\n"
             "  Ctrl+Z / Ctrl+Shift+Z — отмена / повтор\n"
             "  Пробел — пуск/стоп (в плагине — транспорт DAW)    B — сравнить с оригиналом (A/B)\n"
-            "  C — согласная (не растягивать, высоту не менять)\n"
+            "  C — согласная (не растягивать, высоту не менять)    Shift+V — автовибрато вкл / выкл\n"
             "  G — линии сетки 1/4 → 1/8 → 1/16    L — показать локатор\n"
             "  T — треки: ноты других треков поверх этого, переключение редактирования\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
@@ -207,7 +208,12 @@ public:
         const Note& n = ed.eff_->notes[(size_t)i];
         const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
         const float s = semi();
-        return {x0, yOf(ed.editedCentre(i)) - s * 0.5f, std::max(2.f, x1 - x0), s};
+        double centre = ed.editedCentre(i);
+        // While a tilt is dragged the box stays put and only the line moves; it settles on release.
+        if (gesture == G::Tilt)
+            if (const auto it = start.find(i); it != start.end())
+                centre = n.centerMidi + it->second.pitchOffset + tiltMean(*ed.eff_, i, it->second);
+        return {x0, yOf(centre) - s * 0.5f, std::max(2.f, x1 - x0), s};
     }
 
     int hitNote(juce::Point<float> p) const
@@ -224,13 +230,24 @@ public:
         return best;
     }
 
-    enum class Zone { Body, Left, Right };
+    // Edge strips stretch; on notes wide enough on screen the outer fifths (whole
+    // height, past the edge strip) tilt the line around the opposite edge.
+    static constexpr float kTiltMinW = 40;
+    enum class Zone { Body, Left, Right, TiltL, TiltR };
     Zone zoneOf(int i, juce::Point<float> p) const
     {
         const auto r = noteRect(i);
         const float edge = std::min(7.f, r.getWidth() * 0.25f);
         if (p.x < r.getX() + edge) return Zone::Left;
         if (p.x > r.getRight() - edge) return Zone::Right;
+        const bool cons = ed.doc() != nullptr && (size_t)i < ed.doc()->edits.notes.size() &&
+                          ed.doc()->edits.notes[(size_t)i].consonant;
+        if (r.getWidth() >= kTiltMinW && !cons) {
+            // Past the edge strip: a fifth of the note, but never thinner than 8 px.
+            const float zone = edge + std::max(r.getWidth() / 5.f - edge, 8.f);
+            if (p.x < r.getX() + zone) return Zone::TiltL;
+            if (p.x > r.getRight() - zone) return Zone::TiltR;
+        }
         return Zone::Body;
     }
 
@@ -433,7 +450,7 @@ public:
             const juce::Colour fill = e.consonant ? col::dim : dev < 10 ? col::inTune : dev < 25 ? col::nearTune : col::offTune;
             const bool sel = ed.selection_.count(i) > 0;
 
-            if (std::abs(e.pitchOffset) > 0.01) { // ghost of the original position
+            if (std::abs(centre - n.centerMidi) > 0.01) { // ghost of the original position (moved or tilted)
                 g.setColour(col::dim.withAlpha(0.45f));
                 g.drawRoundedRectangle(box.withY(yOf(n.centerMidi) - s * 0.3f).withHeight(s * 0.6f), 3.f, 0.8f);
             }
@@ -461,7 +478,7 @@ public:
             g.strokePath(p, juce::PathStrokeType(sel ? 1.6f : 1.f));
 
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
-                e.vibratoAmount != 1) {
+                e.vibratoAmount != 1 || e.tiltL != 0 || e.tiltR != 0 || e.ownVibrato) {
                 g.setColour(col::text.withAlpha(0.8f));
                 g.fillEllipse(box.getX() + 2, box.getY() + 1, 3.5f, 3.5f); // "has edits" dot
             }
@@ -732,9 +749,12 @@ public:
         if (th != hoverThread) { hoverThread = th; repaint(); }
         if (th >= 0) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; } // thread: hand
         const int i = hitNote(e.position);
-        if (i < 0) setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
-        else setMouseCursor(zoneOf(i, e.position) == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
-                                                                   : juce::MouseCursor::LeftRightResizeCursor);
+        if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
+        const Zone z = zoneOf(i, e.position);
+        setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
+                       : z == Zone::TiltL ? juce::MouseCursor::TopLeftCornerResizeCursor
+                       : z == Zone::TiltR ? juce::MouseCursor::TopRightCornerResizeCursor
+                                          : juce::MouseCursor::LeftRightResizeCursor);
     }
 
     void mouseExit(const juce::MouseEvent&) override
@@ -805,7 +825,9 @@ public:
         for (int k : ed.selection_) start[k] = ed.doc()->edits.notes[(size_t)k];
         start[i] = ed.doc()->edits.notes[(size_t)i];
         const Zone z = zoneOf(i, e.position);
-        gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR : G::Pending;
+        tiltRight = z == Zone::TiltR;
+        gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR
+                : (z == Zone::TiltL || z == Zone::TiltR) ? G::PendingTilt : G::Pending;
         ed.refresh();
     }
 
@@ -831,6 +853,10 @@ public:
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Pitch : G::Move;
                 break;
+            case G::PendingTilt: // corner area: up/down tilts, sideways moves the note like the body
+                if (off.getDistanceFromOrigin() < 4) return;
+                gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : G::Move;
+                break;
             case G::Draw:
             case G::Erase: {
                 const auto p = drawPoint(e.position, e.mods.isShiftDown());
@@ -844,6 +870,7 @@ public:
             case G::Move:
             case G::StretchL:
             case G::StretchR:
+            case G::Tilt:
             case G::Smooth:
                 break;
         }
@@ -851,10 +878,19 @@ public:
         if (gesture == G::Pitch) {
             double delta = -off.y / semi();
             if (!e.mods.isAltDown()) {
-                const double c0 = ed.eff_->notes[(size_t)pressed].centerMidi + start[pressed].pitchOffset;
+                const double c0 = ed.eff_->notes[(size_t)pressed].centerMidi + start[pressed].pitchOffset +
+                                  tiltMean(*ed.eff_, pressed, start[pressed]);
                 delta = std::round(c0 + delta) - c0;
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
+        } else if (gesture == G::Tilt) {
+            // Free in cents (Shift: finer). Every selected note tilts by the same amount,
+            // each around its own opposite edge; a new drag continues from the current tilt.
+            const double delta = -off.y / semi() * (e.mods.isShiftDown() ? 0.25 : 1.0);
+            d->edits = before.edits;
+            std::set<int> notes;
+            for (auto& kv : start) notes.insert(kv.first);
+            addTilt(d->edits, notes, tiltRight, delta);
         } else if (gesture == G::Smooth) {
             // Vertical: up = smoother (more), down = sharper (less). 0.5 % per pixel (Shift: 0.15 %),
             // relative to where the drag started.
@@ -889,7 +925,7 @@ public:
             changed = false;
             return;
         }
-        if (g0 == G::Pending && pressed >= 0 && e.mods.isAltDown() && !changed) {
+        if ((g0 == G::Pending || g0 == G::PendingTilt) && pressed >= 0 && e.mods.isAltDown() && !changed) {
             ed.splitAt(pressed, secOf(e.position.x));
         } else if (changed) {
             ed.commit(before);
@@ -949,6 +985,7 @@ public:
         m.addItem(4, T("Склеить выделенные\tJ"), any);
         m.addItem(5, T("Дрейф убрать / вернуть\tD"), true);
         m.addItem(6, T("Вибрато 100 / 50 / 0 %\tV"), true);
+        m.addItem(9, T("Автовибрато вкл / выкл\tShift+V"), true);
         m.addItem(7, T("Стереть карандаш в выделенных"), any && ed.doc() != nullptr && !ed.doc()->edits.draw.empty());
         bool allCons = any && ed.doc() != nullptr;
         if (allCons)
@@ -977,6 +1014,7 @@ public:
             else if (r == 6) ed.cycleVibrato();
             else if (r == 7) ed.erasePencilInSelection();
             else if (r == 8) ed.toggleConsonant();
+            else if (r == 9) ed.toggleAutoVibrato();
             else if (r >= 10 && r < 30) {
                 const int j = r % 10;
                 const bool on = r < 20;
@@ -1025,9 +1063,10 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, Pitch, Move, StretchL, StretchR, Smooth, Marquee, Ruler, Draw, Erase };
+    enum class G { None, Pending, PendingTilt, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase };
     DrawPt lastDraw;
     G gesture = G::None;
+    bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
     int pressed = -1;
     bool changed = false;
     Document before;
@@ -1094,6 +1133,7 @@ public:
         setup(barStart, "Начало 1-го такта", -4, 30, 0.001, " с", [](Document& d, double v) { d.barOffsetSec = v; });
         tempo.slider.setDoubleClickReturnValue(true, 0.0);
         beats.slider.setDoubleClickReturnValue(true, 4.0);
+        vibInit();
     }
 
     void setup(EditSlider& s, const char* name, double lo, double hi, double step, const char* suffix,
@@ -1138,6 +1178,7 @@ public:
         for (auto* s : {&tempo, &beats, &barStart}) { s->slider.setVisible(ownTempo); s->label.setVisible(ownTempo); }
         for (auto* b : {&dn1, &dn10, &up10, &up1, &snap, &reset}) b->setVisible(notes);
         info.setVisible(ready);
+        vibUpdate(d != nullptr ? *d : Document{}, ready); // the panel is laid out again by layoutInspector()
         if (!ready) { title.setText(T("Нет данных"), juce::dontSendNotification); return; }
 
         auto set = [](EditSlider& s, double v) {
@@ -1184,40 +1225,121 @@ public:
         g.drawHorizontalLine(0, 0.f, (float)getWidth());
     }
 
-    void resized() override
+    void resized() override { layout(true); }
+    // Height the visible controls need (the panel scrolls when the window is lower).
+    int preferredHeight() { return layout(false); }
+
+    // Lays the controls out from the top; returns the height used.
+    int layout(bool apply)
     {
-        auto r = getLocalBounds().reduced(10, 8);
-        title.setBounds(r.removeFromTop(22));
-        info.setBounds(r.removeFromTop(20));
+        auto r = juce::Rectangle<int>(0, 0, getWidth(), 100000).reduced(10, 8);
+        auto put = [apply](juce::Component& c, juce::Rectangle<int> b) { if (apply) c.setBounds(b); };
+        put(title, r.removeFromTop(22));
+        put(info, r.removeFromTop(20));
         r.removeFromTop(6);
         if (dn1.isVisible()) {
             auto row = r.removeFromTop(26);
             const int w = row.getWidth() / 4;
-            dn1.setBounds(row.removeFromLeft(w).reduced(1));
-            dn10.setBounds(row.removeFromLeft(w).reduced(1));
-            up10.setBounds(row.removeFromLeft(w).reduced(1));
-            up1.setBounds(row.reduced(1));
+            put(dn1, row.removeFromLeft(w).reduced(1));
+            put(dn10, row.removeFromLeft(w).reduced(1));
+            put(up10, row.removeFromLeft(w).reduced(1));
+            put(up1, row.reduced(1));
             r.removeFromTop(4);
             row = r.removeFromTop(26);
-            snap.setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(1));
-            reset.setBounds(row.reduced(1));
+            put(snap, row.removeFromLeft(row.getWidth() / 2).reduced(1));
+            put(reset, row.reduced(1));
             r.removeFromTop(8);
         }
-        auto place = [&r](EditSlider& s) {
+        auto place = [&r, &put](EditSlider& s) {
             if (!s.slider.isVisible()) return;
-            s.label.setBounds(r.removeFromTop(18));
-            s.slider.setBounds(r.removeFromTop(24));
+            put(s.label, r.removeFromTop(18));
+            put(s.slider, r.removeFromTop(24));
             r.removeFromTop(4);
         };
         for (auto* s : {&drift, &vib, &formant, &gain, &length, &smooth, &sib, &breath, &gform, &smoothAll, &lead, &tempo,
                         &beats, &barStart})
             place(*s);
+        if (vibTitle.isVisible()) {
+            r.removeFromTop(6);
+            put(vibTitle, r.removeFromTop(20));
+        }
+        for (auto* s : {&avDepth, &avRate, &avDelay, &avOnset, &avVar, &avTrem}) place(*s);
+        return r.getY() + 8;
+    }
+
+    // ---- auto vibrato: the selected notes, or the whole track when nothing / everything is selected
+    bool vibTrack() const
+    {
+        return ed.eff_ == nullptr || ed.selection_.empty() || ed.selection_.size() >= ed.eff_->notes.size();
+    }
+    AutoVibrato vibNow(const Document& d) const
+    {
+        return vibTrack() ? d.edits.autoVibrato : vibratoOf(d.edits, *ed.selection_.begin());
+    }
+    void vibSetup(EditSlider& s, const char* name, double lo, double hi, double step, const char* suffix, double dflt,
+                  double AutoVibrato::*field)
+    {
+        setup(s, name, lo, hi, step, suffix, [this, field](Document& d, double v) {
+            AutoVibrato a = vibNow(d);
+            a.*field = v;
+            ed.writeVibrato(d, a);
+        });
+        s.slider.setDoubleClickReturnValue(true, dflt);
+    }
+    void vibInit()
+    {
+        vibTitle.setFont(juce::FontOptions(13.f, juce::Font::bold));
+        addAndMakeVisible(vibTitle);
+        vibSetup(avDepth, "Глубина (Shift+V)", 0, 100, 1, " ¢", 0, &AutoVibrato::depthCents);
+        vibSetup(avRate, "Частота", 3, 8, 0.1, " Гц", 5.5, &AutoVibrato::rateHz);
+        vibSetup(avDelay, "Задержка", 0, 1000, 10, " мс", 300, &AutoVibrato::delayMs);
+        vibSetup(avOnset, "Нарастание", 0, 4, 0.1, " пер.", 1.5, &AutoVibrato::onsetPeriods);
+        vibSetup(avVar, "Разброс", 0, 100, 1, " %", 20, &AutoVibrato::variation);
+        vibSetup(avTrem, "Тремоло", 0, 6, 0.1, " дБ", 0, &AutoVibrato::tremoloDb);
+        avDepth.slider.setTooltip(T("± центы вокруг нитки ноты. 0 — автовибрато выключено (своё вибрато певца остаётся)"));
+        avDelay.slider.setTooltip(T("От начала ноты. Нота короче задержки остаётся без автовибрато. 0 — как у оперных певцов"));
+        avOnset.slider.setTooltip(T("За сколько периодов вибрато вырастает до полной глубины (мягкая S-кривая)"));
+        avVar.slider.setTooltip(T("Медленное плавание частоты и глубины, чтобы не звучало машинно"));
+        avTrem.slider.setTooltip(T("± дБ громкости в такт вибрато"));
+    }
+    void vibUpdate(const Document& d, bool ready)
+    {
+        const AutoVibrato v = vibNow(d);
+        vibTitle.setVisible(ready);
+        avDepth.slider.setVisible(ready);
+        avDepth.label.setVisible(ready);
+        for (auto* s : {&avRate, &avDelay, &avOnset, &avVar, &avTrem}) {
+            s->slider.setVisible(ready && v.active());
+            s->label.setVisible(ready && v.active());
+        }
+        if (!ready) return;
+        juce::String t = T("Автовибрато");
+        if (vibTrack()) t << T(" — весь трек");
+        else {
+            bool own = false;
+            for (int i : ed.selection_) own = own || ((size_t)i < d.edits.notes.size() && d.edits.notes[(size_t)i].ownVibrato);
+            t << (own ? T(" — свои у нот") : T(" — как у трека"));
+        }
+        vibTitle.setText(t, juce::dontSendNotification);
+        auto set = [](EditSlider& s, double x) {
+            if (s.dragging) return;
+            s.updating = true;
+            s.slider.setValue(x, juce::dontSendNotification);
+            s.updating = false;
+        };
+        set(avDepth, v.depthCents);
+        set(avRate, v.rateHz);
+        set(avDelay, v.delayMs);
+        set(avOnset, v.onsetPeriods);
+        set(avVar, v.variation);
+        set(avTrem, v.tremoloDb);
     }
 
     PitchEditor& ed;
-    juce::Label title, info;
+    juce::Label title, info, vibTitle;
     juce::TextButton dn1, dn10, up10, up1, snap, reset;
     EditSlider drift, vib, formant, gain, length, smooth, sib, breath, gform, smoothAll, lead, tempo, beats, barStart;
+    EditSlider avDepth, avRate, avDelay, avOnset, avVar, avTrem;
 };
 
 // =====================================================================================
@@ -1613,7 +1735,11 @@ PitchEditor::PitchEditor()
     tracks_ = std::make_unique<Tracks>(*this);
     help_ = std::make_unique<Help>();
     addAndMakeVisible(*roll_);
-    addAndMakeVisible(*inspector_);
+    // The inspector scrolls when the window is too low for all its controls.
+    inspView_.setViewedComponent(inspector_.get(), false);
+    inspView_.setScrollBarsShown(true, false);
+    inspView_.setScrollBarThickness(8);
+    addAndMakeVisible(inspView_);
     addAndMakeVisible(*harmonies_);
     addChildComponent(*tracks_);
     addChildComponent(*help_);
@@ -1770,7 +1896,7 @@ double PitchEditor::editedCentre(int i) const
 {
     const Document* d = doc();
     if (eff_ == nullptr || d == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
-    return eff_->notes[(size_t)i].centerMidi + d->edits.notes[(size_t)i].pitchOffset;
+    return editedCenter(*eff_, d->edits, i); // centre + offset + tilt: the box sits on the tilted line's mean
 }
 
 void PitchEditor::refreshCurves()
@@ -1830,7 +1956,7 @@ void PitchEditor::refresh()
     tracks_->update();
     refreshGhosts();
     if ((showHarmonies_ && harmonies_->getHeight() != hh) || (showTracks_ && tracks_->preferredHeight() != th)) resized();
-    else inspector_->resized();
+    else layoutInspector();
     updateToolbar();
     roll_->repaint();
 }
@@ -1919,8 +2045,8 @@ void PitchEditor::snapToScale()
     if (eff_ == nullptr) return;
     edit([&](Document& d) {
         for (int i : targets()) {
-            const double c = eff_->notes[(size_t)i].centerMidi;
             NoteEdit& e = d.edits.notes[(size_t)i];
+            const double c = eff_->notes[(size_t)i].centerMidi + tiltMean(*eff_, i, e); // tilt is part of the note
             e.pitchOffset = d.target(c + e.pitchOffset, *eff_) - c;
         }
     });
@@ -1932,8 +2058,8 @@ void PitchEditor::applyCorrection()
     const double pa = corrPitch_.getValue() / 100.0, da = corrDrift_.getValue() / 100.0;
     edit([&](Document& d) {
         for (int i : targets()) {
-            const double c = eff_->notes[(size_t)i].centerMidi;
             NoteEdit& e = d.edits.notes[(size_t)i];
+            const double c = eff_->notes[(size_t)i].centerMidi + tiltMean(*eff_, i, e);
             e.pitchOffset = (d.target(c, *eff_) - c) * pa;
             e.driftAmount = 1.0 - da;
         }
@@ -1967,7 +2093,20 @@ void PitchEditor::setPencil(bool on)
     roll_->repaint();
 }
 
-void PitchEditor::syncInspector() { inspector_->update(); }
+void PitchEditor::syncInspector()
+{
+    inspector_->update();
+    layoutInspector();
+}
+
+void PitchEditor::layoutInspector()
+{
+    const int need = inspector_->preferredHeight();
+    const int h = inspView_.getHeight();
+    const int w = inspView_.getWidth() - (need > h ? inspView_.getScrollBarThickness() : 0);
+    if (inspector_->getWidth() != w || inspector_->getHeight() != std::max(need, h)) inspector_->setSize(w, std::max(need, h));
+    else inspector_->resized();
+}
 
 // ---- self-test hooks -------------------------------------------------------------------
 juce::Rectangle<float> PitchEditor::noteRectForTest(int i) const { return roll_->noteRect(i); }
@@ -2143,6 +2282,29 @@ void PitchEditor::cycleVibrato()
     const double cur = doc()->edits.notes[(size_t)t.front()].vibratoAmount;
     const double next = cur > 0.75 ? 0.5 : cur > 0.25 ? 0.0 : 1.0;
     edit([&](Document& d) { for (int i : t) d.edits.notes[(size_t)i].vibratoAmount = next; });
+}
+
+void PitchEditor::writeVibrato(Document& d, const AutoVibrato& v) const
+{
+    if (eff_ == nullptr) return;
+    const bool all = selection_.empty() || selection_.size() >= eff_->notes.size();
+    if (all) setTrackVibrato(d.edits, v, !selection_.empty());
+    else setNoteVibrato(d.edits, selection_, v);
+    // Own randomness per track the first time it is used, so tracks with the same
+    // settings do not vibrate in step. Stored in the document: re-renders are identical.
+    if (v.active() && d.edits.vibratoSeed == 1)
+        d.edits.vibratoSeed = 2u + (uint32_t)juce::Random::getSystemRandom().nextInt(0x7FFFFFF0);
+}
+
+void PitchEditor::toggleAutoVibrato()
+{
+    Document* d = doc();
+    if (d == nullptr || eff_ == nullptr) return;
+    const bool all = selection_.empty() || selection_.size() >= eff_->notes.size();
+    AutoVibrato v = all ? d->edits.autoVibrato : vibratoOf(d->edits, *selection_.begin());
+    if (v.depthCents > 0) { lastVibDepth_ = v.depthCents; v.depthCents = 0; }
+    else v.depthCents = lastVibDepth_ > 0 ? lastVibDepth_ : 30;
+    edit([&](Document& doc) { writeVibrato(doc, v); });
 }
 
 void PitchEditor::splitAt(int note, double outSecond)
@@ -2351,7 +2513,8 @@ void PitchEditor::resized()
     if (showHarmonies_) harmonies_->setBounds(r.removeFromBottom(harmonies_->preferredHeight()));
     tracks_->setVisible(showTracks_);
     if (showTracks_) tracks_->setBounds(r.removeFromBottom(tracks_->preferredHeight()));
-    inspector_->setBounds(r.removeFromRight(236));
+    inspView_.setBounds(r.removeFromRight(236));
+    layoutInspector();
     roll_->setBounds(r);
     help_->setBounds(r);
     if (!fitted_) fitView();
@@ -2401,7 +2564,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     switch (ch) {
         case 'q': snapToScale(); return true;
         case 'd': toggleDrift(); return true;
-        case 'v': cycleVibrato(); return true;
+        case 'v': if (mods.isShiftDown()) toggleAutoVibrato(); else cycleVibrato(); return true;
         case 'j': joinSelected(); return true;
         case 'p': setPencil(!pencil_); return true;
         case 'c': toggleConsonant(); return true;

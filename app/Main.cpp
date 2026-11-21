@@ -492,6 +492,28 @@ private:
                 undoIfChanged(snap);
             }
 
+            // Tilt: the right corner area dragged one semitone down tilts the line around the left
+            // edge; the box settles on the line's mean. Narrow notes have no tilt area.
+            {
+                snap = serialize(s.document());
+                const NoteEdit e0 = s.document().edits.notes[(size_t)i];
+                const float edge = std::min(7.f, r.getWidth() * 0.25f);
+                const juce::Point<float> from(r.getRight() - edge - 4.f, r.getCentreY());
+                ed.dragForTest(from, from + juce::Point<float>(0.f, (float)hh));
+                const NoteEdit e1 = s.document().edits.notes[(size_t)i];
+                const double box = (ed.noteRectForTest(i).getCentreY() - r.getCentreY()) / hh;
+                std::printf("    right corner area down 1 st: tilt L %+.2f R %+.2f, box %+.2f st\n", e1.tiltL - e0.tiltL,
+                            e1.tiltR - e0.tiltR, -box);
+                if (r.getWidth() >= 40) {
+                    check(std::abs(e1.tiltR - e0.tiltR + 1.0) < 0.1 && e1.tiltL == e0.tiltL,
+                          "corner area drag tilts the right end down, the left edge stays");
+                    check(std::abs(box - 0.5) < 0.2, "after the tilt the box sits on the line's mean");
+                } else {
+                    check(e1.tiltR == e0.tiltR && e1.tiltL == e0.tiltL, "narrow note: no tilt area");
+                }
+                undoIfChanged(snap);
+            }
+
             const float in = std::min(2.f, r.getWidth() * 0.1f);
             snap = serialize(s.document());
             t0 = times()[(size_t)i].outEnd;
@@ -513,9 +535,9 @@ private:
             if (h.x >= 0) {
                 snap = serialize(s.document());
                 const double tr0 = s.document().edits.notes[(size_t)i].transition;
-                ed.dragForTest(h, h + juce::Point<float>(40.f, 0.f));
+                ed.dragForTest(h, h + juce::Point<float>(0.f, -40.f)); // up = smoother (vertical, approved design)
                 const double tr1 = s.document().edits.notes[(size_t)i].transition;
-                std::printf("    thread handle +40 px: transition %.0f %% -> %.0f %%\n", tr0 * 100, tr1 * 100);
+                std::printf("    thread handle up 40 px: transition %.0f %% -> %.0f %%\n", tr0 * 100, tr1 * 100);
                 check(tr1 > tr0 + 0.1, zoomed ? "thread handle changes the transition (normal zoom)" : "thread handle changes the transition (short notes)");
                 undoIfChanged(snap);
             } else {
@@ -566,7 +588,7 @@ private:
             if (h.x >= 0) {
                 snap = serialize(s.document());
                 const double tr0 = s.document().edits.notes[(size_t)i + 1].transition;
-                ed.dragForTest(h, h + juce::Point<float>(40.f, 0.f));
+                ed.dragForTest(h, h + juce::Point<float>(0.f, -40.f)); // up = smoother (vertical, approved design)
                 std::printf("    handle above the join at y %.0f (notes top %.0f): transition %.0f %% -> %.0f %%\n", h.y,
                             std::min(L.getY(), R.getY()), tr0 * 100, s.document().edits.notes[(size_t)i + 1].transition * 100);
                 check(s.document().edits.notes[(size_t)i + 1].transition > tr0 + 0.1,
@@ -575,6 +597,30 @@ private:
             }
         }
         undoIfChanged(preSplit);
+
+        // Shift+V: the track (nothing selected), one note (its own settings), everything (resets the notes).
+        {
+            const std::string snap = serialize(s.document());
+            const auto shiftV = [&ed] { ed.keyPressed(juce::KeyPress('V', juce::ModifierKeys::shiftModifier, 'V')); };
+            ed.setSelection({});
+            shiftV();
+            check(s.document().edits.autoVibrato.depthCents == 30 && s.document().edits.vibratoSeed != 1,
+                  "Shift+V turns the track's auto vibrato on (±30 cents, own seed)");
+            ed.setSelection({i});
+            shiftV();
+            check(s.document().edits.notes[(size_t)i].ownVibrato && s.document().edits.notes[(size_t)i].vibrato.depthCents == 0 &&
+                      s.document().edits.autoVibrato.depthCents == 30,
+                  "Shift+V on a selected note switches only that note off");
+            std::set<int> all;
+            for (int k = 0; k < (int)s.analysis()->notes.size(); ++k) all.insert(k);
+            ed.setSelection(all);
+            shiftV();
+            check(s.document().edits.autoVibrato.depthCents == 0 && !s.document().edits.notes[(size_t)i].ownVibrato,
+                  "Shift+V with everything selected sets the track and drops the notes' own settings");
+            for (int k = 0; k < 3; ++k) ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+            check(serialize(s.document()) == snap, "auto vibrato changes undone");
+            ed.setSelection({});
+        }
         ed.fitView();
     }
 
@@ -604,6 +650,13 @@ private:
         for (size_t i = 4; i < a->notes.size(); ++i) d.edits.notes[i].transition = 0.85;
         // A consonant: passed through unprocessed (drawn grey).
         if (a->notes.size() > 2) setConsonant(d.edits, *a, 2, true);
+        // A tilted note (right end down) and auto vibrato on the long notes.
+        if (a->notes.size() > 7) d.edits.notes[7].tiltR = -0.8;
+        AutoVibrato av;
+        av.depthCents = 30;
+        av.delayMs = 250;
+        d.edits.autoVibrato = av;
+        d.edits.vibratoSeed = 4242;
         d.tempoBpm = 96;
         d.beatsPerBar = 4;
         HarmonyVoice v1; v1.degrees = 2; v1.pan = -0.45; v1.seed = 7919;

@@ -69,8 +69,13 @@ private:
     void resetNotes();
     void toggleDrift();
     void cycleVibrato();
+    void toggleAutoVibrato(); // Shift+V: auto vibrato on (last depth, ±30 ¢ the first time) / off
+    // Auto vibrato settings into the selected notes, or the track when nothing or everything is
+    // selected (everything: the notes' own settings are dropped).
+    void writeVibrato(Document& d, const AutoVibrato& v) const;
     void toggleConsonant();
     void syncInspector();
+    void layoutInspector(); // size the inspector to its controls inside its scrolling view
     // ---- other tracks ("ghosts") --------------------------------------------------
     void refreshGhosts();
     void pollTracks();
@@ -102,6 +107,7 @@ private:
     std::vector<std::vector<double>> harm_;    // per voice: pitch per note (NaN = muted)
     float levelRef_ = -20.f;
     std::set<int> selection_;
+    double lastVibDepth_ = 30; // depth Shift+V turns auto vibrato back on with
     bool fitted_ = false;
     int toolbarH_ = 40;     // height of the toolbar (it wraps onto more lines when narrow)
     double pps_ = 120, scroll_ = 0, lo_ = 48, hi_ = 72; // view: pixels/second, left edge (s), MIDI range
@@ -109,6 +115,7 @@ private:
 
     std::unique_ptr<Roll> roll_;
     std::unique_ptr<Inspector> inspector_;
+    juce::Viewport inspView_;
     std::unique_ptr<Harmonies> harmonies_;
     std::unique_ptr<Tracks> tracks_;
     std::unique_ptr<Help> help_;

@@ -135,7 +135,7 @@ inline ClipHost::Ghost buildGhost(const Analysis& a, const EditSet& e,
         const double t0 = std::max(lo, times[i].outStart), t1 = std::min(hi, times[i].outEnd);
         if (t1 <= t0) continue;
         const bool shifted = i < e.notes.size() && !e.notes[i].consonant;
-        g.notes.push_back({toLocal(t0), toLocal(t1), a.notes[i].centerMidi + (shifted ? e.notes[i].pitchOffset : 0.0)});
+        g.notes.push_back({toLocal(t0), toLocal(t1), shifted ? editedCenter(a, e, (int)i) : a.notes[i].centerMidi});
     }
     const auto curve = editedPitchCurve(a, e);
     const TimeMap map = TimeMap::build(a, e);
