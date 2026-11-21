@@ -67,7 +67,7 @@ void triplet(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
 {
     const float h = a.getHeight(), w = a.getWidth();
     const float top = a.getY() + h * 0.50f, tick = a.getY() + h * 0.70f;
-    const float l = a.getX() - w * 0.06f, r = a.getRight() + w * 0.06f, cx = a.getCentreX(), half = w * 0.24f;
+    const float l = a.getX() - w * 0.12f, r = a.getRight() + w * 0.12f, cx = a.getCentreX(), half = w * 0.24f;
     juce::Path p;
     p.startNewSubPath(l, tick); p.lineTo(l, top); p.lineTo(cx - half, top);
     p.startNewSubPath(cx + half, top); p.lineTo(r, top); p.lineTo(r, tick);
