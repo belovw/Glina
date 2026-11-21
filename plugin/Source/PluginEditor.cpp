@@ -358,10 +358,8 @@ void GlinaEditor::timerCallback()
     const auto* beforeMod = clip_->modification();
     clip_->followTrack(); // item or take changed in the host: stay on the same track
     if (!clip_->valid()) pickFallbackRegion();
-    if (clip_->region() != before || clip_->modification() != beforeMod) {
-        editor_.setHost(nullptr);
-        editor_.setHost(clip_.get());
-    }
+    if (clip_->region() != before || clip_->modification() != beforeMod)
+        editor_.rebindHost(clip_.get()); // keep zoom and scroll when the track or take changes
 }
 
 void GlinaEditor::paint(juce::Graphics& g)

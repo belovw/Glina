@@ -20,6 +20,8 @@ public:
 
     // The clip to edit (may be null). Call again when the host's clip changes.
     void setHost(ClipHost* host);
+    // Switch the shown clip (track or take) and keep the zoom, scroll and note range.
+    void rebindHost(ClipHost* h);
     ClipHost* host() const { return host_; }
 
     void undo();

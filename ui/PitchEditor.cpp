@@ -706,9 +706,9 @@ public:
                 g.drawLine(h.x, h.y + 4.5f, h.x, joinTop, 1.f);
             }
             g.setColour(col::bg);
-            g.fillEllipse(h.x - 4.5f, h.y - 4.5f, 9.f, 9.f);
+            g.fillEllipse(h.x - 2.25f, h.y - 2.25f, 4.5f, 4.5f);
             g.setColour(colr);
-            g.drawEllipse(h.x - 4.5f, h.y - 4.5f, 9.f, 9.f, 1.5f);
+            g.drawEllipse(h.x - 2.25f, h.y - 2.25f, 4.5f, 4.5f, 1.f);
             if (active) {
                 g.setFont(juce::FontOptions(11.f));
                 const juce::String txt = T("Переход ") + juce::String(juce::roundToInt(sm * 100)) + " %";
@@ -853,9 +853,9 @@ public:
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
         } else if (gesture == G::Smooth) {
-            // 0.7 % per pixel (Shift: 0.2 % for fine steps), relative to where the drag started.
-            // Right = smoother / longer, left = sharper. 0.5 % per pixel (Shift: 0.15 %).
-            const double delta = (e.mods.isShiftDown() ? 0.0015 : 0.005) * off.x;
+            // Vertical: up = smoother (more), down = sharper (less). 0.5 % per pixel (Shift: 0.15 %),
+            // relative to where the drag started.
+            const double delta = (e.mods.isShiftDown() ? 0.0015 : 0.005) * -off.y;
             for (auto& [k, s0] : start)
                 d->edits.notes[(size_t)k].transition = juce::jlimit(0.0, 1.0, s0.transition + delta);
             ed.syncInspector();
@@ -1720,6 +1720,19 @@ PitchEditor::~PitchEditor()
     setLookAndFeel(nullptr);
 }
 
+void PitchEditor::rebindHost(ClipHost* h)
+{
+    const double pps = pps_, scroll = scroll_, lo = lo_, hi = hi_;
+    setHost(nullptr);
+    setHost(h);
+    pps_ = pps;
+    scroll_ = scroll;
+    lo_ = lo;
+    hi_ = hi;
+    fitted_ = true;
+    roll_->repaint();
+}
+
 void PitchEditor::setHost(ClipHost* h)
 {
     if (h == host_) { refresh(); return; }
@@ -2049,16 +2062,7 @@ void PitchEditor::switchTrack(const juce::String& id)
             if (t.current) self->shownTracks_.insert(t.id); // keep seeing the track we leave
         self->shownTracks_.erase(id);
         h->setEditedTrack(id);
-        // Keep the view: setHost refits it, so remember the zoom and scroll and put them back.
-        const double pps = self->pps_, scroll = self->scroll_, lo = self->lo_, hi = self->hi_;
-        self->setHost(nullptr);
-        self->setHost(h);
-        self->pps_ = pps;
-        self->scroll_ = scroll;
-        self->lo_ = lo;
-        self->hi_ = hi;
-        self->fitted_ = true;
-        self->roll_->repaint();
+        self->rebindHost(h);
     });
 }
 
