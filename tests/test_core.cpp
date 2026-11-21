@@ -6,6 +6,7 @@
 #include "glina/Document.h"
 #include "glina/Notes.h"
 #include "glina/Editing.h"
+#include "glina/Transfer.h"
 
 #include <cmath>
 #include <cstdio>
@@ -786,6 +787,42 @@ static void testDocumentV4(const Analysis& a)
     CHECK(deserialize(plain, p) && !p.edits.autoVibrato.active() && p.edits.notes[2].tiltR == 0, "v3 loads with features off");
 }
 
+static void testTransfer(const Analysis& a)
+{
+    std::printf("[transfer A] note edits copied with per-parameter share\n");
+    if (a.notes.size() < 2) { CHECK(false, "need at least 2 notes"); return; }
+    Document src;
+    conform(src, a);
+    src.edits.notes[1].pitchOffset = 0.7;
+    src.edits.notes[1].timeOffsetSec = 0.02;
+    src.edits.notes[1].stretch = 1.2;
+
+    Document full;
+    conform(full, a);
+    CHECK(transferNoteEdits(src, full, a, {1, 1}), "full transfer refused");
+    CHECK(std::abs(full.edits.notes[1].pitchOffset - 0.7) < 1e-12, "pitch not copied at share 1");
+    CHECK(std::abs(full.edits.notes[1].timeOffsetSec - 0.02) < 1e-12, "time not copied at share 1");
+    CHECK(std::abs(full.edits.notes[1].stretch - 1.2) < 1e-12, "stretch not copied at share 1");
+
+    Document half;
+    conform(half, a);
+    CHECK(transferNoteEdits(src, half, a, {0.5, 0.5}), "half transfer refused");
+    CHECK(std::abs(half.edits.notes[1].pitchOffset - 0.35) < 1e-12, "pitch share 0.5 wrong");
+    CHECK(std::abs(half.edits.notes[1].stretch - 1.1) < 1e-12, "stretch share 0.5 wrong");
+
+    Document none;
+    conform(none, a);
+    CHECK(transferNoteEdits(src, none, a, {0, 0}), "zero transfer refused");
+    CHECK(none.edits.notes[1].pitchOffset == 0 && none.edits.notes[1].stretch == 1,
+          "share 0 changed the target");
+
+    Document other = src;
+    other.edits.notes.pop_back();
+    Document target;
+    conform(target, a);
+    CHECK(!transferNoteEdits(other, target, a, {1, 1}), "mismatched note count accepted");
+}
+
 int main()
 {
     testSines();
@@ -815,6 +852,7 @@ int main()
         testTiltLayout(a);
         testAutoVibrato(sr);
         testDocumentV4(a);
+        testTransfer(a);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
