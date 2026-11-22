@@ -52,10 +52,13 @@ private:
     class Harmonies;
     class Tracks;
     class Help;
+    class Navigator;
 
     // ---- model helpers ----------------------------------------------------------
     void refresh();        // re-read host model, rebuild curves, update panels
-    void refreshCurves();  // curves only (live preview during gestures)
+    // Curves only (live preview during gestures). harmonies = false while notes move in time:
+    // their pitch does not change, so the harmony pitches stay until the gesture ends (commit refreshes).
+    void refreshCurves(bool harmonies = true);
     Document* doc() const { return host_ != nullptr ? &host_->document() : nullptr; }
     std::vector<int> targets() const; // selection, or every note when nothing is selected
     void commit(const Document& before, bool layoutChanged = false);
@@ -123,6 +126,7 @@ private:
     bool wasBusy_ = true, wasPlaying_ = false;
 
     std::unique_ptr<Roll> roll_;
+    std::unique_ptr<Navigator> navigator_; // overview strip under the roll: whole track, shown part
     std::unique_ptr<Inspector> inspector_;
     juce::Viewport inspView_;
     std::unique_ptr<Harmonies> harmonies_;

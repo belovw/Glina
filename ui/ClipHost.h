@@ -86,6 +86,14 @@ public:
     // A short note for the status line (e.g. where an undo landed); empty = none.
     virtual juce::String noticeText() const { return {}; }
 
+    // The whole timeline the editor scrolls over, in the clip seconds the view uses: its start and
+    // end, and the spans of the items on it. False: the editor uses the clip alone.
+    struct Summary {
+        double t0 = 0, t1 = 0;
+        std::vector<std::pair<double, double>> items;
+    };
+    virtual bool summary(Summary& /*out*/) const { return false; }
+
     virtual juce::String clipName() const { return {}; }
     virtual juce::String busyText() const { return {}; }   // e.g. "Анализ…"; empty = idle
     virtual bool isRendering() const { return false; }

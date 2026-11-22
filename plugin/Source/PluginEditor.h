@@ -39,6 +39,7 @@ public:
     bool canRedo() override;
     bool undoStep(bool redo) override;
     juce::String noticeText() const override;
+    bool summary(ClipHost::Summary& out) const override;
     void documentChanged(bool layoutChanged) override;
     juce::String busyText() const override;
     bool isRendering() const override;

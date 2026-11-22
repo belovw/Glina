@@ -1001,7 +1001,7 @@ public:
                          gesture == G::StretchL);
         }
         changed = true;
-        ed.refreshCurves();
+        ed.refreshCurves(false);
         repaint();
     }
 
@@ -1818,6 +1818,109 @@ private:
     juce::String sig;
 };
 
+// The overview strip under the roll: the whole timeline (one bar per item), the shown part as a box and
+// the playhead as a line. Drag the box, or click the strip, to move the view.
+class PitchEditor::Navigator final : public juce::Component {
+public:
+    explicit Navigator(PitchEditor& o) : ed(o) {}
+
+    static constexpr int kH = 26;
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(col::panel);
+        const auto s = span();
+        const auto a = area();
+        if (s.t1 <= s.t0 || a.isEmpty()) return;
+
+        auto items = s.items;
+        if (items.empty()) items.emplace_back(s.t0, s.t1); // a single clip: one bar
+        g.setColour(col::accent.withAlpha(0.35f));
+        for (const auto& it : items) {
+            const float x0 = xOf(it.first, s, a), x1 = xOf(it.second, s, a);
+            g.fillRect(x0, a.getY(), std::max(2.f, x1 - x0), a.getHeight());
+        }
+
+        const auto win = windowRect(s, a);
+        g.setColour(col::text.withAlpha(0.12f));
+        g.fillRect(win);
+        g.setColour(col::text.withAlpha(0.6f));
+        g.drawRect(win, 1.f);
+
+        if (ed.host_ != nullptr) {
+            const double ph = ed.host_->playheadSec();
+            if (ph >= s.t0 && ph <= s.t1) {
+                g.setColour(col::playhead);
+                g.fillRect(xOf(ph, s, a), a.getY(), 1.5f, a.getHeight());
+            }
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const auto s = span();
+        const auto a = area();
+        if (s.t1 <= s.t0 || a.isEmpty()) return;
+        dragging_ = windowRect(s, a).contains(e.position);
+        dragX_ = e.position.x;
+        dragScroll_ = ed.scroll_;
+        if (!dragging_) moveTo(tOf(e.position.x, s, a) - visibleSec() * 0.5, s); // click: centre the view there
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (!dragging_) return;
+        const auto s = span();
+        const auto a = area();
+        moveTo(dragScroll_ + (e.position.x - dragX_) * (s.t1 - s.t0) / a.getWidth(), s);
+    }
+
+    void mouseUp(const juce::MouseEvent&) override { dragging_ = false; }
+
+private:
+    PitchEditor& ed;
+    bool dragging_ = false;
+    float dragX_ = 0;
+    double dragScroll_ = 0;
+
+    juce::Rectangle<float> area() const { return getLocalBounds().toFloat().reduced(0.f, 3.f); }
+
+    // The timeline to show: the track's when the host has one, else the clip's own length.
+    ClipHost::Summary span() const
+    {
+        ClipHost::Summary s;
+        if (ed.host_ != nullptr && ed.host_->summary(s)) return s;
+        if (ed.eff_ != nullptr) s.t1 = ed.eff_->frameTime((int)ed.eff_->frames.size());
+        return s;
+    }
+
+    double visibleSec() const { return ed.roll_->canvas().getWidth() / ed.pps_; }
+
+    juce::Rectangle<float> windowRect(const ClipHost::Summary& s, juce::Rectangle<float> a) const
+    {
+        const float x0 = xOf(ed.scroll_, s, a), x1 = xOf(ed.scroll_ + visibleSec(), s, a);
+        return {x0, a.getY(), std::max(4.f, x1 - x0), a.getHeight()};
+    }
+
+    // Keeps the view inside the timeline, then repaints the roll and this strip.
+    void moveTo(double sec, const ClipHost::Summary& s)
+    {
+        const double hi = std::max(s.t0, s.t1 - visibleSec());
+        ed.scroll_ = juce::jlimit(s.t0, hi, sec);
+        ed.roll_->repaint();
+        repaint();
+    }
+
+    static float xOf(double t, const ClipHost::Summary& s, juce::Rectangle<float> a)
+    {
+        return a.getX() + (float)((t - s.t0) / (s.t1 - s.t0)) * a.getWidth();
+    }
+    static double tOf(float x, const ClipHost::Summary& s, juce::Rectangle<float> a)
+    {
+        return s.t0 + (double)((x - a.getX()) / a.getWidth()) * (s.t1 - s.t0);
+    }
+};
+
 PitchEditor::PitchEditor()
 {
     col::loadTheme(); // the plug-in has no app start-up: read the setting here
@@ -1826,11 +1929,13 @@ PitchEditor::PitchEditor()
     themeWatch_ = std::make_unique<col::ThemeWatcher>([this] { themeChanged(); });
     setWantsKeyboardFocus(true);
     roll_ = std::make_unique<Roll>(*this);
+    navigator_ = std::make_unique<Navigator>(*this);
     inspector_ = std::make_unique<Inspector>(*this);
     harmonies_ = std::make_unique<Harmonies>(*this);
     tracks_ = std::make_unique<Tracks>(*this);
     help_ = std::make_unique<Help>();
     addAndMakeVisible(*roll_);
+    addAndMakeVisible(*navigator_);
     // The inspector scrolls when the window is too low for all its controls.
     inspView_.setViewedComponent(inspector_.get(), false);
     inspView_.setScrollBarsShown(true, false);
@@ -2001,13 +2106,14 @@ double PitchEditor::editedCentre(int i) const
     return editedCenter(*eff_, d->edits, i); // centre + offset + tilt: the box sits on the tilted line's mean
 }
 
-void PitchEditor::refreshCurves()
+void PitchEditor::refreshCurves(bool harmonies)
 {
     Document* d = doc();
     if (eff_ == nullptr || d == nullptr) { curve_.clear(); harm_.clear(); timeMap_ = {}; return; }
     conform(*d, *eff_);
     curve_ = editedPitchCurve(*eff_, d->edits);
     timeMap_ = TimeMap::build(*eff_, d->edits);
+    if (!harmonies) return;
     harm_.clear();
     const Key key = d->key(*eff_);
     for (const auto& v : d->voices)
@@ -2691,6 +2797,7 @@ void PitchEditor::resized()
     if (showTracks_) tracks_->setBounds(r.removeFromBottom(tracks_->preferredHeight()));
     inspView_.setBounds(r.removeFromRight(236));
     layoutInspector();
+    navigator_->setBounds(r.removeFromBottom(Navigator::kH));
     roll_->setBounds(r);
     help_->setBounds(r);
     if (!fitted_) fitView();
@@ -2767,6 +2874,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
 void PitchEditor::timerCallback()
 {
     if (host_ == nullptr) return;
+    navigator_->repaint(); // the shown part and the playhead move with the view and the transport
     if (++trackPoll_ >= 30) { trackPoll_ = 0; pollTracks(); } // items added/removed in the DAW
     const bool busy = host_->analysis() == nullptr || host_->isRendering() || host_->busyText().isNotEmpty();
     const bool playing = host_->isPlaying();

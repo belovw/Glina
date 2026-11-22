@@ -165,6 +165,18 @@ void PluginClip::documentChanged(bool layoutChanged)
 }
 
 
+bool PluginClip::summary(ClipHost::Summary& out) const
+{
+    if (!viewOn_) return false;
+    out = {};
+    out.t1 = viewEnd_ - viewStart_; // the view's clip seconds run from its first item's start
+    for (const auto& it : viewItems_) {
+        const double a = it.playStart - viewStart_;
+        out.items.emplace_back(a, a + (it.modEnd - it.modStart));
+    }
+    return true;
+}
+
 std::vector<PluginClip::ViewItem> PluginClip::viewItemsNow() const
 {
     std::vector<ViewItem> out;
