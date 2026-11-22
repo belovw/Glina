@@ -1,6 +1,7 @@
 #include "ReaperHost.h"
 
 #include <atomic>
+#include <limits>
 
 JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wnon-virtual-dtor", "-Wzero-as-null-pointer-constant", "-Wunused-parameter",
                                     "-Wshadow", "-Wextra-semi")
@@ -34,9 +35,11 @@ namespace {
 // Signatures from reaper-sdk/sdk/reaper_plugin_functions.h (ReaProject* -> void*).
 using FnEnumProjects = void* (*)(int idx, char* projfnOutOptional, int projfnOutOptional_sz);
 using FnIsProjectDirty = int (*)(void* proj);
+using FnGetCursorPositionEx = double (*)(void* proj);
 
 std::atomic<FnEnumProjects> enumProjects { nullptr };
 std::atomic<FnIsProjectDirty> isProjectDirty { nullptr };
+std::atomic<FnGetCursorPositionEx> getCursorPositionEx { nullptr };
 
 IReaperHostApplication* rh(void* p) { return static_cast<IReaperHostApplication*>(p); }
 
@@ -57,6 +60,8 @@ void HostLink::attach(Steinberg::FUnknown* hostContext)
         enumProjects = reinterpret_cast<FnEnumProjects>(rh(obj)->getReaperApi("EnumProjects"));
     if (isProjectDirty.load() == nullptr)
         isProjectDirty = reinterpret_cast<FnIsProjectDirty>(rh(obj)->getReaperApi("IsProjectDirty"));
+    if (getCursorPositionEx.load() == nullptr)
+        getCursorPositionEx = reinterpret_cast<FnGetCursorPositionEx>(rh(obj)->getReaperApi("GetCursorPositionEx"));
 }
 
 void* HostLink::project() const
@@ -97,6 +102,12 @@ int isDirty(void* project)
 {
     const auto f = isProjectDirty.load();
     return f != nullptr && project != nullptr ? f(project) : -1;
+}
+
+double cursorSec(void* project)
+{
+    const auto f = getCursorPositionEx.load();
+    return f != nullptr && project != nullptr ? f(project) : std::numeric_limits<double>::quiet_NaN();
 }
 
 } // namespace glina::plugin::reaper

@@ -104,7 +104,8 @@ private:
     std::unique_ptr<PluginClip> clip_;
     ui::PitchEditor editor_;
     bool ownPinned_ = false; // bound to the item this instance sits on (Take FX)
-    bool centreOnOpen_ = false; // view still to be centred on the play position once it can be
+    bool centreOnOpen_ = false; // view still to be centred on the cursor once it can be
+    double openSec_ = 0;        // the cursor (project seconds) the editor opened at
     juce::uint32 openedMs_ = 0; // when the editor opened (stale host selection is ignored shortly after)
 };
 

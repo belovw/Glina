@@ -36,5 +36,8 @@ juce::String projectFile(void* project);
 std::vector<void*> openProjects();
 // REAPER's "project has unsaved changes" flag; -1 if unknown.
 int isDirty(void* project);
+// The edit cursor of the project, in project seconds (it is where the transport starts, and it
+// is set even when the transport is stopped); NaN if unknown.
+double cursorSec(void* project);
 
 } // namespace glina::plugin::reaper

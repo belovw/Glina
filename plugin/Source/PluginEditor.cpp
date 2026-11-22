@@ -4,6 +4,7 @@
 #include <ARA_Library/Utilities/ARATimelineConversion.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace glina::plugin {
@@ -375,15 +376,34 @@ bool GlinaEditor::pinOwnRegion()
     if (pr == nullptr) return false;
     const auto regions = pr->getPlaybackRegions<juce::ARAPlaybackRegion>();
     if (regions.empty()) return false;
-    const double song = proc_.playheadSec.load();
+    // REAPER names its project a moment after the FX is created: wait for it, then take the edit
+    // cursor (the transport's playhead is not updated while stopped).
+    if (!proc_.hasReaperProject() && juce::Time::getMillisecondCounter() - openedMs_ < 3000) return false;
+    const double cursor = proc_.editCursorSec();
+    const double song = std::isfinite(cursor) ? cursor : proc_.playheadSec.load();
+    auto inside = [song](juce::ARAPlaybackRegion* r) {
+        return song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime();
+    };
     juce::ARAPlaybackRegion* pick = regions.front();
     for (auto* r : regions)
-        if (song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime()) { pick = r; break; }
+        if (inside(r)) { pick = r; break; }
+    // The instance may be given only one region of the track. The other items are reached through
+    // its region sequence: the one under the play position wins.
+    size_t trackItems = 0;
+    if (auto* seq = pick->getRegionSequence()) {
+        const auto items = glinaItemsOf(seq);
+        trackItems = items.size();
+        if (!inside(pick))
+            for (auto* r : items)
+                if (inside(r)) { pick = r; break; }
+    }
     clip_->setRegion(pick);
     ownPinned_ = true;
-    centreOnOpen_ = true; // the view opens at the play position, even when no item is there
-    clip_->log(T("открыт на айтеме: инстанс видит регионов ") + juce::String((int)regions.size()) +
-               T(", плейхед ") + juce::String(song, 3) + T(" с"));
+    centreOnOpen_ = true; // the view opens at the cursor, even when no item is there
+    openSec_ = song;
+    clip_->log(T("открыт на айтеме: регионов инстанса ") + juce::String((int)regions.size()) +
+               T(", айтемов трека ") + juce::String((int)trackItems) +
+               T(", курсор ") + juce::String(song, 3) + T(" с"));
     return true;
 }
 
@@ -418,7 +438,7 @@ void GlinaEditor::timerCallback()
     const auto* before = clip_->region();
     const auto* beforeMod = clip_->modification();
     pinOwnRegion(); // the renderer may not know its item yet when the editor opens
-    if (centreOnOpen_ && editor_.centreOnProjectSec(proc_.playheadSec.load())) centreOnOpen_ = false;
+    if (centreOnOpen_ && editor_.centreOnProjectSec(openSec_)) centreOnOpen_ = false;
     clip_->followTrack(); // item or take changed in the host: stay on the same track
     if (!clip_->valid()) pickFallbackRegion();
     if (clip_->region() != before || clip_->modification() != beforeMod)
