@@ -57,8 +57,73 @@ Document& PluginClip::document()
 
 ui::DocumentHistory& PluginClip::history()
 {
-    if (viewOn_) return viewHistory_;
+    if (viewOn_) return dummyHistory_; // the track view keeps its own steps (below)
     return mod_ != nullptr ? mod_->history : dummyHistory_;
+}
+
+void PluginClip::recordEdit(const Document& before)
+{
+    if (!viewOn_) { ui::ClipHost::recordEdit(before); return; }
+    // The takes the edit changed were collected by documentChanged: that is one step.
+    if (viewHist_ != nullptr && !openStep_.empty()) viewHist_->push(std::move(openStep_));
+    openStep_.clear();
+}
+
+bool PluginClip::canUndo()
+{
+    if (!viewOn_) return ui::ClipHost::canUndo();
+    return viewHist_ != nullptr && !viewHist_->undo.empty();
+}
+
+bool PluginClip::canRedo()
+{
+    if (!viewOn_) return ui::ClipHost::canRedo();
+    return viewHist_ != nullptr && !viewHist_->redo.empty();
+}
+
+bool PluginClip::undoStep(bool redo)
+{
+    if (!viewOn_) return ui::ClipHost::undoStep(redo);
+    if (viewHist_ == nullptr || dc_ == nullptr) return false;
+    auto& from = redo ? viewHist_->redo : viewHist_->undo;
+    auto& to = redo ? viewHist_->undo : viewHist_->redo;
+    if (from.empty()) return false;
+    GlinaDocumentController::TrackStep step = std::move(from.back());
+    from.pop_back();
+    GlinaDocumentController::TrackStep back; // the same takes as they are now: the way back
+    int hidden = 0, gone = 0;
+    for (auto& part : step) {
+        if (part.alive == nullptr || !part.alive->load()) { ++gone; continue; }
+        auto* mod = part.mod;
+        back.push_back({mod, part.alive, mod->doc});
+        const auto& now = mod->doc.edits.spans;
+        const auto& was = part.before.edits.spans;
+        const bool layout = now.size() != was.size() ||
+                            !std::equal(now.begin(), now.end(), was.begin(), [](const NoteSpan& a, const NoteSpan& b) {
+                                return a.start == b.start && a.end == b.end;
+                            });
+        mod->doc = std::move(part.before);
+        dc_->documentChanged(mod, layout);
+        if (std::none_of(viewItems_.begin(), viewItems_.end(), [&](const ViewItem& it) { return it.mod == mod; })) ++hidden;
+    }
+    if (!back.empty()) to.push_back(std::move(back));
+    const juce::String what = redo ? T("повтор") : T("отмена");
+    juce::String note;
+    if (hidden > 0) note = what + T(" в тэйке, которого сейчас не видно");
+    if (gone > 0) note << (note.isEmpty() ? what + T(": ") : T("; ")) << T("тэйк удалён, его часть пропущена");
+    if (note.isNotEmpty()) {
+        notice_ = note;
+        noticeMs_ = juce::Time::getMillisecondCounter();
+        logLine(T("вид трека: ") + note);
+    }
+    refreshView(true); // the takes changed: show them as they are now
+    return true;
+}
+
+juce::String PluginClip::noticeText() const
+{
+    if (notice_.isEmpty() || juce::Time::getMillisecondCounter() - noticeMs_ > 5000) return {};
+    return notice_;
 }
 
 void PluginClip::documentChanged(bool layoutChanged)
@@ -86,6 +151,9 @@ void PluginClip::documentChanged(bool layoutChanged)
     for (size_t k = 0; k < docs.size(); ++k) {
         if (serialize(docs[k]) == serialize(viewPieces_[k].doc)) continue;
         auto* mod = viewItems_[k].mod;
+        // The undo step keeps each take as it was before this edit (first change only).
+        if (std::none_of(openStep_.begin(), openStep_.end(), [&](const auto& p) { return p.mod == mod; }))
+            openStep_.push_back({mod, mod->alive, mod->doc});
         mod->doc = docs[k];
         dc_->documentChanged(mod, layout[k]); // its own render, as for a single item
         anyLayout = anyLayout || layout[k];
@@ -93,8 +161,9 @@ void PluginClip::documentChanged(bool layoutChanged)
     if (anyLayout) { refreshView(true); return; } // the view's notes changed
     for (size_t k = 0; k < docs.size(); ++k) viewPieces_[k].doc = docs[k];
     view_.built = view_.doc;
-    viewItems_ = viewItemsNow(); // new edit versions are ours: no rebuild for them
+    viewItems_ = viewItemsNow(); // no rebuild for our own edit
 }
+
 
 std::vector<PluginClip::ViewItem> PluginClip::viewItemsNow() const
 {
@@ -129,7 +198,7 @@ void PluginClip::refreshView(bool force)
         viewItems_.clear();
         viewSeq_ = nullptr;
         viewPrimary_ = -1;
-        viewHistory_.clear();
+        viewHist_ = nullptr; // the track's history stays with the controller
         if (was) changes.sendChangeMessage();
     };
     auto refuse = [&](const juce::String& why) {
@@ -154,7 +223,6 @@ void PluginClip::refreshView(bool force)
     viewEnd_ = viewStart_;
     for (const auto& it : items) viewEnd_ = std::max(viewEnd_, it.playStart + (it.modEnd - it.modStart));
     if (std::any_of(items.begin(), items.end(), [](const ViewItem& it) { return it.eff == nullptr; })) {
-        if (newTrack) viewHistory_.clear();
         viewOn_ = viewPending_ = true; // "Анализ вокала…" until every item is ready
         view_ = TrackView{};
         viewItems_ = items;
@@ -175,7 +243,8 @@ void PluginClip::refreshView(bool force)
     }
     TrackView v;
     if (!buildTrackView(pieces, primary, v)) { refuse(T("у айтемов трека разная частота дискретизации")); return; }
-    if (newTrack) viewHistory_.clear();
+    viewHist_ = dc_ != nullptr ? &dc_->trackHistory(seq_) : nullptr; // the track's shared undo steps
+    if (newTrack) openStep_.clear();
     view_ = std::move(v);
     viewPieces_ = std::move(pieces);
     viewItems_ = items;

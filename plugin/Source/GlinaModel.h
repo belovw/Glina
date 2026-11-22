@@ -18,6 +18,7 @@
 #include "glina/Renderer.h"
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <mutex>
 
@@ -121,6 +122,27 @@ public:
     // Broadcast (async) when analysis or a render finishes, so editors repaint.
     juce::ChangeBroadcaster modelChanged;
 
+    // Undo history of a track shown as a whole (track view). One step per edit, however many
+    // takes it touched: per take, the document as it was before. It lives here, not in the editor
+    // window, so it survives closing and reopening the window and is shared by every window on
+    // the track; tied to the takes themselves, it survives moving items too. Message thread.
+    struct TrackStepPart {
+        GlinaAudioModification* mod = nullptr;
+        std::shared_ptr<std::atomic<bool>> alive; // false once the take is gone: the part is skipped
+        Document before;
+    };
+    using TrackStep = std::vector<TrackStepPart>;
+    struct TrackHistory {
+        std::vector<TrackStep> undo, redo;
+        void push(TrackStep s)
+        {
+            undo.push_back(std::move(s));
+            if (undo.size() > 300) undo.erase(undo.begin());
+            redo.clear();
+        }
+    };
+    TrackHistory& trackHistory(const void* sequence) { return trackHistories[sequence]; }
+
     juce::ScopedTryReadLock tryProcessingLock() { return juce::ScopedTryReadLock(processLock); }
 
     // ARA listener callbacks (the specialisation receives them automatically).
@@ -137,6 +159,7 @@ protected:
     bool doStoreObjectsToStream(juce::ARAOutputStream&, const juce::ARAStoreObjectsFilter*) noexcept override;
 
 private:
+    std::map<const void*, TrackHistory> trackHistories; // by region sequence; entries never erased (pointers stay valid)
     void startAnalysisIfPossible(GlinaAudioSource* src);
     void analysisFinished(GlinaAudioSource* src);
     void rebuildEffective(GlinaAudioModification* mod);

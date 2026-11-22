@@ -450,6 +450,7 @@ public:
                 if (ed.host_->isRendering()) st << T(" · рендер…");
                 else if (const auto o = ed.host_->renderOrigin(); o.isNotEmpty()) st << " · " << o;
                 if (ed.host_->isBypassed()) st << T(" · ОРИГИНАЛ (A/B)");
+                if (const auto n = ed.host_->noticeText(); n.isNotEmpty()) st << " · " << n;
             }
         }
         if (st.isEmpty()) return;
@@ -2074,8 +2075,8 @@ std::vector<int> PitchEditor::targets() const
 void PitchEditor::commit(const Document& before, bool layoutChanged)
 {
     if (host_ == nullptr) return;
-    host_->history().push(before);
     host_->documentChanged(layoutChanged);
+    host_->recordEdit(before);
     refresh();
 }
 
@@ -2092,28 +2093,14 @@ void PitchEditor::edit(Fn&& fn, bool layoutChanged)
 
 void PitchEditor::undo()
 {
-    Document* d = doc();
-    if (d == nullptr) return;
-    const auto spans = d->edits.spans;
-    if (!host_->history().undo(*d)) return;
-    const bool layout = spans.size() != d->edits.spans.size() ||
-                        !std::equal(spans.begin(), spans.end(), d->edits.spans.begin(),
-                                    [](const NoteSpan& a, const NoteSpan& b) { return a.start == b.start && a.end == b.end; });
-    host_->documentChanged(layout);
-    refresh();
+    if (doc() == nullptr) return;
+    if (host_->undoStep(false)) refresh();
 }
 
 void PitchEditor::redo()
 {
-    Document* d = doc();
-    if (d == nullptr) return;
-    const auto spans = d->edits.spans;
-    if (!host_->history().redo(*d)) return;
-    const bool layout = spans.size() != d->edits.spans.size() ||
-                        !std::equal(spans.begin(), spans.end(), d->edits.spans.begin(),
-                                    [](const NoteSpan& a, const NoteSpan& b) { return a.start == b.start && a.end == b.end; });
-    host_->documentChanged(layout);
-    refresh();
+    if (doc() == nullptr) return;
+    if (host_->undoStep(true)) refresh();
 }
 
 void PitchEditor::fitView()
@@ -2526,7 +2513,7 @@ void PitchEditor::joinSelected()
     }
     if (!any) return;
     selection_ = {sel.front()};
-    host_->history().push(before);
+    host_->recordEdit(before);
     refresh();
 }
 
@@ -2602,8 +2589,8 @@ void PitchEditor::updateToolbar()
     pencilBtn_.setEnabled(ready);
     pencilBtn_.setColour(juce::TextButton::buttonColourId, pencil_ ? col::drawn.darker(col::light ? 0.f : 0.45f) : col::button);
     playBtn_.setButtonText(host_ != nullptr && host_->isPlaying() ? T("■") : T("▶"));
-    undoBtn_.setEnabled(ready && host_->history().canUndo());
-    redoBtn_.setEnabled(ready && host_->history().canRedo());
+    undoBtn_.setEnabled(ready && host_->canUndo());
+    redoBtn_.setEnabled(ready && host_->canRedo());
     for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &corrPitch_, &corrDrift_, &fitBtn_})
         c->setEnabled(ready);
     splitBtn_.setEnabled(ready && selection_.size() == 1);

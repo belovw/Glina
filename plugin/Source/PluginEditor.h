@@ -34,6 +34,11 @@ public:
     const Analysis* analysis() const override;
     Document& document() override;
     ui::DocumentHistory& history() override;
+    void recordEdit(const Document& before) override;
+    bool canUndo() override;
+    bool canRedo() override;
+    bool undoStep(bool redo) override;
+    juce::String noticeText() const override;
     void documentChanged(bool layoutChanged) override;
     juce::String busyText() const override;
     bool isRendering() const override;
@@ -116,7 +121,10 @@ private:
     std::vector<ViewItem> viewItems_;
     int viewPrimary_ = -1;
     juce::ARARegionSequence* viewSeq_ = nullptr;
-    ui::DocumentHistory viewHistory_;     // one undo step for an edit, whichever items it touched
+    GlinaDocumentController::TrackHistory* viewHist_ = nullptr; // the track's shared undo history
+    GlinaDocumentController::TrackStep openStep_; // takes changed by the edit in progress (closed by recordEdit)
+    juce::String notice_;                         // shown in the status line for a few seconds
+    juce::uint32 noticeMs_ = 0;
     double viewStart_ = 0, viewEnd_ = 0;  // project time of the view's start and end
     juce::String viewRefused_;            // why the last track could not be shown as a view (logged once)
 };
