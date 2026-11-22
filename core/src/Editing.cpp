@@ -17,15 +17,20 @@ double minDur(const NoteTimes& t) { return std::min(kMinNoteSec, 0.5 * (t.inEnd 
 // boundaries sit at frame centres, so a clip whose first note starts at frame 0
 // (singing from the very first sample) has its first boundary just below 0. Taking
 // 0 there would make the untouched layout invalid and block every move.
+// Overlaps and the clip end are judged with 1 µs of slack. Layouts saved by an earlier build
+// (or round-tripped through text) can touch with a rounding error of ~1e-9 s; a tighter test
+// called them invalid and blocked every time move, while 1 µs is far below any analysis frame.
+constexpr double kTolSec = 1e-6;
+
 bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo)
 {
     double last = lo;
     for (const auto& n : t) {
-        if (n.outEnd - n.outStart < minDur(n) - 1e-9) return false;
-        if (n.outStart < last - 1e-9) return false;
+        if (n.outEnd - n.outStart < minDur(n) - kTolSec) return false;
+        if (n.outStart < last - kTolSec) return false;
         last = n.outEnd;
     }
-    return t.empty() || last <= clipLen + 1e-9;
+    return t.empty() || last <= clipLen + kTolSec;
 }
 
 // Largest part of `dt` (shrinking towards 0) for which `make` gives a valid layout.

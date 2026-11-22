@@ -201,6 +201,9 @@ public:
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
         g.drawFittedText(T(text), r, juce::Justification::topLeft, 40);
+        g.setColour(col::dim);
+        g.setFont(juce::FontOptions(12.f));
+        g.drawText("Glina " GLINA_VERSION_STRING, getLocalBounds().reduced(24, 12), juce::Justification::bottomRight, false);
     }
     void mouseDown(const juce::MouseEvent&) override { setVisible(false); }
 };
