@@ -106,7 +106,9 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     const int n = (int)a.notes.size();
     if (n == 0 || left < -1 || left > n - 1 || dt == 0) return 0;
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    const double clipLen = (double)a.numSamples / a.sampleRate;
+    // The last note may end a fraction of a millisecond past the clip (frame centres), so the
+    // limit is the later of the two; otherwise the untouched layout is invalid and no move works.
+    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
 
     // Selected notes touching the boundary form one block on each side.
     int L0 = left, R1 = left + 1;
@@ -138,7 +140,9 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
     const int n = (int)a.notes.size();
     if (n == 0 || notes.empty() || dt == 0) return 0;
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    const double clipLen = (double)a.numSamples / a.sampleRate;
+    // The last note may end a fraction of a millisecond past the clip (frame centres), so the
+    // limit is the later of the two; otherwise the untouched layout is invalid and no move works.
+    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
     auto moved = [&](int i) { return i >= 0 && i < n && notes.count(i) > 0; };
 
     // Notes that touch (no gap between them) are linked: the neighbour follows the move.
