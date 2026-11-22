@@ -169,10 +169,14 @@ bool PluginClip::summary(ClipHost::Summary& out) const
 {
     if (!viewOn_) return false;
     out = {};
-    out.t1 = viewEnd_ - viewStart_; // the view's clip seconds run from its first item's start
+    out.t1 = viewEnd_ - viewStart_;
     for (const auto& it : viewItems_) {
-        const double a = it.playStart - viewStart_;
-        out.items.emplace_back(a, a + (it.modEnd - it.modStart));
+        const double t0 = it.playStart - viewStart_;
+        const double offset = it.playStart - it.modStart - viewStart_; // view time of the analysis' start
+        juce::String name;
+        const char* nm = it.region->getName();
+        if (nm != nullptr) name = juce::String::fromUTF8(nm);
+        if (it.eff != nullptr) out.add(name, t0, t0 + (it.modEnd - it.modStart), *it.eff, offset);
     }
     return true;
 }

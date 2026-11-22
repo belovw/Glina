@@ -1971,13 +1971,16 @@ private:
     juce::String sig;
 };
 
-// The overview strip under the roll: the whole timeline (one bar per item), the shown part as a box and
-// the playhead as a line. Drag the box, or click the strip, to move the view.
+// The overview strip under the roll (32 px): the whole track with the item names on top, the audio
+// level and the notes below. The box is the shown part: drag its middle to move the view, drag an
+// edge handle to change the zoom (the other edge stays), click the strip to centre the view there.
 class PitchEditor::Navigator final : public juce::Component {
 public:
     explicit Navigator(PitchEditor& o) : ed(o) {}
 
-    static constexpr int kH = 26;
+    static constexpr int kH = 32;
+    static constexpr float kLabelH = 12.f;
+    static constexpr int kLo = 48, kHi = 80; // note range drawn (MIDI)
 
     void paint(juce::Graphics& g) override
     {
@@ -1985,20 +1988,47 @@ public:
         const auto s = span();
         const auto a = area();
         if (s.t1 <= s.t0 || a.isEmpty()) return;
+        const float top = a.getY() + kLabelH, bodyH = a.getBottom() - top;
 
-        auto items = s.items;
-        if (items.empty()) items.emplace_back(s.t0, s.t1); // a single clip: one bar
-        g.setColour(col::accent.withAlpha(0.35f));
-        for (const auto& it : items) {
-            const float x0 = xOf(it.first, s, a), x1 = xOf(it.second, s, a);
-            g.fillRect(x0, a.getY(), std::max(2.f, x1 - x0), a.getHeight());
+        g.setColour(col::dim.withAlpha(0.5f));
+        for (size_t k = 0; k < s.level.size(); ++k) {
+            const double t = (double)k * ClipHost::Summary::kLevelStep;
+            if (t > s.t1 || s.level[k] <= 0.f) continue;
+            const float x0 = xOf(t, s, a), x1 = xOf(t + ClipHost::Summary::kLevelStep, s, a);
+            const float h = std::max(1.f, s.level[k] * bodyH * 0.9f);
+            g.fillRect(x0, top + (bodyH - h) * 0.5f, std::max(1.f, x1 - x0), h);
+        }
+
+        g.setColour(col::accent.withAlpha(0.8f));
+        for (const auto& it : s.items)
+            for (const auto& n : it.notes) {
+                const float x0 = xOf(n.t0, s, a), x1 = xOf(n.t1, s, a);
+                const float y = top + bodyH * (1.f - (float)(n.midi - kLo) / (float)(kHi - kLo));
+                g.fillRect(x0, y - 1.f, std::max(1.5f, x1 - x0), 2.f);
+            }
+
+        g.setFont(11.f);
+        for (const auto& it : s.items) {
+            const float x = xOf(it.t0, s, a);
+            g.setColour(col::grid);
+            g.drawVerticalLine((int)x, a.getY(), a.getBottom());
+            g.setColour(col::dim);
+            g.drawText(it.name, juce::Rectangle<float>(x + 4.f, a.getY(), std::max(12.f, xOf(it.t1, s, a) - x - 6.f), kLabelH),
+                       juce::Justification::centredLeft, true);
         }
 
         const auto win = windowRect(s, a);
-        g.setColour(col::text.withAlpha(0.12f));
+        g.setColour(col::accent.withAlpha(0.16f));
         g.fillRect(win);
-        g.setColour(col::text.withAlpha(0.6f));
+        g.setColour(col::accent);
         g.drawRect(win, 1.f);
+        for (float x : {win.getX(), win.getRight()}) {
+            g.fillRoundedRectangle(x - 4.f, win.getCentreY() - 7.f, 8.f, 14.f, 3.f);
+            g.setColour(col::bg);
+            g.fillRect(x - 1.5f, win.getCentreY() - 3.f, 1.f, 6.f);
+            g.fillRect(x + 0.5f, win.getCentreY() - 3.f, 1.f, 6.f);
+            g.setColour(col::accent);
+        }
 
         if (ed.host_ != nullptr) {
             const double ph = ed.host_->playheadSec();
@@ -2009,41 +2039,70 @@ public:
         }
     }
 
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const auto s = span();
+        const auto a = area();
+        if (s.t1 <= s.t0 || a.isEmpty()) return;
+        const auto win = windowRect(s, a);
+        const bool edge = std::abs(e.position.x - win.getX()) <= 6.f || std::abs(e.position.x - win.getRight()) <= 6.f;
+        setMouseCursor(edge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
+
     void mouseDown(const juce::MouseEvent& e) override
     {
         const auto s = span();
         const auto a = area();
         if (s.t1 <= s.t0 || a.isEmpty()) return;
-        dragging_ = windowRect(s, a).contains(e.position);
+        const auto win = windowRect(s, a);
+        mode_ = Mode::Click;
+        if (std::abs(e.position.x - win.getX()) <= 6.f) mode_ = Mode::Left;
+        else if (std::abs(e.position.x - win.getRight()) <= 6.f) mode_ = Mode::Right;
+        else if (win.contains(e.position)) mode_ = Mode::Pan;
         dragX_ = e.position.x;
         dragScroll_ = ed.scroll_;
-        if (!dragging_) moveTo(tOf(e.position.x, s, a) - visibleSec() * 0.5, s); // click: centre the view there
+        dragSpan_ = visibleSec();
+        if (mode_ == Mode::Click) moveTo(tOf(e.position.x, s, a) - visibleSec() * 0.5, s);
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
-        if (!dragging_) return;
         const auto s = span();
         const auto a = area();
-        moveTo(dragScroll_ + (e.position.x - dragX_) * (s.t1 - s.t0) / a.getWidth(), s);
+        switch (mode_) {
+        case Mode::Pan:
+            moveTo(dragScroll_ + (e.position.x - dragX_) * (s.t1 - s.t0) / a.getWidth(), s);
+            break;
+        case Mode::Left:
+            zoomTo(tOf(e.position.x, s, a), dragScroll_ + dragSpan_, s);
+            break;
+        case Mode::Right:
+            zoomTo(dragScroll_, tOf(e.position.x, s, a), s);
+            break;
+        default:
+            break;
+        }
     }
 
-    void mouseUp(const juce::MouseEvent&) override { dragging_ = false; }
+    void mouseUp(const juce::MouseEvent&) override { mode_ = Mode::None; }
 
 private:
+    enum class Mode { None, Click, Pan, Left, Right };
+
     PitchEditor& ed;
-    bool dragging_ = false;
+    Mode mode_ = Mode::None;
     float dragX_ = 0;
-    double dragScroll_ = 0;
+    double dragScroll_ = 0, dragSpan_ = 0;
 
-    juce::Rectangle<float> area() const { return getLocalBounds().toFloat().reduced(0.f, 3.f); }
+    juce::Rectangle<float> area() const { return getLocalBounds().toFloat().reduced(0.f, 1.f); }
 
-    // The timeline to show: the track's when the host has one, else the clip's own length.
+    // The timeline to show: the host's whole track, else this clip alone.
     ClipHost::Summary span() const
     {
         ClipHost::Summary s;
         if (ed.host_ != nullptr && ed.host_->summary(s)) return s;
-        if (ed.eff_ != nullptr) s.t1 = ed.eff_->frameTime((int)ed.eff_->frames.size());
+        if (ed.eff_ != nullptr) s.add(ed.host_ != nullptr ? ed.host_->clipName() : juce::String(), 0.0,
+                                      ed.eff_->frameTime((int)ed.eff_->frames.size()), *ed.eff_, 0.0);
         return s;
     }
 
@@ -2052,7 +2111,7 @@ private:
     juce::Rectangle<float> windowRect(const ClipHost::Summary& s, juce::Rectangle<float> a) const
     {
         const float x0 = xOf(ed.scroll_, s, a), x1 = xOf(ed.scroll_ + visibleSec(), s, a);
-        return {x0, a.getY(), std::max(4.f, x1 - x0), a.getHeight()};
+        return {x0, a.getY(), std::max(6.f, x1 - x0), a.getHeight()};
     }
 
     // Keeps the view inside the timeline, then repaints the roll and this strip.
@@ -2060,6 +2119,16 @@ private:
     {
         const double hi = std::max(s.t0, s.t1 - visibleSec());
         ed.scroll_ = juce::jlimit(s.t0, hi, sec);
+        ed.roll_->repaint();
+        repaint();
+    }
+
+    // Shows [left, right] (seconds), clamped to half a second and to the timeline.
+    void zoomTo(double left, double right, const ClipHost::Summary& s)
+    {
+        const double span = juce::jlimit(0.5, std::max(0.5, s.t1 - s.t0), right - left);
+        ed.pps_ = juce::jlimit(2.0, 4000.0, ed.roll_->canvas().getWidth() / span);
+        ed.scroll_ = juce::jlimit(s.t0, std::max(s.t0, s.t1 - span), std::min(left, right - span));
         ed.roll_->repaint();
         repaint();
     }
