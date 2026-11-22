@@ -22,6 +22,10 @@ double minDur(const NoteTimes& t) { return std::min(kMinNoteSec, 0.5 * (t.inEnd 
 // (or round-tripped through text) can touch with a rounding error of ~1e-9 s; a tighter test
 // called them invalid and blocked every time move, while 1 µs is far below any analysis frame.
 constexpr double kTolSec = 1e-6;
+// Moves are chosen with half this slack, so the stored layout always sits inside it: the
+// largest move used to stop exactly at kTolSec, and the round trip through the stored edits
+// (about 0.1 us) then made the next check fail, blocking every later move in that place.
+constexpr double kMoveSlackSec = 0.5 * kTolSec;
 
 // Per note, where its output may lie: the item (segment) it belongs to in a track view, widened
 // to where it already is (so a layout that starts out of bounds does not block every move).
@@ -41,13 +45,13 @@ Bounds boundsOf(const Analysis& a, const std::vector<NoteTimes>& base)
     return b;
 }
 
-bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo, const Bounds& bounds)
+bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo, const Bounds& bounds, double slack = kTolSec)
 {
     double last = lo;
     for (size_t i = 0; i < t.size(); ++i) {
         const auto& n = t[i];
         if (n.outEnd - n.outStart < minDur(n) - kTolSec) return false;
-        if (n.outStart < last - kTolSec) return false;
+        if (n.outStart < last - slack) return false;
         if (i < bounds.size() && (n.outStart < bounds[i].first - kTolSec || n.outEnd > bounds[i].second + kTolSec))
             return false;
         last = n.outEnd;
@@ -59,11 +63,12 @@ bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo, const Bou
 template <typename Make>
 double clampDt(double dt, double clipLen, double floorSec, const Bounds& bounds, Make&& make)
 {
-    if (valid(make(dt), clipLen, floorSec, bounds)) return dt;
+    auto ok = [&](double x) { return valid(make(x), clipLen, floorSec, bounds, kMoveSlackSec); };
+    if (ok(dt)) return dt;
     double lo = 0, hi = 1;
     for (int it = 0; it < 40; ++it) {
         const double mid = 0.5 * (lo + hi);
-        if (valid(make(dt * mid), clipLen, floorSec, bounds)) lo = mid; else hi = mid;
+        if (ok(dt * mid)) lo = mid; else hi = mid;
     }
     return dt * lo;
 }
