@@ -186,20 +186,12 @@ void PluginClip::followTrack()
         }
     }
     if (seq_ == nullptr) return;
-    // The playhead moved into another item of this track: that item becomes the one being edited
-    // (the next item on the timeline, not a ghost). Gaps between items keep the current one.
-    const auto items = glinaItemsOf(seq_);
-    const double song = proc_.playheadSec.load();
-    for (auto* r : items) {
-        if (song < r->getStartInPlaybackTime() || song > r->getEndInPlaybackTime()) continue;
-        if (r != region_ && r->getAudioModification() != mod_) { setRegion(r); return; }
-        break;
-    }
     // Still the same take of the same item: nothing to do.
     if (region_ != nullptr && mod_ != nullptr && mod_ == region_->getAudioModification()) return;
     // The host replaced the item or switched its take: stay on this track. If the host only
     // recreated the region of the take we were editing, pick that take again; otherwise
     // fall back to the item under the playhead.
+    const auto items = glinaItemsOf(seq_);
     juce::ARAPlaybackRegion* pick = nullptr;
     if (lastMod_ != nullptr)
         for (auto* r : items)
@@ -347,6 +339,7 @@ void PluginClip::setPlayheadSec(double t)
 GlinaEditor::GlinaEditor(GlinaProcessor& p)
     : juce::AudioProcessorEditor(&p), juce::AudioProcessorEditorARAExtension(&p), proc_(p)
 {
+    openedMs_ = juce::Time::getMillisecondCounter(); // before the listener: it may fire at once
     addAndMakeVisible(editor_);
     if (auto* ev = getARAEditorView()) {
         dc_ = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<GlinaDocumentController>(
@@ -373,22 +366,34 @@ GlinaEditor::~GlinaEditor()
 
 // The item this instance sits on is the one it edits. The host's selection at open time is
 // the last item the user worked on, so it must not replace that item.
+// A Take FX instance renders one region. A Track FX instance may render several (the track's
+// items): it takes the one under the play position, or the first one when none is there.
 bool GlinaEditor::pinOwnRegion()
 {
     if (ownPinned_ || clip_ == nullptr) return ownPinned_;
-    if (auto* pr = proc_.getPlaybackRenderer<juce::ARAPlaybackRenderer>())
-        for (auto* r : pr->getPlaybackRegions<juce::ARAPlaybackRegion>()) {
-            clip_->setRegion(r);
-            ownPinned_ = true;
-            return true;
-        }
-    return false;
+    auto* pr = proc_.getPlaybackRenderer<juce::ARAPlaybackRenderer>();
+    if (pr == nullptr) return false;
+    const auto regions = pr->getPlaybackRegions<juce::ARAPlaybackRegion>();
+    if (regions.empty()) return false;
+    const double song = proc_.playheadSec.load();
+    juce::ARAPlaybackRegion* pick = regions.front();
+    for (auto* r : regions)
+        if (song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime()) { pick = r; break; }
+    clip_->setRegion(pick);
+    ownPinned_ = true;
+    centreOnOpen_ = true; // the view opens at the play position, even when no item is there
+    clip_->log(T("открыт на айтеме: инстанс видит регионов ") + juce::String((int)regions.size()) +
+               T(", плейхед ") + juce::String(song, 3) + T(" с"));
+    return true;
 }
 
 void GlinaEditor::onNewSelection(const juce::ARAViewSelection& sel)
 {
-    if (ownPinned_) return;
-    const auto& regions = sel.getPlaybackRegions<juce::ARAPlaybackRegion>();
+    // The selection the host reports right after opening can be the item worked on last. Ignore
+    // it for a moment; later selections (a click on another item) switch the editor as usual.
+    if (juce::Time::getMillisecondCounter() - openedMs_ < 1500) return;
+    // Effective regions: a track selected as a whole (no single region picked) counts too.
+    const auto regions = sel.getEffectivePlaybackRegions<juce::ARAPlaybackRegion>();
     if (!regions.empty() && clip_ != nullptr && regions.front() != clip_->region()) {
         clip_->setRegion(regions.front());
         editor_.setHost(nullptr); // reset view and selection for the new clip
@@ -413,6 +418,7 @@ void GlinaEditor::timerCallback()
     const auto* before = clip_->region();
     const auto* beforeMod = clip_->modification();
     pinOwnRegion(); // the renderer may not know its item yet when the editor opens
+    if (centreOnOpen_ && editor_.centreOnProjectSec(proc_.playheadSec.load())) centreOnOpen_ = false;
     clip_->followTrack(); // item or take changed in the host: stay on the same track
     if (!clip_->valid()) pickFallbackRegion();
     if (clip_->region() != before || clip_->modification() != beforeMod)

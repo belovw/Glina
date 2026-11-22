@@ -104,6 +104,8 @@ private:
     std::unique_ptr<PluginClip> clip_;
     ui::PitchEditor editor_;
     bool ownPinned_ = false; // bound to the item this instance sits on (Take FX)
+    bool centreOnOpen_ = false; // view still to be centred on the play position once it can be
+    juce::uint32 openedMs_ = 0; // when the editor opened (stale host selection is ignored shortly after)
 };
 
 } // namespace glina::plugin

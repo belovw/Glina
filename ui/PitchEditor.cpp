@@ -203,7 +203,7 @@ public:
         g.drawFittedText(T(text), r, juce::Justification::topLeft, 40);
         g.setColour(col::dim);
         g.setFont(juce::FontOptions(12.f));
-        g.drawText("Glina " GLINA_VERSION_STRING, getLocalBounds().reduced(24, 12), juce::Justification::bottomRight, false);
+        g.drawText("Glina " GLINA_VERSION_STRING " \u00b7 " GLINA_BUILD_STRING, getLocalBounds().reduced(24, 12), juce::Justification::bottomRight, false);
     }
     void mouseDown(const juce::MouseEvent&) override { setVisible(false); }
 };
@@ -2409,6 +2409,15 @@ void PitchEditor::cycleGrid()
     gridDenom_ = order[k];
     gridBtn_.setButtonText(T("1/") + juce::String(gridDenom_));
     roll_->repaint();
+}
+
+bool PitchEditor::centreOnProjectSec(double projectSec)
+{
+    if (host_ == nullptr || roll_->getWidth() <= 0) return false;
+    const double visible = roll_->canvas().getWidth() / pps_;
+    scroll_ = std::max(0.0, host_->fromProjectSec(projectSec) - visible * 0.5);
+    roll_->repaint();
+    return true;
 }
 
 void PitchEditor::showLocator()

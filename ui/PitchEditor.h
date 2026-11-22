@@ -20,6 +20,8 @@ public:
 
     // The clip to edit (may be null). Call again when the host's clip changes.
     void setHost(ClipHost* host);
+    // Scroll so that the given PROJECT time is in the middle of the view (false: view not ready yet).
+    bool centreOnProjectSec(double projectSec);
     // Switch the shown clip (track or take) and keep the zoom, scroll and note range.
     void rebindHost(ClipHost* h);
     ClipHost* host() const { return host_; }

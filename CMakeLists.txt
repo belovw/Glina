@@ -1,7 +1,16 @@
 cmake_minimum_required(VERSION 3.22)
 project(Glina VERSION 0.3.0 LANGUAGES C CXX)
-# One version for every target (shown in the Help overlay).
-add_compile_definitions(GLINA_VERSION_STRING="${PROJECT_VERSION}")
+# One version and build id for every target (shown in the Help overlay): the version from
+# project(), and the short commit hash. Re-configure when HEAD moves, so the hash stays current.
+execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE GLINA_GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(GLINA_GIT_HASH STREQUAL "")
+  set(GLINA_GIT_HASH "unknown")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/.git/HEAD")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/.git/HEAD")
+endif()
+add_compile_definitions(GLINA_VERSION_STRING="${PROJECT_VERSION}" GLINA_BUILD_STRING="${GLINA_GIT_HASH}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
