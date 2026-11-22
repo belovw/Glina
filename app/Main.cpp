@@ -31,6 +31,13 @@ public:
         button(audioBtn_, "Звук…", "Аудиоустройство", [this] { audioSettings(); });
         title_.setColour(juce::Label::textColourId, ui::col::text);
         time_.setColour(juce::Label::textColourId, ui::col::dim);
+        themeWatch_ = std::make_unique<ui::col::ThemeWatcher>([this] {
+            lnf_.applyTheme();
+            ui::col::remapColours(*this);
+            sendLookAndFeelChange();
+            if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setBackgroundColour(ui::col::bg);
+            repaint();
+        });
         time_.setJustificationType(juce::Justification::centredRight);
         time_.setFont(juce::FontOptions(14.f));
         addAndMakeVisible(title_);
@@ -45,6 +52,7 @@ public:
             o.filenameSuffix = ".settings";
             o.folderName = "Glina";
             o.osxLibrarySubFolder = "Application Support";
+            o.millisecondsBeforeSaving = -1; // saved at exit, merged with the file (see the destructor)
             return o;
         }());
         auto saved = props_.getUserSettings()->getXmlValue("audioDevice");
@@ -62,7 +70,11 @@ public:
         session_.changes.removeChangeListener(this);
         deviceManager_.removeAudioCallback(&player_);
         player_.setSource(nullptr);
-        if (auto xml = deviceManager_.createStateXml()) props_.getUserSettings()->setValue("audioDevice", xml.get());
+        auto* p = props_.getUserSettings();
+        const juce::String last = p->getValue("lastFolder");
+        p->reload(); // keep what others wrote meanwhile (the theme, the plug-in's options)
+        if (last.isNotEmpty()) p->setValue("lastFolder", last);
+        if (auto xml = deviceManager_.createStateXml()) p->setValue("audioDevice", xml.get());
         props_.saveIfNeeded();
         setLookAndFeel(nullptr);
     }
@@ -266,6 +278,7 @@ private:
     std::unique_ptr<juce::FileChooser> chooser_;
     juce::TextButton openBtn_, saveBtn_, exportBtn_, audioBtn_;
     juce::Label title_, time_;
+    std::unique_ptr<ui::col::ThemeWatcher> themeWatch_;
     bool wasDirty_ = false;
 };
 
@@ -278,6 +291,10 @@ public:
 
     void initialise(const juce::String& commandLine) override
     {
+        // The palette before any window reads it: the setting, or --light for screenshots.
+        if (commandLine.contains("--light")) { ui::col::forced = true; ui::col::setLight(true); }
+        else if (commandLine.contains("--toggle-theme")) { ui::col::forced = true; ui::col::setLight(false); }
+        else ui::col::loadTheme();
         window_ = std::make_unique<Window>();
         auto args = juce::StringArray::fromTokens(commandLine, true);
         args.trim();
@@ -289,6 +306,8 @@ public:
             if (args[i] == "--selftest") { selftest_ = true; continue; }
             if (args[i] == "--links") { links_ = true; continue; }
             if (args[i] == "--fix") { fix_ = true; continue; }
+            if (args[i] == "--light") continue;
+            if (args[i] == "--toggle-theme") { ++toggleTheme_; continue; } // switch live, as the button does (check)
             if (args[i] == "--reference" && i + 1 < args.size()) { refFile_ = juce::File::getCurrentWorkingDirectory().getChildFile(args[++i]); continue; }
             if (args[i] == "--size" && i + 1 < args.size()) {
                 const auto wh = juce::StringArray::fromTokens(args[++i], "x", "");
@@ -360,6 +379,7 @@ private:
                 applyDemoEdits(m);
                 return;
             }
+            if (toggleTheme_ > 0) { --toggleTheme_; m.editor().pressThemeButtonForTest(); settled_ = 0; return; }
             if (++settled_ < 5) return;
             auto img = m.createComponentSnapshot(m.getLocalBounds(), true, 2.0f);
             juce::FileOutputStream out(shotFile_);
@@ -722,6 +742,7 @@ private:
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;
     bool tracksShown_ = false;
+    int toggleTheme_ = 0;
     int step_ = 0, n0_ = 0, joinAt_ = -1, failures_ = 0;
     int ticks_ = 0, settled_ = 0;
 };

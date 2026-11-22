@@ -96,6 +96,21 @@ void tracksLanes(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c)
     }
 }
 
+// Theme: a circle, its left half filled (light theme: the right half).
+void theme(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool light)
+{
+    const float d = std::min(a.getWidth(), a.getHeight()) * 0.86f;
+    const auto r = juce::Rectangle<float>(d, d).withCentre(a.getCentre());
+    juce::Path half;
+    half.addCentredArc(r.getCentreX(), r.getCentreY(), d * 0.5f, d * 0.5f, 0.f,
+                       light ? 0.f : juce::MathConstants<float>::pi, light ? juce::MathConstants<float>::pi
+                                                                        : juce::MathConstants<float>::twoPi, true);
+    half.closeSubPath();
+    g.setColour(c);
+    g.fillPath(half);
+    g.drawEllipse(r.reduced(kIconStroke * 0.5f), kIconStroke);
+}
+
 // Up arrow for the ghost shift: stem meets the apex of the head. When on, the head is filled.
 void shiftUp(juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c, bool on)
 {
@@ -151,7 +166,7 @@ class PitchEditor::Help final : public juce::Component {
 public:
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(juce::Colour(0xe0101216));
+        g.fillAll(col::overlay);
         auto r = getLocalBounds().reduced(24, 16);
         g.setColour(col::text);
         g.setFont(juce::FontOptions(14.f));
@@ -275,7 +290,7 @@ public:
             g.setColour(isBlack(m) ? col::keyBlack : col::keyWhite);
             g.fillRect(0.f, y, kKeysW - 2, s - 1);
             if (((m % 12) + 12) % 12 == 0 || s > 13) {
-                g.setColour(isBlack(m) ? col::text : col::bg);
+                g.setColour(isBlack(m) ? col::keyBlackText : col::keyWhiteText);
                 g.setFont(juce::FontOptions(std::min(11.f, s * 0.8f)));
                 g.drawText(juce::String(kNoteNames[((m % 12) + 12) % 12]) + juce::String(m / 12 - 1),
                            juce::Rectangle<float>(2, y, kKeysW - 6, s), juce::Justification::centredRight);
@@ -490,8 +505,10 @@ public:
             p.closeSubPath();
             g.setColour(fill.withAlpha(sel ? 0.62f : 0.36f));
             g.fillPath(p);
-            g.setColour(sel ? col::select : fill.withAlpha(0.6f)); // thin, quiet outline: the fill carries the colour
-            g.strokePath(p, juce::PathStrokeType(sel ? 1.6f : 0.6f));
+            // Thin, quiet outline: the fill carries the colour. Selected: the note's own colour,
+            // lighter, a little thicker.
+            g.setColour(sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
+            g.strokePath(p, juce::PathStrokeType(sel ? 1.2f : 0.6f));
 
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
                 e.vibratoAmount != 1 || e.tiltL != 0 || e.tiltR != 0 || e.ownVibrato) {
@@ -682,7 +699,7 @@ public:
             dots.addEllipse(b.x - 1.5f, b.y - 1.5f, 3.f, 3.f);
             next = f.t + every;
         }
-        const juce::Colour link(0xffffb547);
+        const juce::Colour link = col::link;
         g.setColour(link.withAlpha(0.8f));
         g.strokePath(p, juce::PathStrokeType(1.2f));
         g.setColour(link);
@@ -709,7 +726,7 @@ public:
         const float s = semi();
         for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
             const auto& gv = ed.ghosts_[gi];
-            const juce::Colour colour(0xffa7aec0); // ghosts share one neutral colour; the edited track has the colour
+            const juce::Colour colour = col::ghost; // ghosts share one neutral colour; the edited track has the colour
             const auto& gh = gv.g;
             const double sh = ed.ghostShift_ ? ghostShift(gi) : 0.0;
             for (const auto& n : gh.notes) {
@@ -754,10 +771,10 @@ public:
         };
         // The edited track: bright text on a bordered box. Ghosts: dimmer, no border.
         float y = c.getY() + 6.f;
-        label(ed.editedName_, juce::Colours::white, col::select.withAlpha(0.35f), y);
+        label(ed.editedName_, col::labelText, col::labelBox, y);
         for (const auto& gv : ed.ghosts_) {
             y += 24.f;
-            label(gv.name, juce::Colour(0xff7f8799), col::panel.withAlpha(0.85f), y);
+            label(gv.name, col::ghostText, col::panel.withAlpha(0.85f), y);
         }
     }
 
@@ -1558,6 +1575,7 @@ public:
             });
             rows.push_back(std::move(row));
         }
+        sendLookAndFeelChange(); // new rows' value boxes: take the editor's colours
         resized();
     }
 
@@ -1584,8 +1602,8 @@ public:
             set(r.delay, v.delayMs);
             set(r.detune, v.detuneCents);
             r.all.setToggleState(v.noteMask.empty(), juce::dontSendNotification);
-            r.all.setColour(juce::TextButton::buttonColourId, v.noteMask.empty() ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
-            r.sel.setColour(juce::TextButton::buttonColourId, !v.noteMask.empty() ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
+            r.all.setColour(juce::TextButton::buttonColourId, v.noteMask.empty() ? col::buttonOn : col::button);
+            r.sel.setColour(juce::TextButton::buttonColourId, !v.noteMask.empty() ? col::buttonOn : col::button);
         }
     }
 
@@ -1638,11 +1656,10 @@ public:
 void PitchEditor::IconButton::paintButton(juce::Graphics& g, bool over, bool down)
 {
     auto a = getLocalBounds().toFloat().reduced(0.5f);
-    const juce::Colour bg = on ? juce::Colour(0xff2f6db5) : down ? juce::Colour(0xff3a4150)
-                          : over ? juce::Colour(0xff2f3540) : juce::Colour(0xff252930);
+    const juce::Colour bg = on ? col::buttonOn : down ? col::buttonDown : over ? col::buttonOver : col::button;
     g.setColour(bg);
     g.fillRoundedRectangle(a, 4.f);
-    const juce::Colour fg = isEnabled() ? juce::Colour(0xffd6dbe3) : juce::Colour(0xff5a616d);
+    const juce::Colour fg = !isEnabled() ? col::buttonTextOff : on ? juce::Colours::white : col::buttonText;
     if (icon) icon(g, a.reduced(6.f), fg);
 }
 
@@ -1731,6 +1748,7 @@ public:
             r.edit.setVisible(t.editable);
             rows.push_back(std::move(row));
         }
+        sendLookAndFeelChange();
         syncToggles();
         hint.setText(list.size() > 1
                          ? T("«Показать» — ноты трека бледным цветом поверх ваших. «Редактировать» — переключить окно на трек.")
@@ -1798,7 +1816,10 @@ private:
 
 PitchEditor::PitchEditor()
 {
+    col::loadTheme(); // the plug-in has no app start-up: read the setting here
+    lnf_.applyTheme();
     setLookAndFeel(&lnf_);
+    themeWatch_ = std::make_unique<col::ThemeWatcher>([this] { themeChanged(); });
     setWantsKeyboardFocus(true);
     roll_ = std::make_unique<Roll>(*this);
     inspector_ = std::make_unique<Inspector>(*this);
@@ -1871,6 +1892,9 @@ PitchEditor::PitchEditor()
                 roll_->repaint();
                 updateToolbar();
             });
+    iconBtn(themeBtn_, "Светлая / тёмная тема (для всех окон Glina; запоминается)",
+            [](juce::Graphics& g, juce::Rectangle<float> a, juce::Colour c) { icons::theme(g, a, c, col::light); },
+            [] { col::switchTheme(!col::light); });
     button(helpBtn_, "?", "Справка по мыши и клавишам (F1)", [this] { showHelp(!help_->isVisible()); });
     button(renderBtn_, "Рендер", "Рендер в папке проекта: сохранять, перерендерить", [this] { showRenderMenu(); });
     renderBtn_.setVisible(false); // shown when the host keeps renders (plug-in in REAPER)
@@ -1912,6 +1936,9 @@ PitchEditor::PitchEditor()
     startTimerHz(30);
     setSize(1200, 640);
     updateToolbar();
+    // Controls built before they were parented copied colours from the default look (slider
+    // value boxes): make every child take the editor's look now.
+    sendLookAndFeelChange();
 }
 
 PitchEditor::~PitchEditor()
@@ -2164,6 +2191,16 @@ void PitchEditor::setPencil(bool on)
     roll_->repaint();
 }
 
+void PitchEditor::themeChanged()
+{
+    lnf_.applyTheme();
+    col::remapColours(*this);
+    sendLookAndFeelChange(); // value boxes and other copied colours
+    updateToolbar();
+    layoutInspector();
+    repaint();
+}
+
 void PitchEditor::syncInspector()
 {
     inspector_->update();
@@ -2221,7 +2258,9 @@ juce::Colour PitchEditor::trackColour(const ClipHost::TrackRef& t, int index) co
 {
     static const juce::uint32 pal[] = {0xffe9c46a, 0xfff4a6a6, 0xffa8dadc, 0xffcdb4db, 0xffb5e48c, 0xfff7b267};
     juce::Colour c = t.colour.isTransparent() ? juce::Colour(pal[(size_t)index % 6]) : t.colour;
-    if (c.getPerceivedBrightness() < 0.5f) c = c.brighter(0.8f); // dark track colours vanish on the dark roll
+    // Track colours that vanish on the roll: dark ones on the dark theme, pale ones on the light.
+    if (!col::light && c.getPerceivedBrightness() < 0.5f) c = c.brighter(0.8f);
+    if (col::light && c.getPerceivedBrightness() > 0.6f) c = c.darker(0.6f);
     return c;
 }
 
@@ -2548,7 +2587,7 @@ void PitchEditor::updateToolbar()
     }
     playBtn_.setVisible(host_ != nullptr && host_->handlesTransportKeys());
     pencilBtn_.setEnabled(ready);
-    pencilBtn_.setColour(juce::TextButton::buttonColourId, pencil_ ? col::drawn.darker(0.45f) : juce::Colour(0xff252930));
+    pencilBtn_.setColour(juce::TextButton::buttonColourId, pencil_ ? col::drawn.darker(col::light ? 0.f : 0.45f) : col::button);
     playBtn_.setButtonText(host_ != nullptr && host_->isPlaying() ? T("■") : T("▶"));
     undoBtn_.setEnabled(ready && host_->history().canUndo());
     redoBtn_.setEnabled(ready && host_->history().canRedo());
@@ -2557,8 +2596,8 @@ void PitchEditor::updateToolbar()
     splitBtn_.setEnabled(ready && selection_.size() == 1);
     abBtn_.setEnabled(host_ != nullptr);
     const bool by = host_ != nullptr && host_->isBypassed();
-    abBtn_.setColour(juce::TextButton::buttonColourId, by ? col::warn.darker(0.3f) : juce::Colour(0xff252930));
-    harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? juce::Colour(0xff2f6db5) : juce::Colour(0xff252930));
+    abBtn_.setColour(juce::TextButton::buttonColourId, by ? col::warn.darker(col::light ? 0.f : 0.3f) : col::button);
+    harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? col::buttonOn : col::button);
     tracksBtn_.on = showTracks_;
     shiftBtn_.on = ghostShift_;
     triBtn_.on = triplets_;
@@ -2597,7 +2636,7 @@ void PitchEditor::resized()
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
-        {&renderBtn_, 66, 4, 66},    {&helpBtn_, 28, 4, 28}};
+        {&renderBtn_, 66, 4, 66},    {&themeBtn_, 26, 4, 26},     {&helpBtn_, 28, 4, 28}};
     auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
     std::vector<Slot*> vis;
     for (auto& s : slots) if (s.c->isVisible()) vis.push_back(&s);

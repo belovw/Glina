@@ -37,6 +37,7 @@ public:
     int hitThreadForTest(juce::Point<float> p) const;
     void zoomForTest(double pixelsPerSecond, double scrollSec);
     void setGhostShiftForTest(bool on);
+    void pressThemeButtonForTest() { themeBtn_.triggerClick(); }
     void dragForTest(juce::Point<float> from, juce::Point<float> to);
 
     void paint(juce::Graphics&) override;
@@ -141,6 +142,9 @@ private:
     bool showHarmonies_ = true;
     bool showTracks_ = false;
     IconButton tracksBtn_;
+    IconButton themeBtn_;                         // light / dark theme
+    std::unique_ptr<col::ThemeWatcher> themeWatch_;
+    void themeChanged();                          // after a switch (this or another window)
     IconButton shiftBtn_;   // visual +3 semitone shift of the ghosts
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     bool showLinks_ = false;
