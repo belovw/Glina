@@ -186,12 +186,20 @@ void PluginClip::followTrack()
         }
     }
     if (seq_ == nullptr) return;
+    // The playhead moved into another item of this track: that item becomes the one being edited
+    // (the next item on the timeline, not a ghost). Gaps between items keep the current one.
+    const auto items = glinaItemsOf(seq_);
+    const double song = proc_.playheadSec.load();
+    for (auto* r : items) {
+        if (song < r->getStartInPlaybackTime() || song > r->getEndInPlaybackTime()) continue;
+        if (r != region_ && r->getAudioModification() != mod_) { setRegion(r); return; }
+        break;
+    }
     // Still the same take of the same item: nothing to do.
     if (region_ != nullptr && mod_ != nullptr && mod_ == region_->getAudioModification()) return;
     // The host replaced the item or switched its take: stay on this track. If the host only
     // recreated the region of the take we were editing, pick that take again; otherwise
     // fall back to the item under the playhead.
-    const auto items = glinaItemsOf(seq_);
     juce::ARAPlaybackRegion* pick = nullptr;
     if (lastMod_ != nullptr)
         for (auto* r : items)
