@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace glina {
@@ -68,6 +69,9 @@ struct Analysis {
     std::vector<float> fastDev;
     std::vector<int> noteOfFrame;     // note index per frame, -1 outside notes
     Key key;
+    // Track view only (several items of a track shown as one clip): the [start, end) seconds of
+    // each item's part of the timeline. Time edits keep a note inside its item. Empty = one clip.
+    std::vector<std::pair<double, double>> segments;
 
     double frameTime(int i) const { return (double)i * hop / sampleRate; }
 };

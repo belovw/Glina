@@ -22,12 +22,33 @@ double minDur(const NoteTimes& t) { return std::min(kMinNoteSec, 0.5 * (t.inEnd 
 // called them invalid and blocked every time move, while 1 µs is far below any analysis frame.
 constexpr double kTolSec = 1e-6;
 
-bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo)
+// Per note, where its output may lie: the item (segment) it belongs to in a track view, widened
+// to where it already is (so a layout that starts out of bounds does not block every move).
+// No limits for a single clip.
+using Bounds = std::vector<std::pair<double, double>>;
+Bounds boundsOf(const Analysis& a, const std::vector<NoteTimes>& base)
+{
+    constexpr double inf = std::numeric_limits<double>::infinity();
+    Bounds b(base.size(), {-inf, inf});
+    if (a.segments.empty()) return b;
+    for (size_t i = 0; i < base.size(); ++i)
+        for (const auto& s : a.segments)
+            if (base[i].inStart >= s.first - 1e-4 && base[i].inStart < s.second) {
+                b[i] = {std::min(s.first, base[i].outStart), std::max(s.second, base[i].outEnd)};
+                break;
+            }
+    return b;
+}
+
+bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo, const Bounds& bounds)
 {
     double last = lo;
-    for (const auto& n : t) {
+    for (size_t i = 0; i < t.size(); ++i) {
+        const auto& n = t[i];
         if (n.outEnd - n.outStart < minDur(n) - kTolSec) return false;
         if (n.outStart < last - kTolSec) return false;
+        if (i < bounds.size() && (n.outStart < bounds[i].first - kTolSec || n.outEnd > bounds[i].second + kTolSec))
+            return false;
         last = n.outEnd;
     }
     return t.empty() || last <= clipLen + kTolSec;
@@ -35,13 +56,13 @@ bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo)
 
 // Largest part of `dt` (shrinking towards 0) for which `make` gives a valid layout.
 template <typename Make>
-double clampDt(double dt, double clipLen, double floorSec, Make&& make)
+double clampDt(double dt, double clipLen, double floorSec, const Bounds& bounds, Make&& make)
 {
-    if (valid(make(dt), clipLen, floorSec)) return dt;
+    if (valid(make(dt), clipLen, floorSec, bounds)) return dt;
     double lo = 0, hi = 1;
     for (int it = 0; it < 40; ++it) {
         const double mid = 0.5 * (lo + hi);
-        if (valid(make(dt * mid), clipLen, floorSec)) lo = mid; else hi = mid;
+        if (valid(make(dt * mid), clipLen, floorSec, bounds)) lo = mid; else hi = mid;
     }
     return dt * lo;
 }
@@ -135,7 +156,7 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    const double applied = clampDt(dt, clipLen, floorOf(base), make);
+    const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
@@ -162,7 +183,7 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
         }
         return t;
     };
-    const double applied = clampDt(dt, clipLen, floorOf(base), make);
+    const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }

@@ -2,6 +2,7 @@
 
 #include "../../ui/PitchEditor.h"
 #include "PluginProcessor.h"
+#include "glina/TrackView.h"
 
 namespace glina::plugin {
 
@@ -24,10 +25,15 @@ public:
     // The ARA track (with Glina items) that is this REAPER track: matched by where its items start,
     // then by name and number. Null if none matches.
     juce::ARARegionSequence* sequenceOfTrack(const reaper::TrackInfo& t) const;
+    // Track view: every Glina item of the edited track shown and edited as one clip (when the
+    // track has two or more). Rebuilt when items, takes, positions or other editors' edits change.
+    void refreshView(bool force = false);
+    bool trackView() const { return viewOn_; }
+    juce::ARARegionSequence* sequence() const { return seq_; }
 
     const Analysis* analysis() const override;
-    Document& document() override { return mod_ != nullptr ? mod_->doc : dummyDoc_; }
-    ui::DocumentHistory& history() override { return mod_ != nullptr ? mod_->history : dummyHistory_; }
+    Document& document() override;
+    ui::DocumentHistory& history() override;
     void documentChanged(bool layoutChanged) override;
     juce::String busyText() const override;
     bool isRendering() const override;
@@ -37,7 +43,7 @@ public:
     void setPlaying(bool) override;
     void setPlayheadSec(double) override;
     bool isBypassed() const override { return mod_ != nullptr && mod_->bypass.load(); }
-    void setBypassed(bool b) override { if (mod_ != nullptr) mod_->bypass.store(b); }
+    void setBypassed(bool b) override;
     // REAPER ignores ARA start/stop requests: space & Home go back to REAPER instead.
     bool handlesTransportKeys() const override { return false; }
     double toProjectSec(double clipSec) const override { return region_ != nullptr ? toSong(clipSec) : clipSec; }
@@ -57,7 +63,11 @@ public:
     void rerender() override;
 
 private:
-    void changeListenerCallback(juce::ChangeBroadcaster*) override { changes.sendChangeMessage(); }
+    void changeListenerCallback(juce::ChangeBroadcaster*) override
+    {
+        refreshView();
+        changes.sendChangeMessage();
+    }
     void willDestroyPlaybackRegion(juce::ARAPlaybackRegion*) override { setRegion(nullptr); }
     void willDestroyAudioModification(juce::ARAAudioModification*) override { setRegion(nullptr); }
     ARA::PlugIn::HostPlaybackController* playback() const;
@@ -84,6 +94,31 @@ private:
     juce::ARAAudioModification* lastMod_ = nullptr; // the take we last edited; preferred when the host recreates its region
     Document dummyDoc_;
     ui::DocumentHistory dummyHistory_;
+
+    // ---- track view ----
+    struct ViewItem {
+        juce::ARAPlaybackRegion* region = nullptr;
+        GlinaAudioModification* mod = nullptr;
+        const Analysis* eff = nullptr;
+        uint64_t version = 0;
+        double playStart = 0, modStart = 0, modEnd = 0;
+        bool operator==(const ViewItem& o) const
+        {
+            return region == o.region && mod == o.mod && eff == o.eff && version == o.version &&
+                   playStart == o.playStart && modStart == o.modStart && modEnd == o.modEnd;
+        }
+    };
+    std::vector<ViewItem> viewItemsNow() const; // empty: no view (fewer than two items, or they don't fit)
+    bool viewOn_ = false;
+    bool viewPending_ = false;           // the track has a view, but an item is still being analysed
+    TrackView view_;
+    std::vector<TrackPiece> viewPieces_; // the items as the view was built from them
+    std::vector<ViewItem> viewItems_;
+    int viewPrimary_ = -1;
+    juce::ARARegionSequence* viewSeq_ = nullptr;
+    ui::DocumentHistory viewHistory_;     // one undo step for an edit, whichever items it touched
+    double viewStart_ = 0, viewEnd_ = 0;  // project time of the view's start and end
+    juce::String viewRefused_;            // why the last track could not be shown as a view (logged once)
 };
 
 class GlinaEditor final : public juce::AudioProcessorEditor,

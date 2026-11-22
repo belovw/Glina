@@ -8,6 +8,7 @@
 #include "glina/Editing.h"
 #include "glina/Transfer.h"
 #include "glina/Thread.h"
+#include "glina/TrackView.h"
 
 #include <cmath>
 #include <cstdio>
@@ -1068,12 +1069,172 @@ static void testThreadFix()
     }
 }
 
+
+// Track view: two items of one track (the second off the frame grid, trimmed) as one clip.
+static void testTrackView()
+{
+    std::printf("[track view] items of a track as one clip: notes, round trip, edits back to their item\n");
+    const double sr = 48000;
+    std::vector<test::SynthNote> melB = test::demoMelody();
+    for (auto& n : melB) n.midi += 2;
+    const test::SynthResult sa = test::synthesize(test::demoMelody(), sr);
+    const test::SynthResult sb = test::synthesize(melB, sr, 30, 5.2, 777);
+    auto effA = std::make_shared<const Analysis>(analyze(sa.audio.data(), sa.audio.size(), sr));
+    auto effB = std::make_shared<const Analysis>(analyze(sb.audio.data(), sb.audio.size(), sr));
+    const double lenA = (double)effA->numSamples / sr, lenB = (double)effB->numSamples / sr;
+    const double hopSec = (double)effA->hop / sr;
+
+    std::vector<TrackPiece> pieces(2);
+    pieces[0].eff = effA;
+    pieces[0].winStart = 0;
+    pieces[0].winEnd = lenA;
+    pieces[0].placeSec = 0;
+    pieces[1].eff = effB;
+    pieces[1].winStart = 0.05;              // trimmed start (inside the leading silence)
+    pieces[1].winEnd = lenB;
+    pieces[1].placeSec = lenA + 0.7013 - 0.05; // window starts 0.7013 s after A ends: off the frame grid
+    pieces[0].doc.edits.breathGainDb = -6;  // per-item setting, not touched in the view
+    conform(pieces[0].doc, *effA);
+    conform(pieces[1].doc, *effB);
+    pieces[1].doc.edits.notes[2].pitchOffset = 0.5; // an edit made before, in the item itself
+
+    TrackView v;
+    CHECK(buildTrackView(pieces, 0, v), "view not built");
+    if (v.analysis == nullptr) return;
+    const Analysis& va = *v.analysis;
+    const size_t nA = effA->notes.size(), nB = effB->notes.size();
+    std::printf("  notes: A %zu + B %zu -> view %zu\n", nA, nB, va.notes.size());
+    CHECK(va.notes.size() == nA + nB, "every note of both items in the view");
+    CHECK(v.doc.edits.notes.size() == va.notes.size() && v.doc.edits.spans.size() == va.notes.size(),
+          "view document aligned with its notes");
+    double worst = 0;
+    for (size_t j = 0; j < nB && nA + j < va.notes.size(); ++j)
+        worst = std::max(worst, std::abs(va.notes[nA + j].startSec - (effB->notes[j].startSec + pieces[1].placeSec)));
+    std::printf("  item B drawn at most %.2f ms from its exact place (half a frame: %.2f ms)\n", worst * 1000, hopSec * 500);
+    CHECK(worst <= hopSec * 0.5 + 1e-9, "item B within half a frame of its place");
+    for (size_t j = 1; j < va.notes.size(); ++j)
+        CHECK(va.notes[j].startFrame >= va.notes[j - 1].endFrame, "view notes do not overlap (%zu)", j);
+    CHECK(std::abs(v.doc.edits.notes[nA + 2].pitchOffset - 0.5) < 1e-12, "item B's own edit shown in the view");
+    CHECK(v.doc.edits.breathGainDb == -6, "track settings shown from the primary item");
+
+    // Round trip: nothing edited -> each item's document stays exactly as it was.
+    {
+        std::vector<bool> lay;
+        const auto docs = splitTrackView(v, v.doc, pieces, &lay);
+        CHECK(docs.size() == 2, "two documents back");
+        bool same = docs.size() == 2 && serialize(docs[0]) == serialize(pieces[0].doc) &&
+                    serialize(docs[1]) == serialize(pieces[1].doc);
+        CHECK(same, "unedited view gives back the items' documents unchanged");
+        CHECK(lay.size() == 2 && !lay[0] && !lay[1], "no layout change reported");
+    }
+
+    // A pitch edit on an item-B note goes to item B, at that note.
+    {
+        Document d = v.doc;
+        d.edits.notes[nA + 4].pitchOffset = -1.25;
+        const auto docs = splitTrackView(v, d, pieces);
+        CHECK(serialize(docs[0]) == serialize(pieces[0].doc), "item A untouched by an edit in item B");
+        CHECK(docs[1].edits.notes[4].pitchOffset == -1.25, "edit lands on item B's note 4");
+        CHECK(docs[1].edits.notes[2].pitchOffset == 0.5, "item B's earlier edit kept");
+    }
+
+    // Time edits keep notes inside their item: A's last note cannot move into the gap or item B.
+    {
+        EditSet e = v.doc.edits;
+        const double applied = moveNotes(e, va, {(int)nA - 1}, 2.0);
+        const auto t = noteTimes(va, e);
+        std::printf("  A's last note asked +2 s, moved %+.3f s; ends %.3f s, A ends %.3f s\n", applied, t[nA - 1].outEnd,
+                    va.segments[0].second);
+        CHECK(t[nA - 1].outEnd <= va.segments[0].second + 1e-6, "A's last note stays inside item A");
+        EditSet e2 = v.doc.edits;
+        const double back = moveNotes(e2, va, {(int)nA}, -2.0);
+        const auto t2 = noteTimes(va, e2);
+        CHECK(t2[nA].outStart >= va.segments[1].first - 1e-6, "B's first note stays inside item B (moved %.3f)", back);
+        // A move inside the item works and comes back to item B as its own time edit.
+        EditSet e3 = v.doc.edits;
+        const double ok = moveNotes(e3, va, {(int)nA + 3}, 0.02);
+        EditSet alone = pieces[1].doc.edits; // the same move in item B on its own
+        const double okAlone = moveNotes(alone, *effB, {3}, 0.02);
+        std::printf("  note 3 of B asked +20 ms: in the view %+.1f ms, in the item alone %+.1f ms\n", ok * 1000, okAlone * 1000);
+        CHECK(ok > 0 && std::abs(ok - okAlone) < 1e-6, "a move inside item B goes as far as in the item alone");
+        Document d = v.doc;
+        d.edits = e3;
+        const auto docs = splitTrackView(v, d, pieces);
+        CHECK(std::abs(docs[1].edits.notes[3].timeOffsetSec - e3.notes[nA + 3].timeOffsetSec) < 1e-12,
+              "time edit lands on item B's note 3");
+        CHECK(serialize(docs[0]) == serialize(pieces[0].doc), "item A untouched by a move in item B");
+    }
+
+    // Splitting a note of item B: only item B's layout changes; rebuilt, the view has one more note.
+    {
+        Document d = v.doc;
+        const Note& n = va.notes[nA + 6];
+        CHECK(splitNote(d, va, (int)nA + 6, (n.startFrame + n.endFrame) / 2), "split in the view");
+        std::vector<bool> lay;
+        const auto docs = splitTrackView(v, d, pieces, &lay);
+        CHECK(lay.size() == 2 && !lay[0] && lay[1], "layout change reported for item B only");
+        CHECK(docs[1].edits.spans.size() == nB + 1 && docs[1].edits.notes.size() == nB + 1, "item B has one more note");
+        std::vector<TrackPiece> again = pieces;
+        again[1].doc = docs[1];
+        again[1].eff = std::make_shared<const Analysis>(withLayout(*effB, docs[1].edits.spans)); // effB is B's base analysis
+        TrackView v2;
+        CHECK(buildTrackView(again, 0, v2) && v2.analysis->notes.size() == nA + nB + 1, "rebuilt view shows the split");
+    }
+
+    // Track-wide setting changed in the view reaches both items; per-item ones stay.
+    {
+        Document d = v.doc;
+        d.keyTonic = 2;
+        d.keyMinor = true;
+        d.edits.sibilantGainDb = -3;
+        const auto docs = splitTrackView(v, d, pieces);
+        CHECK(docs[0].keyTonic == 2 && docs[1].keyTonic == 2 && docs[0].keyMinor && docs[1].keyMinor, "key to both items");
+        CHECK(docs[0].edits.sibilantGainDb == -3 && docs[1].edits.sibilantGainDb == -3, "sibilant level to both items");
+        CHECK(docs[0].edits.breathGainDb == -6 && docs[1].edits.breathGainDb == 0, "breath level stays per item");
+    }
+
+    // Pencil drawn in item B's part lands in item B's own frames.
+    {
+        Document d = v.doc;
+        const Note& n = va.notes[nA + 5];
+        const int f0 = n.startFrame + 3;
+        std::vector<float> midi(8, (float)(n.centerMidi + 1.0));
+        drawPitch(d.edits, va, f0, midi);
+        const auto docs = splitTrackView(v, d, pieces);
+        const auto dense = drawnDense(docs[1].edits, (int)effB->frames.size());
+        const int fb = f0 - v.maps[1].frameOffset;
+        int drawn = 0;
+        for (int k = 0; k < 8; ++k) drawn += std::isnan(dense[(size_t)(fb + k)]) ? 0 : 1;
+        CHECK(drawn >= 6, "pencil in item B's frames (%d of 8)", drawn);
+        CHECK(docs[0].edits.draw.empty(), "no pencil in item A");
+    }
+
+    // Overlapping items: the earlier one ends where the later starts; notes there are left out.
+    {
+        std::vector<TrackPiece> ov = pieces;
+        ov[1].placeSec = lenA * 0.5 - 0.05; // B starts in the middle of A
+        TrackView vo;
+        CHECK(buildTrackView(ov, 0, vo), "overlapping items still build");
+        if (vo.analysis != nullptr) {
+            const auto& o = *vo.analysis;
+            bool overlap = false;
+            for (size_t j = 1; j < o.notes.size(); ++j) overlap = overlap || o.notes[j].startFrame < o.notes[j - 1].endFrame;
+            CHECK(!overlap, "no overlapping notes");
+            CHECK(vo.maps[0].frameEnd <= vo.maps[1].frameBegin, "item A cut where item B starts");
+            CHECK(vo.maps[0].count < (int)nA, "A's notes past the cut are left out (%d of %zu shown)", vo.maps[0].count, nA);
+            const auto docs = splitTrackView(vo, vo.doc, ov);
+            CHECK(docs.size() == 2 && serialize(docs[0]) == serialize(ov[0].doc), "left-out notes keep item A unchanged");
+        }
+    }
+}
+
 int main()
 {
     testSines();
     testSilenceAndNoise();
     testThreadAlign();
     testThreadFix();
+    testTrackView();
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
         const test::SynthResult s = test::synthesize(test::demoMelody(), sr);
