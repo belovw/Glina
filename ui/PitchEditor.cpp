@@ -13,6 +13,15 @@ namespace glina::ui {
 
 namespace {
 
+// TEMP-MOVE-DIAG: appends one line to glina_move_diag.txt on the Desktop. Remove after the
+// horizontal-move bug is found.
+void tempMoveDiag(const juce::String& text)
+{
+    juce::File f = juce::File::getSpecialLocation(juce::File::userDesktopDirectory)
+                       .getChildFile("glina_move_diag.txt");
+    f.appendText(juce::Time::getCurrentTime().toString(true, true, true, true) + " " + text + "\n");
+}
+
 // The default scheme, with overrides from the settings file ("mouseOverrides", e.g. "w2=zv d6=pan").
 MouseScheme loadScheme()
 {
@@ -1074,6 +1083,9 @@ public:
             case G::Pending:
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Pitch : G::Move;
+                tempMoveDiag(juce::String::formatted("gesture=%s pressed=%d off=(%.1f,%.1f) pps=%.4f",
+                                                     gesture == G::Move ? "Move" : "Pitch", pressed,
+                                                     (double)off.x, (double)off.y, ed.pps_)); // TEMP-MOVE-DIAG
                 break;
             case G::PendingCorner: // the top corner of an edge: up/down only, the roof
                 if (off.getDistanceFromOrigin() < 4) return;
@@ -1126,7 +1138,9 @@ public:
             d->edits = before.edits;
             std::set<int> moved = ed.selection_;
             moved.insert(pressed);
-            moveNotes(d->edits, *ed.eff_, moved, dt);
+            const double applied = moveNotes(d->edits, *ed.eff_, moved, dt);
+            tempMoveDiag(juce::String::formatted("Move nsel=%d dt=%.6f applied=%.6f", (int)moved.size(), dt,
+                                                 applied)); // TEMP-MOVE-DIAG
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
