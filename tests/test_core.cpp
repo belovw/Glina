@@ -268,6 +268,7 @@ static void testDocumentIO(const Analysis& a)
     Document d;
     conform(d, a);
     d.keyTonic = 7; d.keyMinor = true; d.chromatic = false; d.leadGainDb = -1.5;
+    d.keyMode = 2; d.snapAmount = 0.6; // melodic minor, pulled 60 % of the way
     d.edits.notes[1].pitchOffset = 0.37; d.edits.notes[1].formantShift = -1.25; d.edits.notes[2].stretch = 1.1;
     d.edits.spans = spansOf(a);
     HarmonyVoice v; v.degrees = -2; v.pan = -0.4; v.noteMask.assign(a.notes.size(), 1); v.noteMask[0] = 0;
@@ -276,6 +277,31 @@ static void testDocumentIO(const Analysis& a)
     CHECK(deserialize(serialize(d), r), "parse failed");
     CHECK(serialize(r) == serialize(d), "round trip differs");
     CHECK(!deserialize("garbage", r), "garbage accepted");
+    CHECK(r.keyMode == 2 && std::abs(r.snapAmount - 0.6) < 1e-9, "scale mode lost");
+    Document plain; // default mode and snap: no new record, same bytes as before
+    CHECK(serialize(plain).find("\nmode ") == std::string::npos, "default mode written");
+}
+
+// Scale steps per mode, and the key a document resolves to.
+static void testScaleModes()
+{
+    std::printf("[scale] modes and steps\n");
+    auto steps = [](Key k) { int s[7]; scaleSteps(k, s); return std::vector<int>(s, s + 7); };
+    CHECK((steps({0, false}) == std::vector<int>{0, 2, 4, 5, 7, 9, 11}), "major steps");
+    CHECK((steps({0, true, 0}) == std::vector<int>{0, 2, 3, 5, 7, 8, 10}), "natural minor steps");
+    CHECK((steps({0, true, 1}) == std::vector<int>{0, 2, 3, 5, 7, 9, 11}), "melodic minor steps");
+    CHECK((steps({0, true, 2}) == std::vector<int>{0, 2, 3, 5, 7, 8, 11}), "harmonic minor steps");
+    Analysis a; a.key = Key{0, false};
+    Document d;
+    d.keyTonic = 9; d.keyMode = 3;
+    CHECK(d.key(a).tonic == 9 && d.key(a).minor && d.key(a).minorForm == 2, "harmonic A minor");
+    d.keyMode = -1; d.keyTonic = -1;
+    CHECK(!d.key(a).minor && d.key(a).tonic == 0, "analysed key kept in auto mode");
+    // F# (6) is a step of A melodic minor (raised 6th), not of A natural minor, where 6.4 goes to G (7).
+    Key mel, nat;
+    mel.tonic = nat.tonic = 9; mel.minor = nat.minor = true;
+    mel.minorForm = 1; nat.minorForm = 0;
+    CHECK(nearestTarget(6.4, mel, true) == 6.0 && nearestTarget(6.4, nat, true) == 7.0, "F# in melodic minor only");
 }
 
 // Output time (s) of the analysed onset nearest to `want` in a re-analysis.
@@ -628,6 +654,30 @@ static void testTilt(const test::SynthResult& s, const Analysis& a, double sr)
     CHECK(gt.notes[6].tiltL == 0 && std::abs(gt.notes[8].tiltR + 1.0) < 1e-12, "group ends wrong");
     CHECK(editedCenter(a, gt, 6) > editedCenter(a, gt, 8) - a.notes[8].centerMidi + a.notes[6].centerMidi,
           "the first note of the group should drop less than the last");
+
+    // Roof: dragging the right edge of the middle note: both group ends stay, the apex is that edge.
+    EditSet roof = flat;
+    addTilt(roof, a, group, true, -1.0, 7);
+    const auto cr = editedPitchCurve(a, roof);
+    double rWorst = 0;
+    const int apexF = a.notes[7].endFrame;
+    for (int k = g0; k < g1; ++k) {
+        const int ni = a.noteOfFrame[(size_t)k];
+        if (a.frames[(size_t)k].f0 <= 0 || !group.count(ni)) continue;
+        const double f = k + 0.5;
+        const double want = f <= apexF ? -(f - g0) / (apexF - g0) : -(g1 - f) / (double)(g1 - apexF);
+        rWorst = std::max(rWorst, std::abs((cr[(size_t)k] - c0[(size_t)k]) - want));
+    }
+    std::printf("  roof over 3 notes, apex at the middle note's right edge: worst %.4f st\n", rWorst);
+    CHECK(rWorst < 0.005, "roof is not two straight lines (%.4f st)", rWorst);
+    CHECK(roof.notes[6].tiltL == 0 && roof.notes[8].tiltR == 0 && roof.notes[7].tiltR == -1.0,
+          "roof ends or apex wrong");
+    // One note: as before, its own edge moves.
+    EditSet one = flat, oneOld = flat;
+    addTilt(one, a, {i}, true, -1.0, i);
+    addTilt(oneOld, a, {i}, true, -1.0);
+    CHECK(one.notes[(size_t)i].tiltR == oneOld.notes[(size_t)i].tiltR && one.notes[(size_t)i].tiltL == 0,
+          "one note with apex changed");
 }
 
 static void testTiltLayout(const Analysis& a)
@@ -1275,6 +1325,7 @@ int main()
         testSplitJoin(s, a, sr);
         testHarmony(s, a, sr);
         testDocumentIO(a);
+        testScaleModes();
         testBoundaryBlocks(s, a, sr);
         testNoteAtFrameZero(s, sr);
         testMoveNote(s, a, sr);

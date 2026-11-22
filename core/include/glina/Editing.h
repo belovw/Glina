@@ -53,11 +53,13 @@ double tiltMean(const Analysis& a, int note, const NoteEdit& e);
 // Perceived centre (MIDI) of note `i` after its edits: centre + pitch offset + tilt.
 // The editor draws the note box here; correction to the scale aims it.
 double editedCenter(const Analysis& a, const EditSet& e, int i);
-// Tilt `notes` as ONE note: a straight line over the group (first start .. last end)
-// that is 0 at the group's opposite edge and `semis` at the dragged one (right end
-// when rightCorner). Each note gets its piece of the line on top of its own tilt.
-// One note: its own right (left) edge moves by `semis`. Consonants are skipped.
-void addTilt(EditSet& e, const Analysis& a, const std::set<int>& notes, bool rightCorner, double semis);
+// Tilt `notes` as ONE note: a roof over the group (first start .. last end): 0 at both
+// ends, `semis` at the apex, the right (left) edge of note `apex` when rightCorner (left).
+// Without an apex (or for one note) the apex is the group's dragged end, so one note
+// tilts its own right (left) edge by `semis`. Each note gets its piece of the line on
+// top of its own tilt. Consonants are skipped.
+void addTilt(EditSet& e, const Analysis& a, const std::set<int>& notes, bool rightCorner, double semis,
+             int apex = -1);
 
 // ---- auto vibrato -----------------------------------------------------------------------
 // Settings that apply to note `i` (its own, or the track's).

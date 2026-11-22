@@ -10,9 +10,6 @@ namespace glina {
 
 namespace {
 
-const int kMajor[7] = {0, 2, 4, 5, 7, 9, 11};
-const int kMinor[7] = {0, 2, 3, 5, 7, 8, 10};
-
 int floorDiv(int a, int b) { return (a >= 0) ? a / b : -((-a + b - 1) / b); }
 
 const NoteEdit kNone{};
@@ -29,7 +26,8 @@ double noteRand(uint32_t seed, size_t i)
 
 double scaleStep(double midi, const Key& key, int degrees)
 {
-    const int* steps = key.minor ? kMinor : kMajor;
+    int steps[7];
+    scaleSteps(key, steps);
     const int n = (int)std::lround(nearestTarget(midi, key, true));
     const int rel = n - key.tonic;
     const int oct = floorDiv(rel, 12);

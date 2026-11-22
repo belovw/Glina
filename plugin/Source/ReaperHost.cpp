@@ -41,6 +41,9 @@ using FnGetTrackMediaItem = void* (*)(void* track, int itemidx);
 using FnGetMediaItemInfo_Value = double (*)(void* item, const char* parmname);
 using FnGetMediaTrackInfo_Value = double (*)(void* track, const char* parmname);
 using FnGetTrackName = bool (*)(void* track, char* bufOut, int bufOut_sz);
+using FnGetActiveTake = void* (*)(void* item);
+using FnGetMediaItemTake = void* (*)(void* item, int takeidx);
+using FnGetMediaItemNumTakes = int (*)(void* item);
 
 std::atomic<FnEnumProjects> enumProjects { nullptr };
 std::atomic<FnIsProjectDirty> isProjectDirty { nullptr };
@@ -50,6 +53,9 @@ std::atomic<FnGetTrackMediaItem> getTrackMediaItem { nullptr };
 std::atomic<FnGetMediaItemInfo_Value> getMediaItemInfoValue { nullptr };
 std::atomic<FnGetMediaTrackInfo_Value> getMediaTrackInfoValue { nullptr };
 std::atomic<FnGetTrackName> getTrackName { nullptr };
+std::atomic<FnGetActiveTake> getActiveTake { nullptr };
+std::atomic<FnGetMediaItemTake> getMediaItemTake { nullptr };
+std::atomic<FnGetMediaItemNumTakes> getMediaItemNumTakes { nullptr };
 
 IReaperHostApplication* rh(void* p) { return static_cast<IReaperHostApplication*>(p); }
 
@@ -82,6 +88,12 @@ void HostLink::attach(Steinberg::FUnknown* hostContext)
         getMediaTrackInfoValue = reinterpret_cast<FnGetMediaTrackInfo_Value>(rh(obj)->getReaperApi("GetMediaTrackInfo_Value"));
     if (getTrackName.load() == nullptr)
         getTrackName = reinterpret_cast<FnGetTrackName>(rh(obj)->getReaperApi("GetTrackName"));
+    if (getActiveTake.load() == nullptr)
+        getActiveTake = reinterpret_cast<FnGetActiveTake>(rh(obj)->getReaperApi("GetActiveTake"));
+    if (getMediaItemTake.load() == nullptr)
+        getMediaItemTake = reinterpret_cast<FnGetMediaItemTake>(rh(obj)->getReaperApi("GetMediaItemTake"));
+    if (getMediaItemNumTakes.load() == nullptr)
+        getMediaItemNumTakes = reinterpret_cast<FnGetMediaItemNumTakes>(rh(obj)->getReaperApi("GetMediaItemNumTakes"));
 }
 
 void* HostLink::project() const
@@ -148,9 +160,23 @@ bool trackInfo(void* track, TrackInfo& out)
         out.name = juce::String::fromUTF8(buf.data());
     }
     if (const auto f = getMediaTrackInfoValue.load()) out.number = (int)f(track, "IP_TRACKNUMBER");
+    const auto activeTake = getActiveTake.load();
+    const auto takeAt = getMediaItemTake.load();
+    const auto takeCount = getMediaItemNumTakes.load();
     const int n = count(track);
-    for (int i = 0; i < n; ++i)
-        if (void* it = item(track, i)) out.itemStarts.push_back(info(it, "D_POSITION"));
+    for (int i = 0; i < n; ++i) {
+        void* it = item(track, i);
+        if (it == nullptr) continue;
+        out.itemStarts.push_back(info(it, "D_POSITION"));
+        int number = 0; // the active take is the one at index j: its number is j + 1
+        if (activeTake != nullptr && takeAt != nullptr && takeCount != nullptr) {
+            void* active = activeTake(it);
+            const int takes = takeCount(it);
+            for (int j = 0; j < takes && number == 0; ++j)
+                if (takeAt(it, j) == active) number = j + 1;
+        }
+        out.itemTakes.push_back(number);
+    }
     return true;
 }
 

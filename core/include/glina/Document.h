@@ -19,6 +19,10 @@ struct Document {
     int keyTonic = -1;       // -1 = use the detected key
     bool keyMinor = false;
     bool chromatic = false;  // correct to semitones instead of the scale
+    // Scale mode when set: -1 = as before (major/minor from keyMinor or the analysis),
+    // 0 major, 1 natural minor, 2 melodic minor, 3 harmonic minor.
+    int keyMode = -1;
+    double snapAmount = 1.0; // share of the way "К ладу" moves a note to its step, 0..1
     double leadGainDb = 0;   // lead level in the mix (harmonies have their own)
     // Musical grid for the standalone app (a DAW host supplies its own tempo map).
     double tempoBpm = 0;     // 0 = show seconds

@@ -247,7 +247,7 @@ double editedCenter(const Analysis& a, const EditSet& e, int i)
     return a.notes[(size_t)i].centerMidi + ed.pitchOffset + tiltMean(a, i, ed);
 }
 
-void addTilt(EditSet& e, const Analysis& a, const std::set<int>& notes, bool rightCorner, double semis)
+void addTilt(EditSet& e, const Analysis& a, const std::set<int>& notes, bool rightCorner, double semis, int apex)
 {
     auto usable = [&](int i) {
         return i >= 0 && i < (int)e.notes.size() && i < (int)a.notes.size() && !e.notes[(size_t)i].consonant;
@@ -257,9 +257,15 @@ void addTilt(EditSet& e, const Analysis& a, const std::set<int>& notes, bool rig
         if (usable(i)) { g0 = std::min(g0, a.notes[(size_t)i].startFrame); g1 = std::max(g1, a.notes[(size_t)i].endFrame); }
     if (g1 <= g0) return;
     // The line in frames, as tiltAt() measures each note: edges at startFrame and endFrame.
+    // A roof: 0 at both ends of the group, `semis` at the apex, which is the dragged note's
+    // edge (apex >= 0), or the group's dragged end when the apex is not given (one note).
+    double apexF = rightCorner ? g1 : g0;
+    if (usable(apex)) apexF = rightCorner ? a.notes[(size_t)apex].endFrame : a.notes[(size_t)apex].startFrame;
+    apexF = std::clamp(apexF, (double)g0, (double)g1);
     auto line = [&](double frame) {
-        const double u = (frame - g0) / (double)(g1 - g0);
-        return semis * (rightCorner ? u : 1.0 - u);
+        if (apexF > g0 && frame <= apexF) return semis * (frame - g0) / (apexF - g0);
+        if (apexF < g1) return semis * (g1 - frame) / (g1 - apexF);
+        return semis * (frame - g0) / (double)(g1 - g0);
     };
     for (int i : notes) {
         if (!usable(i)) continue;

@@ -17,6 +17,9 @@ struct TuneParams {
     double formantShift = 0;    // semitones, applied to every note
 };
 
+// Degrees of the key's scale above its tonic (7 steps, semitones 0..11).
+void scaleSteps(const Key& key, int steps[7]);
+
 // Nearest allowed MIDI note for `midi` (scale of `key`, or chromatic).
 double nearestTarget(double midi, const Key& key, bool useKey);
 

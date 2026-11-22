@@ -4,12 +4,21 @@
 
 namespace glina {
 
+void scaleSteps(const Key& key, int steps[7])
+{
+    static const int major[7] = {0, 2, 4, 5, 7, 9, 11};
+    static const int natural[7] = {0, 2, 3, 5, 7, 8, 10};
+    static const int melodic[7] = {0, 2, 3, 5, 7, 9, 11};
+    static const int harmonic[7] = {0, 2, 3, 5, 7, 8, 11};
+    const int* src = !key.minor ? major : key.minorForm == 1 ? melodic : key.minorForm == 2 ? harmonic : natural;
+    for (int s = 0; s < 7; ++s) steps[s] = src[s];
+}
+
 double nearestTarget(double midi, const Key& key, bool useKey)
 {
     if (!useKey) return std::round(midi);
-    static const int majorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
-    static const int minorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
-    const int* steps = key.minor ? minorSteps : majorSteps;
+    int steps[7];
+    scaleSteps(key, steps);
     double best = std::round(midi), bestDist = 1e9;
     const int base = (int)std::floor(midi) - 13;
     for (int m = base; m <= base + 26; ++m) {

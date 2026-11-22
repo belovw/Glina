@@ -170,12 +170,19 @@ bool PluginClip::summary(ClipHost::Summary& out) const
     if (!viewOn_) return false;
     out = {};
     out.t1 = viewEnd_ - viewStart_;
+    reaper::TrackInfo track; // the take numbers: REAPER's items at the same places as the regions
+    const bool haveTrack = proc_.reaperTrack(track);
     for (const auto& it : viewItems_) {
         const double t0 = it.playStart - viewStart_;
         const double offset = it.playStart - it.modStart - viewStart_; // view time of the analysis' start
         juce::String name;
         const char* nm = it.region->getName();
         if (nm != nullptr) name = juce::String::fromUTF8(nm);
+        int take = 0;
+        if (haveTrack)
+            for (size_t k = 0; k < track.itemStarts.size() && k < track.itemTakes.size(); ++k)
+                if (std::abs(track.itemStarts[k] - it.region->getStartInPlaybackTime()) < 0.005) { take = track.itemTakes[k]; break; }
+        if (take > 0) name = juce::String(take) + " " + name;
         if (it.eff != nullptr) out.add(name, t0, t0 + (it.modEnd - it.modStart), *it.eff, offset);
     }
     return true;

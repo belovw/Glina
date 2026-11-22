@@ -28,6 +28,8 @@ int schemeMask(const juce::ModifierKeys& m)
     return MouseScheme::maskOf(m.isAltDown(), m.isCtrlDown() || m.isCommandDown(), m.isShiftDown());
 }
 const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+// The key box's tonic names (German: B is A#, H is B).
+const char* kTonicNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "B", "H"};
 bool isBlack(int m) { const int pc = ((m % 12) + 12) % 12; return pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10; }
 juce::String noteName(double midi)
 {
@@ -39,10 +41,30 @@ juce::String noteName(double midi)
 }
 bool inScale(int m, const Key& k)
 {
-    static const int maj[7] = {0, 2, 4, 5, 7, 9, 11}, mnr[7] = {0, 2, 3, 5, 7, 8, 10};
+    int steps[7];
+    scaleSteps(k, steps);
     const int pc = ((m - k.tonic) % 12 + 12) % 12;
-    for (int s : (k.minor ? mnr : maj)) if (s == pc) return true;
+    for (int s : steps) if (s == pc) return true;
     return false;
+}
+
+// Cursor for Alt+click (cut): a thin vertical bar with a gap at the cut point, outlined so
+// that it shows on both the light and the dark theme. Built once, on first use.
+juce::MouseCursor cutCursor()
+{
+    static const juce::MouseCursor cursor = [] {
+        juce::Image img(juce::Image::ARGB, 11, 25, true);
+        juce::Graphics g(img);
+        const float x = 5.5f;
+        g.setColour(juce::Colour(0xcc000000)); // outline
+        g.drawLine(x, 0.f, x, 10.f, 3.f);
+        g.drawLine(x, 14.f, x, 25.f, 3.f);
+        g.setColour(juce::Colours::white);
+        g.drawLine(x, 0.f, x, 10.f, 1.5f);
+        g.drawLine(x, 14.f, x, 25.f, 1.5f);
+        return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
+    }();
+    return cursor;
 }
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
@@ -190,8 +212,8 @@ public:
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
             "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
             "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
-            "  Крайняя пятая часть ноты или верхний угол вверх/вниз — наклон нитки вокруг другого края; выделенные — как одна нота\n"
-            "  (Shift — тоньше; угол вбок — граница ноты, как край)\n"
+            "  Верхний угол края вверх/вниз — наклон: одна нота — вокруг другого края; выделенные — домиком, вершина у мыши\n"
+            "  (Shift — тоньше; вбок от угла ничего не делает)\n"
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
@@ -270,24 +292,17 @@ public:
 
     // Edge strips stretch; on notes wide enough on screen the outer fifths (whole
     // height, past the edge strip) tilt the line around the opposite edge. The top
-    // corner of an edge strip does both (any width): up/down tilts, sideways stretches.
-    static constexpr float kTiltMinW = 40;
-    enum class Zone { Body, Left, Right, TiltL, TiltR, CornerL, CornerR };
+    // corner of an edge strip: up/down tilts (the roof), sideways does nothing.
+    enum class Zone { Body, Left, Right, CornerL, CornerR };
     Zone zoneOf(int i, juce::Point<float> p) const
     {
         const auto r = noteRect(i);
         const float edge = std::min(7.f, r.getWidth() * 0.25f);
         const bool cons = ed.doc() != nullptr && (size_t)i < ed.doc()->edits.notes.size() &&
                           ed.doc()->edits.notes[(size_t)i].consonant;
-        const bool top = !cons && p.y < r.getY() + r.getHeight() * 0.4f;
+        const bool top = !cons && p.y < r.getY() + r.getHeight() * 0.33f;
         if (p.x < r.getX() + edge) return top ? Zone::CornerL : Zone::Left;
         if (p.x > r.getRight() - edge) return top ? Zone::CornerR : Zone::Right;
-        if (r.getWidth() >= kTiltMinW && !cons) {
-            // Past the edge strip: a fifth of the note, but never thinner than 8 px.
-            const float zone = edge + std::max(r.getWidth() / 5.f - edge, 8.f);
-            if (p.x < r.getX() + zone) return Zone::TiltL;
-            if (p.x > r.getRight() - zone) return Zone::TiltR;
-        }
         return Zone::Body;
     }
 
@@ -873,11 +888,11 @@ public:
         if (th >= 0) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; } // thread: hand
         const int i = hitNote(e.position);
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
+        if (e.mods.isAltDown()) { setMouseCursor(cutCursor()); return; } // Alt+click cuts the note
         const Zone z = zoneOf(i, e.position);
         setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
-                       : (z == Zone::TiltL || z == Zone::CornerL) ? juce::MouseCursor::TopLeftCornerResizeCursor
-                       : (z == Zone::TiltR || z == Zone::CornerR) ? juce::MouseCursor::TopRightCornerResizeCursor
-                                                                  : juce::MouseCursor::LeftRightResizeCursor);
+                       : (z == Zone::CornerL || z == Zone::CornerR) ? juce::MouseCursor::UpDownResizeCursor
+                                                                    : juce::MouseCursor::LeftRightResizeCursor);
     }
 
     void mouseExit(const juce::MouseEvent&) override
@@ -974,9 +989,8 @@ public:
         for (int k : ed.selection_) start[k] = ed.doc()->edits.notes[(size_t)k];
         start[i] = ed.doc()->edits.notes[(size_t)i];
         const Zone z = zoneOf(i, e.position);
-        tiltRight = z == Zone::TiltR || z == Zone::CornerR;
+        tiltRight = z == Zone::CornerR;
         gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR
-                : (z == Zone::TiltL || z == Zone::TiltR) ? G::PendingTilt
                 : (z == Zone::CornerL || z == Zone::CornerR) ? G::PendingCorner : G::Pending;
         ed.refresh();
     }
@@ -1039,13 +1053,9 @@ public:
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Pitch : G::Move;
                 break;
-            case G::PendingTilt: // corner area: up/down tilts, sideways moves the note like the body
+            case G::PendingCorner: // the top corner of an edge: up/down only, the roof
                 if (off.getDistanceFromOrigin() < 4) return;
-                gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : G::Move;
-                break;
-            case G::PendingCorner: // the corner itself: up/down tilts, sideways stretches like the edge
-                if (off.getDistanceFromOrigin() < 4) return;
-                gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : (tiltRight ? G::StretchR : G::StretchL);
+                gesture = G::Tilt;
                 break;
             case G::Draw:
             case G::Erase: {
@@ -1074,14 +1084,14 @@ public:
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
         } else if (gesture == G::Tilt) {
-            // Free in cents (Shift: finer). Selected notes tilt as one note: one line over the
-            // group, the group's far edge stays, its near edge follows the mouse; each note gets
-            // its piece of the line. A new drag continues from the current tilt.
+            // Free in cents (Shift: finer). Selected notes tilt as one roof: the group's two ends
+            // stay, the apex is the dragged note's edge and follows the mouse up and down; each note
+            // gets its piece of the line. A new drag continues from the current tilt.
             const double delta = -off.y / semi() * (e.mods.isShiftDown() ? 0.25 : 1.0);
             d->edits = before.edits;
             std::set<int> notes;
             for (auto& kv : start) notes.insert(kv.first);
-            addTilt(d->edits, *ed.eff_, notes, tiltRight, delta);
+            addTilt(d->edits, *ed.eff_, notes, tiltRight, delta, pressed);
         } else if (gesture == G::Smooth) {
             // Vertical: up = smoother (more), down = sharper (less). 0.5 % per pixel (Shift: 0.15 %),
             // relative to where the drag started.
@@ -1128,7 +1138,7 @@ public:
             changed = false;
             return;
         }
-        if ((g0 == G::Pending || g0 == G::PendingTilt) && pressed >= 0 && e.mods.isAltDown() && !changed) {
+        if (g0 == G::Pending && pressed >= 0 && e.mods.isAltDown() && !changed) {
             ed.splitAt(pressed, secOf(e.position.x));
         } else if (changed) {
             ed.commit(before);
@@ -1277,7 +1287,7 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, PendingTilt, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase, PinEnd, PinNew, ViewPan, ViewZoom };
+    enum class G { None, Pending, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase, PinEnd, PinNew, ViewPan, ViewZoom };
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
@@ -2239,14 +2249,45 @@ PitchEditor::PitchEditor()
     keyBox_.onChange = [this] {
         const int id = keyBox_.getSelectedId();
         if (id == 0 || doc() == nullptr) return;
-        edit([id](Document& d) {
-            d.chromatic = id == 50;
-            if (id == 1) d.keyTonic = -1;
-            else if (id >= 10 && id < 22) { d.keyTonic = id - 10; d.keyMinor = false; }
-            else if (id >= 30 && id < 42) { d.keyTonic = id - 30; d.keyMinor = true; }
-        });
+        edit([id](Document& d) { d.keyTonic = id == 1 ? -1 : id - 10; }); // tonic only; the mode is separate
     };
     addAndMakeVisible(keyBox_);
+
+    quiet(modeBox_);
+    modeBox_.onChange = [this] {
+        const int id = modeBox_.getSelectedId();
+        if (id == 0 || doc() == nullptr) return;
+        const bool detMinor = eff_ != nullptr && eff_->key.minor;
+        // 1 Auto, 2 Chromatic (semitones, no key), 3 major, 4 natural minor, 5 melodic, 6 harmonic
+        edit([id, detMinor](Document& d) {
+            d.chromatic = id == 2;
+            if (id == 1) { d.keyMode = -1; d.keyMinor = detMinor; }
+            else if (id >= 3) { d.keyMode = id - 3; d.keyMinor = d.keyMode >= 1; }
+        });
+    };
+    addAndMakeVisible(modeBox_);
+
+    snapLbl_.setText(T("Подтянуть"), juce::dontSendNotification);
+    snapLbl_.setColour(juce::Label::textColourId, col::dim);
+    snapLbl_.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(snapLbl_);
+    snapSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
+    snapSlider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 44, 20);
+    snapSlider_.setRange(0, 100, 1);
+    snapSlider_.setValue(100, juce::dontSendNotification);
+    snapSlider_.setTextValueSuffix("%");
+    snapSlider_.setTooltip(T("Насколько «К ладу» подтягивает ноты к ступеням: 100 % — точно на ступень, 0 — не трогать"));
+    snapSlider_.setMouseClickGrabsKeyboardFocus(false);
+    // The share is part of the document (undo, per track): applied when the drag ends or a value is typed.
+    auto applySnap = [this] {
+        if (doc() == nullptr) return;
+        const double v = snapSlider_.getValue() / 100.0;
+        if (std::abs(doc()->snapAmount - v) < 1e-9) return;
+        edit([v](Document& d) { d.snapAmount = v; });
+    };
+    snapSlider_.onDragEnd = applySnap;
+    snapSlider_.onValueChange = [this, applySnap] { if (!snapSlider_.isMouseButtonDown()) applySnap(); };
+    addAndMakeVisible(snapSlider_);
 
     auto corr = [this](juce::Slider& s, juce::Label& l, const char* name, double def, const char* tip) {
         s.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -2365,19 +2406,22 @@ void PitchEditor::refresh()
     refreshCurves();
 
     if (Document* d = doc()) {
-        int id = 1;
-        if (d->chromatic) id = 50;
-        else if (d->keyTonic >= 0) id = (d->keyMinor ? 30 : 10) + d->keyTonic;
-        keyBox_.clear(juce::dontSendNotification);
         const Key det = eff_ != nullptr ? eff_->key : Key{};
+        keyBox_.clear(juce::dontSendNotification);
         keyBox_.addItem(T("Авто: ") + (eff_ != nullptr ? keyLabel(det.tonic, det.minor) : T("…")), 1);
-        keyBox_.addSectionHeading(T("Мажор"));
-        for (int t = 0; t < 12; ++t) keyBox_.addItem(keyLabel(t, false), 10 + t);
-        keyBox_.addSectionHeading(T("Минор"));
-        for (int t = 0; t < 12; ++t) keyBox_.addItem(keyLabel(t, true), 30 + t);
-        keyBox_.addSeparator();
-        keyBox_.addItem(T("Хроматика (полутоны)"), 50);
-        keyBox_.setSelectedId(id, juce::dontSendNotification);
+        for (int t = 0; t < 12; ++t) keyBox_.addItem(kTonicNames[t], 10 + t);
+        keyBox_.setSelectedId(d->keyTonic >= 0 ? 10 + d->keyTonic : 1, juce::dontSendNotification);
+
+        modeBox_.clear(juce::dontSendNotification);
+        modeBox_.addItem(T("Авто"), 1);
+        modeBox_.addItem(T("Хроматический"), 2);
+        modeBox_.addItem(T("Мажорный"), 3);
+        modeBox_.addItem(T("Минор натуральный"), 4);
+        modeBox_.addItem(T("Минор мелодический"), 5);
+        modeBox_.addItem(T("Минор гармонический"), 6);
+        modeBox_.setSelectedId(d->chromatic ? 2 : d->keyMode >= 0 ? d->keyMode + 3 : 1, juce::dontSendNotification);
+
+        if (!snapSlider_.isMouseButtonDown()) snapSlider_.setValue(d->snapAmount * 100.0, juce::dontSendNotification);
     }
 
     const int hh = harmonies_->preferredHeight();
@@ -2464,7 +2508,8 @@ void PitchEditor::snapToScale()
         for (int i : targets()) {
             NoteEdit& e = d.edits.notes[(size_t)i];
             const double c = eff_->notes[(size_t)i].centerMidi + tiltMean(*eff_, i, e); // tilt is part of the note
-            e.pitchOffset = d.target(c + e.pitchOffset, *eff_) - c;
+            const double cur = c + e.pitchOffset;
+            e.pitchOffset += (d.target(cur, *eff_) - cur) * d.snapAmount; // the share set in «Подтянуть»
         }
     });
 }
@@ -2946,7 +2991,7 @@ void PitchEditor::updateToolbar()
     playBtn_.setButtonText(host_ != nullptr && host_->isPlaying() ? T("■") : T("▶"));
     undoBtn_.setEnabled(ready && host_->canUndo());
     redoBtn_.setEnabled(ready && host_->canRedo());
-    for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &corrPitch_, &corrDrift_, &fitBtn_})
+    for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &modeBox_, &snapSlider_, &corrPitch_, &corrDrift_, &fitBtn_})
         c->setEnabled(ready);
     splitBtn_.setEnabled(ready && selection_.size() == 1);
     abBtn_.setEnabled(host_ != nullptr);
@@ -2985,14 +3030,15 @@ void PitchEditor::resized()
     struct Slot { juce::Component* c; int w, gap, minW; };
     std::vector<Slot> slots = {
         {&playBtn_, 34, 8, 34},      {&undoBtn_, 26, 4, 26},      {&redoBtn_, 26, 12, 26},
-        {&keyLbl_, 30, 2, 30},       {&keyBox_, 150, 12, 96},
+        {&keyLbl_, 30, 2, 30},       {&keyBox_, 110, 4, 80},      {&modeBox_, 150, 12, 110},
+        {&snapLbl_, 62, 2, 62},      {&snapSlider_, 118, 12, 100},
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&themeBtn_, 26, 4, 26},     {&helpBtn_, 28, 4, 28}};
-    auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
+    auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_ || s->c == &snapLbl_; };
     std::vector<Slot*> vis;
     for (auto& s : slots) if (s.c->isVisible()) vis.push_back(&s);
 

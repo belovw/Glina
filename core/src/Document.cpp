@@ -15,7 +15,14 @@ namespace glina {
 Key Document::key(const Analysis& a) const
 {
     Key k = a.key;
-    if (keyTonic >= 0) { k.tonic = keyTonic % 12; k.minor = keyMinor; }
+    if (keyTonic >= 0) k.tonic = keyTonic % 12;
+    if (keyMode >= 0) {
+        k.minor = keyMode >= 1;
+        k.minorForm = keyMode >= 1 ? keyMode - 1 : 0;
+    } else if (keyTonic >= 0) {
+        k.minor = keyMinor;
+        k.minorForm = 0;
+    }
     return k;
 }
 
@@ -95,6 +102,8 @@ std::string serialize(const Document& d)
     for (const auto& n : e.notes) v4 = v4 || n.tiltL != 0 || n.tiltR != 0 || n.ownVibrato;
     o << (v4 ? "glina-document 4\n" : "glina-document 3\n");
     o << "key " << d.keyTonic << ' ' << (int)d.keyMinor << ' ' << (int)d.chromatic << '\n';
+    // Written only when used: a document without them is written exactly as before.
+    if (d.keyMode != -1 || d.snapAmount != 1.0) o << "mode " << d.keyMode << ' ' << d.snapAmount << '\n';
     o << "lead " << d.leadGainDb << '\n';
     o << "tempo " << d.tempoBpm << ' ' << d.beatsPerBar << ' ' << d.barOffsetSec << '\n';
     o << "global " << e.sibilantGainDb << ' ' << e.breathGainDb << ' ' << e.globalFormantShift << ' '
@@ -164,6 +173,10 @@ bool deserialize(const std::string& text, Document& out)
             int mn = 0, ch = 0;
             in >> d.keyTonic >> mn >> ch;
             d.keyMinor = mn != 0; d.chromatic = ch != 0;
+        } else if (tag == "mode") {
+            in >> d.keyMode >> d.snapAmount;
+            d.keyMode = std::clamp(d.keyMode, -1, 3);
+            d.snapAmount = std::clamp(d.snapAmount, 0.0, 1.0);
         } else if (tag == "lead") {
             in >> d.leadGainDb;
         } else if (tag == "tempo") {

@@ -16,6 +16,7 @@ struct TrackInfo {
     juce::String name;              // as in the track header ("Track N" when unnamed)
     int number = 0;                 // 1-based; 0 if unknown
     std::vector<double> itemStarts; // project seconds, one per item on the track
+    std::vector<int> itemTakes;     // per item: the number of its active take, from 1 (0 = unknown)
 };
 
 // One per plug-in instance, fed from VST3ClientExtensions::setIHostApplication.

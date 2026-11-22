@@ -147,8 +147,9 @@ private:
     };
     juce::TextButton playBtn_, applyBtn_, splitBtn_, joinBtn_, abBtn_, harmBtn_, helpBtn_, fitBtn_;
     IconButton undoBtn_, redoBtn_;
-    juce::ComboBox keyBox_;
-    juce::Slider corrPitch_, corrDrift_;
+    juce::ComboBox keyBox_, modeBox_;
+    juce::Slider corrPitch_, corrDrift_, snapSlider_;
+    juce::Label snapLbl_;
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
     bool showTracks_ = false;
