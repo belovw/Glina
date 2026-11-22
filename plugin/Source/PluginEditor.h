@@ -97,11 +97,13 @@ private:
     void onNewSelection(const juce::ARAViewSelection&) override;
     void timerCallback() override;
     void pickFallbackRegion();
+    bool pinOwnRegion();
 
     GlinaProcessor& proc_;
     GlinaDocumentController* dc_ = nullptr;
     std::unique_ptr<PluginClip> clip_;
     ui::PitchEditor editor_;
+    bool ownPinned_ = false; // bound to the item this instance sits on (Take FX)
 };
 
 } // namespace glina::plugin

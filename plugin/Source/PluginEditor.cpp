@@ -353,6 +353,7 @@ GlinaEditor::GlinaEditor(GlinaProcessor& p)
             ev->getDocumentController());
         ev->addListener(this);
         clip_ = std::make_unique<PluginClip>(dc_, p);
+        pinOwnRegion();
         pickFallbackRegion();
         editor_.setHost(clip_.get());
         startTimerHz(4);
@@ -370,8 +371,23 @@ GlinaEditor::~GlinaEditor()
     editor_.setHost(nullptr);
 }
 
+// The item this instance sits on is the one it edits. The host's selection at open time is
+// the last item the user worked on, so it must not replace that item.
+bool GlinaEditor::pinOwnRegion()
+{
+    if (ownPinned_ || clip_ == nullptr) return ownPinned_;
+    if (auto* pr = proc_.getPlaybackRenderer<juce::ARAPlaybackRenderer>())
+        for (auto* r : pr->getPlaybackRegions<juce::ARAPlaybackRegion>()) {
+            clip_->setRegion(r);
+            ownPinned_ = true;
+            return true;
+        }
+    return false;
+}
+
 void GlinaEditor::onNewSelection(const juce::ARAViewSelection& sel)
 {
+    if (ownPinned_) return;
     const auto& regions = sel.getPlaybackRegions<juce::ARAPlaybackRegion>();
     if (!regions.empty() && clip_ != nullptr && regions.front() != clip_->region()) {
         clip_->setRegion(regions.front());
@@ -396,6 +412,7 @@ void GlinaEditor::timerCallback()
     if (clip_ == nullptr) return;
     const auto* before = clip_->region();
     const auto* beforeMod = clip_->modification();
+    pinOwnRegion(); // the renderer may not know its item yet when the editor opens
     clip_->followTrack(); // item or take changed in the host: stay on the same track
     if (!clip_->valid()) pickFallbackRegion();
     if (clip_->region() != before || clip_->modification() != beforeMod)
