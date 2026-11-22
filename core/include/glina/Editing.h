@@ -7,6 +7,7 @@
 #include "glina/Types.h"
 
 #include <set>
+#include <string>
 #include <vector>
 
 namespace glina {
@@ -33,6 +34,9 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
 // Move notes (each contiguous run of `notes`) by `dt` seconds together with
 // the consonant before them; the neighbouring notes absorb the change.
 double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, double dt);
+
+// TEMP-MOVE-DIAG: names the first check the current layout fails ("valid" if none). Remove later.
+std::string whyLayoutInvalid(const EditSet& e, const Analysis& a);
 
 // Set note `i`'s output duration (seconds) by moving its end boundary.
 void setNoteDuration(EditSet& e, const Analysis& a, int i, double seconds);

@@ -1083,8 +1083,8 @@ public:
             case G::Pending:
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Pitch : G::Move;
-                tempMoveDiag(juce::String::formatted("gesture=%s pressed=%d off=(%.1f,%.1f) pps=%.4f",
-                                                     gesture == G::Move ? "Move" : "Pitch", pressed,
+                tempMoveDiag(juce::String("gesture ") + (gesture == G::Move ? "Move" : "Pitch") +
+                             juce::String::formatted(" pressed=%d off=(%.1f,%.1f) pps=%.4f", pressed,
                                                      (double)off.x, (double)off.y, ed.pps_)); // TEMP-MOVE-DIAG
                 break;
             case G::PendingCorner: // the top corner of an edge: up/down only, the roof
@@ -1141,6 +1141,8 @@ public:
             const double applied = moveNotes(d->edits, *ed.eff_, moved, dt);
             tempMoveDiag(juce::String::formatted("Move nsel=%d dt=%.6f applied=%.6f", (int)moved.size(), dt,
                                                  applied)); // TEMP-MOVE-DIAG
+            if (applied == 0.0 && dt != 0.0) // TEMP-MOVE-DIAG
+                tempMoveDiag(juce::String("  blocked by: ") + whyLayoutInvalid(d->edits, *ed.eff_)); // TEMP-MOVE-DIAG
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;

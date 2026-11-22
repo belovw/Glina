@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 namespace glina {
@@ -159,6 +160,40 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
+}
+
+// TEMP-MOVE-DIAG: the first check the layout fails, with numbers. Remove later.
+std::string whyLayoutInvalid(const EditSet& e, const Analysis& a)
+{
+    const std::vector<NoteTimes> base = noteTimes(a, e);
+    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
+    const double lo = floorOf(base);
+    const Bounds bounds = boundsOf(a, base);
+    double last = lo;
+    char buf[256];
+    for (size_t i = 0; i < base.size(); ++i) {
+        const auto& n = base[i];
+        const double dur = n.outEnd - n.outStart, md = minDur(n);
+        if (dur < md - kTolSec) {
+            std::snprintf(buf, sizeof buf, "note %zu too short: dur %.6f < min %.6f", i, dur, md);
+            return buf;
+        }
+        if (n.outStart < last - kTolSec) {
+            std::snprintf(buf, sizeof buf, "note %zu starts %.6f before previous end %.6f", i, n.outStart, last);
+            return buf;
+        }
+        if (i < bounds.size() && (n.outStart < bounds[i].first - kTolSec || n.outEnd > bounds[i].second + kTolSec)) {
+            std::snprintf(buf, sizeof buf, "note %zu [%.6f, %.6f] outside bounds [%.6f, %.6f]", i, n.outStart,
+                          n.outEnd, bounds[i].first, bounds[i].second);
+            return buf;
+        }
+        last = n.outEnd;
+    }
+    if (!base.empty() && last > clipLen + kTolSec) {
+        std::snprintf(buf, sizeof buf, "last end %.6f after clip %.6f", last, clipLen);
+        return buf;
+    }
+    return "valid";
 }
 
 double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, double dt)
