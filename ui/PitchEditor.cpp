@@ -12,6 +12,21 @@
 namespace glina::ui {
 
 namespace {
+
+// The default scheme, with overrides from the settings file ("mouseOverrides", e.g. "w2=zv d6=pan").
+MouseScheme loadScheme()
+{
+    juce::PropertiesFile p(settings::options());
+    MouseScheme s = MouseScheme::presetA();
+    s.apply(p.getValue("mouseOverrides", "").toStdString());
+    return s;
+}
+
+// Modifier keys as a MouseScheme mask (Cmd counts as Ctrl).
+int schemeMask(const juce::ModifierKeys& m)
+{
+    return MouseScheme::maskOf(m.isAltDown(), m.isCtrlDown() || m.isCommandDown(), m.isShiftDown());
+}
 const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 bool isBlack(int m) { const int pc = ((m % 12) + 12) % 12; return pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10; }
 juce::String noteName(double midi)
@@ -182,7 +197,9 @@ public:
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
             "  Нитка между нотами — тянуть вверх/вниз: вверх плавнее, вниз резче (Shift — тоньше, двойной клик — как спето)\n"
             "  Клик по линейке — позиция воспроизведения;  правая кнопка — меню ноты\n"
-            "  Колесо — прокрутка;  Ctrl+колесо — масштаб;  Shift+колесо — по высоте\n"
+            "  Колесо — по высоте;  Alt+колесо — по времени;  Ctrl+колесо — масштаб по высоте;  Ctrl+Alt+колесо — масштаб по времени\n"
+            "  Ctrl+Shift+перетаскивание — сдвиг окна;  Ctrl+Alt+перетаскивание — масштаб окна\n"
+            "  Свои привязки — в файле настроек Glina (ключ mouseOverrides)\n"
             "\n"
             "КЛАВИШИ\n"
             "  ↑ / ↓ — полутон (Shift — 10 центов)      Q — к ладу\n"
@@ -709,6 +726,24 @@ public:
         g.setColour(link);
         g.fillPath(dots);
 
+        // Pins: a square at each end (target on this track, reference on the reference).
+        if (L.pinsOn) {
+            const auto& pins = ed.doc()->pins;
+            for (size_t i = 0; i < pins.size(); ++i)
+                for (int k = 0; k < 2; ++k) {
+                    const auto q = pinPoint(pins[i], k == 1);
+                    if (q.x < -1e8f) continue;
+                    const auto sq = juce::Rectangle<float>(7.f, 7.f).withCentre(q);
+                    g.setColour(k == 1 ? link : col::accent);
+                    g.fillRect(sq);
+                    if (ed.hoverPin_ == (int)i) { g.setColour(col::text); g.drawRect(sq.expanded(2.f), 1.5f); }
+                }
+        }
+        if (gesture == G::PinNew) {
+            g.setColour(link);
+            g.drawLine(juce::Line<float>(pinAnchor_, lastMouse), 1.5f);
+        }
+
         // Wrong notes F would move: "+2" / "−5" above the note.
         g.setFont(juce::FontOptions(11.f, juce::Font::bold));
         for (const auto& f : L.fixes) {
@@ -828,6 +863,10 @@ public:
     void mouseMove(const juce::MouseEvent& e) override
     {
         lastMouse = e.position;
+        bool refEnd = false;
+        const int pin = pinAt(e.position, refEnd);
+        if (pin != ed.hoverPin_) { ed.hoverPin_ = pin; repaint(); }
+        if (pin >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
         if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
         const int th = hitThread(e.position);
         if (th != hoverThread) { hoverThread = th; repaint(); }
@@ -843,6 +882,7 @@ public:
 
     void mouseExit(const juce::MouseEvent&) override
     {
+        ed.hoverPin_ = -1;
         if (hoverThread >= 0) { hoverThread = -1; repaint(); }
     }
 
@@ -856,6 +896,31 @@ public:
         if (e.position.y < kRulerH && e.position.x > kKeysW) {
             gesture = G::Ruler;
             if (ed.host_->canControlTransport()) ed.host_->setPlayheadSec(std::max(0.0, secOf(e.position.x)));
+            return;
+        }
+        const DragAct da = ed.scheme_.drag[(size_t)schemeMask(e.mods)];
+        if (da != DragAct::None && !e.mods.isPopupMenu() && canvas().contains(e.position)) {
+            gesture = da == DragAct::Pan ? G::ViewPan : G::ViewZoom;
+            viewFrom_ = e.position;
+            startScroll_ = ed.scroll_;
+            startLo_ = ed.lo_;
+            startHi_ = ed.hi_;
+            startPps_ = ed.pps_;
+            return;
+        }
+        bool refEnd = false;
+        const int pin = pinAt(e.position, refEnd);
+        if (pin >= 0 && !e.mods.isPopupMenu()) {
+            if (e.getNumberOfClicks() >= 2) { ed.removePin(pin); return; } // double click removes it
+            gesture = G::PinEnd;
+            pinIdx_ = (size_t)pin;
+            pinRefEnd_ = refEnd;
+            before = *ed.doc();
+            return;
+        }
+        if (e.mods.isAltDown() && !e.mods.isPopupMenu() && onOurThread(e.position)) {
+            gesture = G::PinNew; // a drag from this track's thread makes a pin (a click does nothing)
+            pinAnchor_ = e.position;
             return;
         }
         const int th = hitThread(e.position);
@@ -921,6 +986,42 @@ public:
         lastMouse = e.position;
         Document* d = ed.doc();
         if (d == nullptr || ed.eff_ == nullptr) return;
+        if (gesture == G::ViewPan || gesture == G::ViewZoom) {
+            const juce::Point<float> o = e.position - viewFrom_;
+            const double h = canvas().getHeight();
+            const double span = startHi_ - startLo_;
+            const double cx = canvas().getX(), cy = canvas().getY();
+            if (gesture == G::ViewPan) {
+                ed.scroll_ = std::max(std::min(0.0, startScroll_), startScroll_ - o.x / startPps_);
+                const double dm = o.y * span / h; // the content follows the pointer
+                ed.lo_ = startLo_ + dm;
+                ed.hi_ = startHi_ + dm;
+            } else {
+                // Time zoom keeps the time under the press point; pitch zoom keeps its pitch.
+                const double pps = juce::jlimit(2.0, 4000.0, startPps_ * std::pow(1.25, o.x / 40.0));
+                const double timeAt = startScroll_ + (viewFrom_.x - cx) / startPps_;
+                ed.pps_ = pps;
+                ed.scroll_ = std::max(std::min(0.0, startScroll_), timeAt - (viewFrom_.x - cx) / pps);
+                const double nspan = juce::jlimit(6.0, 60.0, span * std::pow(0.85, o.y / 40.0));
+                const double pitchAt = startHi_ - (viewFrom_.y - cy) * span / h;
+                const double frac = (startHi_ - pitchAt) / span;
+                ed.hi_ = pitchAt + frac * nspan;
+                ed.lo_ = ed.hi_ - nspan;
+            }
+            repaint();
+            ed.roll_->repaint();
+            return;
+        }
+        if (gesture == G::PinEnd) {
+            d->pins = before.pins;
+            if (glina::movePin(d->pins, pinIdx_, pinRefEnd_, secOf(e.position.x))) {
+                changed = true;
+                ed.refreshLinks();
+                repaint();
+            }
+            return;
+        }
+        if (gesture == G::PinNew) { repaint(); return; }
         const juce::Point<float> off = e.getOffsetFromDragStart().toFloat();
         switch (gesture) {
             case G::Ruler:
@@ -1010,6 +1111,18 @@ public:
         const G g0 = gesture;
         gesture = G::None;
         marquee = {};
+        if (g0 == G::ViewPan || g0 == G::ViewZoom) return;
+        if (g0 == G::PinEnd) {
+            if (changed) ed.commit(before);
+            else ed.refresh();
+            changed = false;
+            return;
+        }
+        if (g0 == G::PinNew) {
+            if (pinAnchor_.getDistanceFrom(e.position) > 4.f)
+                ed.addLinkPin(secOf(pinAnchor_.x), secOf(e.position.x));
+            return;
+        }
         if (g0 == G::Draw || g0 == G::Erase) {
             if (changed) ed.commit(before);
             changed = false;
@@ -1043,24 +1156,33 @@ public:
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
         const float dy = w.deltaY, dx = w.deltaX;
-        if (e.mods.isCommandDown() || e.mods.isCtrlDown()) {
-            if (e.mods.isShiftDown()) { // vertical zoom
-                const double anchor = ed.hi_ - (e.position.y - canvas().getY()) / semi();
-                const double span = juce::jlimit(6.0, 60.0, (ed.hi_ - ed.lo_) * std::pow(0.85, dy * 4));
-                const double frac = (ed.hi_ - anchor) / (ed.hi_ - ed.lo_);
-                ed.hi_ = anchor + frac * span;
-                ed.lo_ = ed.hi_ - span;
-            } else {
-                const double anchor = secOf(e.position.x);
-                ed.pps_ = juce::jlimit(2.0, 4000.0, ed.pps_ * std::pow(1.25, dy * 4));
-                ed.scroll_ = std::max(std::min(0.0, ed.scroll_), anchor - (e.position.x - canvas().getX()) / ed.pps_);
-            }
-        } else if (e.mods.isShiftDown()) {
+        const double span = ed.hi_ - ed.lo_;
+        switch (ed.scheme_.wheel[(size_t)schemeMask(e.mods)]) {
+        case WheelAct::None:
+            return;
+        case WheelAct::ScrollV: // pitch
             ed.lo_ += dy * 4;
             ed.hi_ += dy * 4;
-        } else {
+            break;
+        case WheelAct::ScrollH: { // time
             const float d = std::abs(dx) > std::abs(dy) ? -dx : dy;
             ed.scroll_ = std::max(std::min(0.0, ed.scroll_), ed.scroll_ - d * 300.0 / ed.pps_); // after a track switch the view may start before this clip
+            break;
+        }
+        case WheelAct::ZoomH: { // time, around the pointer
+            const double anchor = secOf(e.position.x);
+            ed.pps_ = juce::jlimit(2.0, 4000.0, ed.pps_ * std::pow(1.25, dy * 4));
+            ed.scroll_ = std::max(std::min(0.0, ed.scroll_), anchor - (e.position.x - canvas().getX()) / ed.pps_);
+            break;
+        }
+        case WheelAct::ZoomV: { // pitch range, around the pointer
+            const double anchor = ed.hi_ - (e.position.y - canvas().getY()) / semi();
+            const double nspan = juce::jlimit(6.0, 60.0, span * std::pow(0.85, dy * 4));
+            const double frac = (ed.hi_ - anchor) / span;
+            ed.hi_ = anchor + frac * nspan;
+            ed.lo_ = ed.hi_ - nspan;
+            break;
+        }
         }
         repaint();
     }
@@ -1155,7 +1277,7 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, PendingTilt, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase };
+    enum class G { None, Pending, PendingTilt, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase, PinEnd, PinNew, ViewPan, ViewZoom };
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
@@ -1167,6 +1289,37 @@ public:
     std::set<int> selBefore;
     juce::Rectangle<float> marquee;
     juce::Point<float> lastMouse;
+    size_t pinIdx_ = 0;             // PinEnd: the pin being moved
+    bool pinRefEnd_ = false;        // PinEnd: its reference end (else its target end)
+    juce::Point<float> viewFrom_;   // ViewPan / ViewZoom: where the drag started
+    double startScroll_ = 0, startLo_ = 0, startHi_ = 0, startPps_ = 1; // the view at that moment
+    juce::Point<float> pinAnchor_;  // PinNew: where the drag started, on this track's thread
+
+    // The pin end under p (index, reference end?); -1 when none.
+    int pinAt(juce::Point<float> p, bool& refEnd) const
+    {
+        if (!ed.links_.pinsOn || ed.doc() == nullptr) return -1;
+        const auto& pins = ed.doc()->pins;
+        for (size_t i = 0; i < pins.size(); ++i)
+            for (int k = 0; k < 2; ++k)
+                if (p.getDistanceFrom(pinPoint(pins[i], k == 1)) <= 6.f) { refEnd = k == 1; return (int)i; }
+        return -1;
+    }
+    // Where a pin end sits: on this track's thread (target) or the reference's (reference).
+    // Far off the roll when that thread has no pitch there.
+    juce::Point<float> pinPoint(const Pin& pin, bool refEnd) const
+    {
+        const float sh = ed.ghostShift_ ? (float)ghostShift(0) : 0.f;
+        const float m = refEnd ? ed.linkRefMidi(pin.ref) + sh : ed.linkTgtMidi(pin.tgt);
+        if (m <= 0.f) return {-1e9f, -1e9f};
+        return refEnd ? juce::Point<float>(xOf(pin.ref), yOf(m)) : juce::Point<float>(xOf(pin.tgt), yOf(m));
+    }
+    // Whether p lies on this track's thread (a pitch near it).
+    bool onOurThread(juce::Point<float> p) const
+    {
+        const float m = ed.linkTgtMidi(secOf(p.x));
+        return ed.showLinks_ && ed.links_.ok && m > 0.f && std::abs(yOf(m) - p.y) <= 8.f;
+    }
 };
 
 // =====================================================================================
@@ -1924,6 +2077,7 @@ private:
 PitchEditor::PitchEditor()
 {
     col::loadTheme(); // the plug-in has no app start-up: read the setting here
+    scheme_ = loadScheme();
     lnf_.applyTheme();
     setLookAndFeel(&lnf_);
     themeWatch_ = std::make_unique<col::ThemeWatcher>([this] { themeChanged(); });
@@ -2393,7 +2547,10 @@ void PitchEditor::refreshLinks()
     if (!host_->thread(gv.id, ref) || ref.size() < 4) return;
     const double len = TimeMap::build(*eff_, doc()->edits).inToOut((double)eff_->numSamples) / eff_->sampleRate;
     links_.tgt = threadOf(*eff_, doc()->edits, nullptr, 0.0, len);
-    links_.warp = alignThreads(links_.tgt, ref, {}, {}, &links_.info);
+    // The document's pins apply only to the reference they were made with.
+    links_.pinsOn = doc()->pinRef == gv.id.toStdString();
+    const std::vector<Pin> none;
+    links_.warp = alignThreads(links_.tgt, ref, {}, links_.pinsOn ? doc()->pins : none, &links_.info);
     links_.ref = std::move(ref);
     links_.name = gv.name;
     links_.ok = !links_.warp.empty();
@@ -2410,14 +2567,37 @@ void PitchEditor::applyLinkFixes()
     edit([&](Document& d) { applyPitchFix(d.edits, fixes); });
 }
 
-float PitchEditor::linkRefMidi(double t) const
+static float midiNear(const std::vector<ThreadFrame>& r, double t)
 {
-    const auto& r = links_.ref;
     if (r.empty()) return 0.f;
     const auto it = std::lower_bound(r.begin(), r.end(), t, [](const ThreadFrame& f, double x) { return f.t < x; });
     if (it == r.end()) return r.back().t - t < 0.015 ? r.back().midi : 0.f;
     if (it != r.begin() && t - std::prev(it)->t < it->t - t) return std::prev(it)->midi;
     return it->midi;
+}
+
+float PitchEditor::linkRefMidi(double t) const { return midiNear(links_.ref, t); }
+float PitchEditor::linkTgtMidi(double t) const { return midiNear(links_.tgt, t); }
+
+// A pin: this clip's time -> the reference's time, both on the roll's axis (seconds).
+void PitchEditor::addLinkPin(double tgtSec, double refSec)
+{
+    Document* d = doc();
+    if (d == nullptr || !links_.ok || ghosts_.empty()) return;
+    const std::string id = ghosts_.front().id.toStdString();
+    std::vector<Pin> pins = d->pins;
+    if (d->pinRef != id) pins.clear(); // pins of another reference are dropped
+    if (!glina::addPin(pins, Pin{tgtSec, refSec})) {
+        if (host_ != nullptr) host_->log(T("булавка не поставлена: она встала бы поперёк соседней"));
+        return;
+    }
+    edit([&](Document& doc) { doc.pins = pins; doc.pinRef = id; });
+}
+
+void PitchEditor::removePin(int i)
+{
+    hoverPin_ = -1;
+    edit([&](Document& d) { if (i >= 0 && (size_t)i < d.pins.size()) d.pins.erase(d.pins.begin() + i); });
 }
 
 void PitchEditor::toggleLinks()
@@ -2836,7 +3016,11 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         selectStep(code == juce::KeyPress::rightKey ? 1 : -1, mods.isShiftDown());
         return true;
     }
-    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { resetNotes(); return true; }
+    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) {
+        if (hoverPin_ >= 0) { removePin(hoverPin_); return true; }
+        resetNotes();
+        return true;
+    }
     if (code == juce::KeyPress::homeKey) {
         scroll_ = 0;
         roll_->repaint();

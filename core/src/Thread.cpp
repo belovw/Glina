@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -33,6 +34,35 @@ std::vector<ThreadFrame> threadOf(const Analysis& a, const EditSet& e, const std
         out.push_back(tf);
     }
     return out;
+}
+
+namespace {
+// Pins closer than this (seconds) count as the same point.
+constexpr double kPinEps = 1e-3;
+}
+
+bool addPin(std::vector<Pin>& pins, const Pin& p)
+{
+    size_t k = 0;
+    while (k < pins.size() && pins[k].tgt < p.tgt) ++k;
+    if (k < pins.size() && pins[k].tgt - p.tgt < kPinEps) return false;      // on a pin already
+    if (k > 0 && p.tgt - pins[k - 1].tgt < kPinEps) return false;
+    if (k > 0 && p.ref <= pins[k - 1].ref + kPinEps) return false;           // would cross a neighbour
+    if (k < pins.size() && p.ref >= pins[k].ref - kPinEps) return false;
+    pins.insert(pins.begin() + (std::ptrdiff_t)k, p);
+    return true;
+}
+
+bool movePin(std::vector<Pin>& pins, size_t i, bool refEnd, double sec)
+{
+    if (i >= pins.size()) return false;
+    // Neighbours in target order; the reference order follows it (addPin keeps that).
+    const double lo = i > 0 ? (refEnd ? pins[i - 1].ref : pins[i - 1].tgt) + kPinEps : -1e300;
+    const double hi = i + 1 < pins.size() ? (refEnd ? pins[i + 1].ref : pins[i + 1].tgt) - kPinEps : 1e300;
+    if (lo > hi) return false;
+    const double v = std::clamp(sec, lo, hi);
+    (refEnd ? pins[i].ref : pins[i].tgt) = v;
+    return true;
 }
 
 double Warp::map(double t) const

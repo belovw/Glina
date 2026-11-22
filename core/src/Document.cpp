@@ -136,6 +136,13 @@ std::string serialize(const Document& d)
         else for (uint8_t m : v.noteMask) o << (m ? '1' : '0');
         o << '\n';
     }
+    // Links to a reference (only when made): records an older reader does not know are skipped.
+    if (!d.pins.empty()) {
+        o << "pinref " << std::quoted(d.pinRef) << '\n';
+        o << "pins " << d.pins.size();
+        for (const Pin& p : d.pins) o << ' ' << p.tgt << ' ' << p.ref;
+        o << '\n';
+    }
     o << "end\n";
     return o.str();
 }
@@ -192,6 +199,14 @@ bool deserialize(const std::string& text, Document& out)
         } else if (tag == "autovib") {
             readVib(d.edits.autoVibrato);
             in >> d.edits.vibratoSeed;
+        } else if (tag == "pinref") {
+            in >> std::quoted(d.pinRef);
+        } else if (tag == "pins") {
+            size_t c = 0;
+            in >> c;
+            if (c > 1000000) return false;
+            d.pins.resize(c);
+            for (Pin& p : d.pins) in >> p.tgt >> p.ref;
         } else if (tag == "draw") {
             DrawRun r;
             size_t c = 0;

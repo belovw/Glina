@@ -8,6 +8,8 @@
 
 #include "glina/Renderer.h"
 
+#include "MouseScheme.h"
+
 #include <memory>
 #include <set>
 
@@ -90,6 +92,9 @@ private:
     void toggleLinks();
     void refreshLinks();
     float linkRefMidi(double t) const; // reference pitch at time t (0 = none)
+    float linkTgtMidi(double t) const; // this track's pitch at time t (0 = none)
+    void addLinkPin(double tgtSec, double refSec); // a pin between this track and the reference
+    void removePin(int i);
     void pollTracks();
     void switchTrack(const juce::String& id);
     void toggleTracks();
@@ -154,8 +159,11 @@ private:
     IconButton shiftBtn_;   // visual +3 semitone shift of the ghosts
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     bool showLinks_ = false;
+    MouseScheme scheme_;                             // wheel and drag actions by modifier keys
+    int hoverPin_ = -1;                              // pin end under the pointer (Delete removes it)
     struct Links {
         bool ok = false;
+        bool pinsOn = false;               // the document's pins are for this reference
         juce::String name;                 // the reference track
         std::vector<ThreadFrame> tgt, ref; // this clip's thread, the reference's (this clip's timeline)
         Warp warp;

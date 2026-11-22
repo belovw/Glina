@@ -1071,6 +1071,32 @@ static void testThreadFix()
 
 
 // Track view: two items of one track (the second off the frame grid, trimmed) as one clip.
+// Pins between a clip and its reference: kept sorted, never crossing a neighbour, saved with the document.
+static void testPins()
+{
+    std::printf("[pins] add / move keep the order; round trip\n");
+    std::vector<Pin> p;
+    CHECK(addPin(p, {1.0, 2.0}), "first pin");
+    CHECK(addPin(p, {3.0, 4.0}), "later pin");
+    CHECK(addPin(p, {2.0, 3.0}), "pin between");
+    CHECK(p.size() == 3 && p[1].tgt == 2.0, "sorted insert");
+    CHECK(!addPin(p, {2.0005, 3.5}), "pin on a pin accepted");
+    CHECK(!addPin(p, {2.5, 2.5}), "pin crossing its neighbour accepted");
+    CHECK(movePin(p, 1, true, 99.0) && p[1].ref < p[2].ref, "ref end passes the next pin");
+    CHECK(p[1].ref < p[2].ref - 5e-4, "ref end not clamped to the next pin");
+    CHECK(movePin(p, 1, false, -5.0) && p[1].tgt > p[0].tgt, "target end passes the previous pin");
+    CHECK(!movePin(p, 9, true, 1.0), "missing pin moved");
+
+    Document d;
+    d.pins = p;
+    d.pinRef = "Track 2 \"lead\"";
+    Document r;
+    CHECK(deserialize(serialize(d), r), "pins do not load");
+    CHECK(r.pins.size() == 3 && r.pins[2].ref == p[2].ref, "pins not kept");
+    CHECK(r.pinRef == d.pinRef, "reference name not kept: '%s'", r.pinRef.c_str());
+    CHECK(serialize(r) == serialize(d), "pins round trip differs");
+}
+
 static void testTrackView()
 {
     std::printf("[track view] items of a track as one clip: notes, round trip, edits back to their item\n");
@@ -1235,6 +1261,7 @@ int main()
     testThreadAlign();
     testThreadFix();
     testTrackView();
+    testPins();
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
         const test::SynthResult s = test::synthesize(test::demoMelody(), sr);

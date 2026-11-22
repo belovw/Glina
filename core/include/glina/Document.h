@@ -4,6 +4,7 @@
 #pragma once
 
 #include "glina/Harmony.h"
+#include "glina/Thread.h"
 #include "glina/Types.h"
 
 #include <atomic>
@@ -23,6 +24,10 @@ struct Document {
     double tempoBpm = 0;     // 0 = show seconds
     int beatsPerBar = 4;
     double barOffsetSec = 0; // where bar 1 starts
+    // Links to the reference track (see Thread.h): this clip's time -> the reference's time.
+    // pinRef names the reference they were made with; other references ignore them.
+    std::vector<Pin> pins;   // sorted by tgt
+    std::string pinRef;
 
     Key key(const Analysis& a) const;
     // Correction target for a pitch: nearest scale note (or semitone in chromatic mode).
