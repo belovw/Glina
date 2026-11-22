@@ -257,8 +257,8 @@ Key detectKey(const Analysis& a)
         double rot[12];
         for (int i = 0; i < 12; ++i) rot[i] = hist[(i + t) % 12];
         const double cM = corr(rot, maj), cm = corr(rot, mnr);
-        if (cM > best.confidence) best = {t, false, cM};
-        if (cm > best.confidence) best = {t, true, cm};
+        if (cM > best.confidence) { best = Key{}; best.tonic = t; best.minor = false; best.confidence = cM; }
+        if (cm > best.confidence) { best = Key{}; best.tonic = t; best.minor = true; best.confidence = cm; }
     }
     return best;
 }
