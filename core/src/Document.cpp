@@ -17,8 +17,10 @@ Key Document::key(const Analysis& a) const
     Key k = a.key;
     if (keyTonic >= 0) k.tonic = keyTonic % 12;
     if (keyMode >= 0) {
-        k.minor = keyMode >= 1;
-        k.minorForm = keyMode >= 1 ? keyMode - 1 : 0;
+        // 0 major, 1 natural minor, 2 melodic, 3 harmonic, 4 pure major, 5 pure minor
+        k.just = keyMode >= 4;
+        k.minor = keyMode == 1 || keyMode == 2 || keyMode == 3 || keyMode == 5;
+        k.minorForm = keyMode == 2 ? 1 : keyMode == 3 ? 2 : 0;
     } else if (keyTonic >= 0) {
         k.minor = keyMinor;
         k.minorForm = 0;
@@ -175,7 +177,7 @@ bool deserialize(const std::string& text, Document& out)
             d.keyMinor = mn != 0; d.chromatic = ch != 0;
         } else if (tag == "mode") {
             in >> d.keyMode >> d.snapAmount;
-            d.keyMode = std::clamp(d.keyMode, -1, 3);
+            d.keyMode = std::clamp(d.keyMode, -1, 5);
             d.snapAmount = std::clamp(d.snapAmount, 0.0, 1.0);
         } else if (tag == "lead") {
             in >> d.leadGainDb;

@@ -20,7 +20,7 @@ struct Document {
     bool keyMinor = false;
     bool chromatic = false;  // correct to semitones instead of the scale
     // Scale mode when set: -1 = as before (major/minor from keyMinor or the analysis),
-    // 0 major, 1 natural minor, 2 melodic minor, 3 harmonic minor.
+    // 0 major, 1 natural minor, 2 melodic minor, 3 harmonic minor, 4 pure major, 5 pure minor.
     int keyMode = -1;
     double snapAmount = 1.0; // share of the way "К ладу" moves a note to its step, 0..1
     double leadGainDb = 0;   // lead level in the mix (harmonies have their own)

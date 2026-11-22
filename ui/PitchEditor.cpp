@@ -39,12 +39,17 @@ juce::String noteName(double midi)
     if (cents != 0) s << (cents > 0 ? " +" : " ") << cents << T("¢");
     return s;
 }
+// Whether the lane of semitone m (its rows span m-0.5 .. m+0.5) holds a degree of the key.
+// Pure degrees (cents) land in the lane nearest to them; the tempered ones are exact.
 bool inScale(int m, const Key& k)
 {
-    int steps[7];
-    scaleSteps(k, steps);
-    const int pc = ((m - k.tonic) % 12 + 12) % 12;
-    for (int s : steps) if (s == pc) return true;
+    double cents[7];
+    scaleCents(k, cents);
+    const double rel = m - k.tonic;
+    for (double c : cents) {
+        const double diff = rel - c / 100.0;
+        if (std::abs(diff - 12.0 * std::round(diff / 12.0)) <= 0.5 + 1e-9) return true;
+    }
     return false;
 }
 
@@ -315,12 +320,16 @@ public:
         Document* d = ed.doc();
         const Analysis* A = ed.eff_;
         const Key key = (A && d) ? d->key(*A) : Key{};
-        const bool showScale = A && d && !d->chromatic;
+        // Lanes: in the key light, out of it dark (so it is clear where notes can be pulled);
+        // chromatic: every other semitone light. Without a key: the piano pattern.
+        const bool keyed = A && d && !d->chromatic;
+        const bool chroma = A && d && d->chromatic;
 
         for (int m = (int)std::floor(ed.lo_); m <= (int)std::ceil(ed.hi_); ++m) {
             const float y = yOf(m + 0.5);
-            g.setColour(isBlack(m) ? col::laneBlack : col::laneWhite);
-            if (showScale && inScale(m, key)) g.setColour(col::laneScale.withMultipliedBrightness(isBlack(m) ? 0.92f : 1.f));
+            if (keyed) g.setColour(inScale(m, key) ? col::laneScale : col::laneBlack);
+            else if (chroma) g.setColour(((m % 2) + 2) % 2 == 0 ? col::laneScale : col::laneBlack);
+            else g.setColour(isBlack(m) ? col::laneBlack : col::laneWhite);
             g.fillRect(c.getX(), y, c.getWidth(), s);
             g.setColour(isBlack(m) ? col::keyBlack : col::keyWhite);
             g.fillRect(0.f, y, kKeysW - 2, s - 1);
@@ -334,6 +343,19 @@ public:
                 g.setColour(col::grid);
                 g.drawHorizontalLine((int)(y + s), c.getX(), c.getRight());
             }
+        }
+
+        // Pure degrees sit between the lanes' centres: a tick at the exact height of each one.
+        if (keyed && key.just) {
+            double cents[7];
+            scaleCents(key, cents);
+            g.setColour(col::text.withAlpha(0.55f));
+            for (int oct = (int)std::floor(ed.lo_ / 12.0) - 1; oct <= (int)std::ceil(ed.hi_ / 12.0) + 1; ++oct)
+                for (double c7 : cents) {
+                    const double p = 12.0 * oct + key.tonic + c7 / 100.0;
+                    if (p < ed.lo_ || p > ed.hi_) continue;
+                    g.fillRect((float)c.getRight() - 14.f, yOf(p) - 0.75f, 14.f, 1.5f);
+                }
         }
 
         drawRuler(g);
@@ -2258,11 +2280,14 @@ PitchEditor::PitchEditor()
         const int id = modeBox_.getSelectedId();
         if (id == 0 || doc() == nullptr) return;
         const bool detMinor = eff_ != nullptr && eff_->key.minor;
-        // 1 Auto, 2 Chromatic (semitones, no key), 3 major, 4 natural minor, 5 melodic, 6 harmonic
+        // 1 Auto, 2 Chromatic (semitones, no key), 3..6 tempered major/minor modes, 7..8 pure major/minor
         edit([id, detMinor](Document& d) {
             d.chromatic = id == 2;
             if (id == 1) { d.keyMode = -1; d.keyMinor = detMinor; }
-            else if (id >= 3) { d.keyMode = id - 3; d.keyMinor = d.keyMode >= 1; }
+            else if (id >= 3) {
+                d.keyMode = id - 3;
+                d.keyMinor = d.keyMode == 1 || d.keyMode == 2 || d.keyMode == 3 || d.keyMode == 5;
+            }
         });
     };
     addAndMakeVisible(modeBox_);
@@ -2419,6 +2444,8 @@ void PitchEditor::refresh()
         modeBox_.addItem(T("Минор натуральный"), 4);
         modeBox_.addItem(T("Минор мелодический"), 5);
         modeBox_.addItem(T("Минор гармонический"), 6);
+        modeBox_.addItem(T("Натуральный мажор"), 7);
+        modeBox_.addItem(T("Натуральный минор"), 8);
         modeBox_.setSelectedId(d->chromatic ? 2 : d->keyMode >= 0 ? d->keyMode + 3 : 1, juce::dontSendNotification);
 
         if (!snapSlider_.isMouseButtonDown()) snapSlider_.setValue(d->snapAmount * 100.0, juce::dontSendNotification);

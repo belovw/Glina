@@ -50,6 +50,7 @@ struct Key {
     int tonic = 0;          // 0 = C, 1 = C#, ... 11 = B
     bool minor = false;
     int minorForm = 0;      // minor only: 0 natural, 1 melodic, 2 harmonic
+    bool just = false;      // natural tuning: pure intervals (ratios), not equal steps
     double confidence = 0;  // correlation with the best key profile
     std::string name() const;
 };

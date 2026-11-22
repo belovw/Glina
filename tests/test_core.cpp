@@ -302,6 +302,16 @@ static void testScaleModes()
     mel.tonic = nat.tonic = 9; mel.minor = nat.minor = true;
     mel.minorForm = 1; nat.minorForm = 0;
     CHECK(nearestTarget(6.4, mel, true) == 6.0 && nearestTarget(6.4, nat, true) == 7.0, "F# in melodic minor only");
+    // Pure major third above C: 386.3 cents, not 400; the tempered key still snaps to 4.
+    Key pure, tempered;
+    pure.just = true;
+    CHECK(std::abs(nearestTarget(3.9, pure, true) - 3.86314) < 1e-4, "pure third %.5f", nearestTarget(3.9, pure, true));
+    CHECK(nearestTarget(3.9, tempered, true) == 4.0, "tempered third");
+    Document dp;
+    dp.keyMode = 4;
+    CHECK(dp.key(a).just && !dp.key(a).minor, "pure major mode");
+    dp.keyMode = 5;
+    CHECK(dp.key(a).just && dp.key(a).minor, "pure minor mode");
 }
 
 // Output time (s) of the analysed onset nearest to `want` in a re-analysis.
