@@ -169,6 +169,27 @@ std::vector<juce::ARARegionSequence*> PluginClip::glinaSequences() const
     return out;
 }
 
+juce::ARARegionSequence* PluginClip::sequenceOfTrack(const reaper::TrackInfo& t) const
+{
+    juce::ARARegionSequence* best = nullptr;
+    int bestScore = 0;
+    for (auto* seq : glinaSequences()) {
+        int hits = 0;
+        for (auto* r : glinaItemsOf(seq))
+            for (double s : t.itemStarts)
+                if (std::abs(r->getStartInPlaybackTime() - s) < 0.005) { ++hits; break; }
+        const char* sn = (const char*)seq->getName();
+        const bool sameName = t.name.isNotEmpty() && sn != nullptr && t.name == juce::String::fromUTF8(sn);
+        if (hits == 0 && !sameName) continue;
+        // Takes recorded at once on several tracks start at the same places: the name, then the
+        // track number decide between them.
+        const bool sameNumber = t.number > 0 && seq->getOrderIndex() == t.number - 1;
+        const int score = hits * 4 + (sameName ? 2 : 0) + (sameNumber ? 1 : 0);
+        if (score > bestScore) { bestScore = score; best = seq; }
+    }
+    return best;
+}
+
 juce::ARAPlaybackRegion* PluginClip::itemAt(const std::vector<juce::ARAPlaybackRegion*>& items) const
 {
     if (items.empty()) return nullptr;
@@ -367,43 +388,62 @@ GlinaEditor::~GlinaEditor()
 
 // The item this instance sits on is the one it edits. The host's selection at open time is
 // the last item the user worked on, so it must not replace that item.
-// A Take FX instance renders one region. A Track FX instance may render several (the track's
-// items): it takes the one under the play position, or the first one when none is there.
+// Which item the editor opens on.
+// - Take FX: the instance renders its own take, so that take (several regions: the one under the cursor).
+// - Track FX: REAPER hands the instance no regions at all. Its track is found through REAPER (the
+//   track this FX sits on) among the ARA tracks; the item under the edit cursor opens, or the
+//   nearest one. The view is centred on the cursor either way.
+// REAPER names the project and the track a moment after the FX is created, so this waits up to 3 s.
 bool GlinaEditor::pinOwnRegion()
 {
     if (ownPinned_ || clip_ == nullptr) return ownPinned_;
-    auto* pr = proc_.getPlaybackRenderer<juce::ARAPlaybackRenderer>();
-    if (pr == nullptr) return false;
-    const auto regions = pr->getPlaybackRegions<juce::ARAPlaybackRegion>();
-    if (regions.empty()) return false;
-    // REAPER names its project a moment after the FX is created: wait for it, then take the edit
-    // cursor (the transport's playhead is not updated while stopped).
-    if (!proc_.hasReaperProject() && juce::Time::getMillisecondCounter() - openedMs_ < 3000) return false;
-    const double cursor = proc_.editCursorSec();
+    const bool waited = juce::Time::getMillisecondCounter() - openedMs_ >= 3000;
+    if (!proc_.hasReaperProject() && !waited) return false;
+    const double cursor = proc_.editCursorSec(); // the transport's playhead is not updated while stopped
     const double song = std::isfinite(cursor) ? cursor : proc_.playheadSec.load();
     auto inside = [song](juce::ARAPlaybackRegion* r) {
         return song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime();
     };
-    juce::ARAPlaybackRegion* pick = regions.front();
-    for (auto* r : regions)
-        if (inside(r)) { pick = r; break; }
-    // The instance may be given only one region of the track. The other items are reached through
-    // its region sequence: the one under the play position wins.
-    size_t trackItems = 0;
-    if (auto* seq = pick->getRegionSequence()) {
+    std::vector<juce::ARAPlaybackRegion*> regions;
+    if (auto* pr = proc_.getPlaybackRenderer<juce::ARAPlaybackRenderer>())
+        regions = pr->getPlaybackRegions<juce::ARAPlaybackRegion>();
+
+    juce::ARAPlaybackRegion* pick = nullptr;
+    juce::String from;
+    if (!regions.empty()) {
+        pick = regions.front();
+        for (auto* r : regions)
+            if (inside(r)) { pick = r; break; }
+        from = T("FX на тэйке, регионов ") + juce::String((int)regions.size());
+    } else {
+        auto giveUp = [&](const juce::String& why) {
+            if (!waited) return false; // REAPER may not have told us yet
+            ownPinned_ = true;         // stop trying: the editor stays where it is
+            clip_->log(T("открыт: ") + why + T(", остаётся первый трек"));
+            return false;
+        };
+        reaper::TrackInfo t;
+        if (!proc_.reaperTrack(t)) return giveUp(T("трек FX не известен (нет REAPER?)"));
+        auto* seq = clip_->sequenceOfTrack(t);
+        if (seq == nullptr)
+            return giveUp(T("трек «") + t.name + T("» №") + juce::String(t.number) + T(" не найден среди треков с Glina"));
         const auto items = glinaItemsOf(seq);
-        trackItems = items.size();
-        if (!inside(pick))
-            for (auto* r : items)
-                if (inside(r)) { pick = r; break; }
+        double best = std::numeric_limits<double>::max();
+        for (auto* r : items) {
+            const double d = inside(r) ? 0.0
+                                       : std::min(std::abs(song - r->getStartInPlaybackTime()),
+                                                  std::abs(song - r->getEndInPlaybackTime()));
+            if (d < best) { best = d; pick = r; }
+        }
+        if (pick == nullptr) return giveUp(T("на треке «") + t.name + T("» нет айтемов с Glina"));
+        from = T("FX на треке «") + t.name + T("» №") + juce::String(t.number) + T(", айтемов ") +
+               juce::String((int)items.size()) + (best > 0 ? T(", ближайший к курсору") : T(", под курсором"));
     }
     clip_->setRegion(pick);
     ownPinned_ = true;
     centreOnOpen_ = true; // the view opens at the cursor, even when no item is there
     openSec_ = song;
-    clip_->log(T("открыт на айтеме: регионов инстанса ") + juce::String((int)regions.size()) +
-               T(", айтемов трека ") + juce::String((int)trackItems) +
-               T(", курсор ") + juce::String(song, 3) + T(" с"));
+    clip_->log(T("открыт: ") + from + T(", курсор ") + juce::String(song, 3) + T(" с"));
     return true;
 }
 

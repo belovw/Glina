@@ -36,10 +36,20 @@ namespace {
 using FnEnumProjects = void* (*)(int idx, char* projfnOutOptional, int projfnOutOptional_sz);
 using FnIsProjectDirty = int (*)(void* proj);
 using FnGetCursorPositionEx = double (*)(void* proj);
+using FnCountTrackMediaItems = int (*)(void* track);
+using FnGetTrackMediaItem = void* (*)(void* track, int itemidx);
+using FnGetMediaItemInfo_Value = double (*)(void* item, const char* parmname);
+using FnGetMediaTrackInfo_Value = double (*)(void* track, const char* parmname);
+using FnGetTrackName = bool (*)(void* track, char* bufOut, int bufOut_sz);
 
 std::atomic<FnEnumProjects> enumProjects { nullptr };
 std::atomic<FnIsProjectDirty> isProjectDirty { nullptr };
 std::atomic<FnGetCursorPositionEx> getCursorPositionEx { nullptr };
+std::atomic<FnCountTrackMediaItems> countTrackMediaItems { nullptr };
+std::atomic<FnGetTrackMediaItem> getTrackMediaItem { nullptr };
+std::atomic<FnGetMediaItemInfo_Value> getMediaItemInfoValue { nullptr };
+std::atomic<FnGetMediaTrackInfo_Value> getMediaTrackInfoValue { nullptr };
+std::atomic<FnGetTrackName> getTrackName { nullptr };
 
 IReaperHostApplication* rh(void* p) { return static_cast<IReaperHostApplication*>(p); }
 
@@ -62,11 +72,26 @@ void HostLink::attach(Steinberg::FUnknown* hostContext)
         isProjectDirty = reinterpret_cast<FnIsProjectDirty>(rh(obj)->getReaperApi("IsProjectDirty"));
     if (getCursorPositionEx.load() == nullptr)
         getCursorPositionEx = reinterpret_cast<FnGetCursorPositionEx>(rh(obj)->getReaperApi("GetCursorPositionEx"));
+    if (countTrackMediaItems.load() == nullptr)
+        countTrackMediaItems = reinterpret_cast<FnCountTrackMediaItems>(rh(obj)->getReaperApi("CountTrackMediaItems"));
+    if (getTrackMediaItem.load() == nullptr)
+        getTrackMediaItem = reinterpret_cast<FnGetTrackMediaItem>(rh(obj)->getReaperApi("GetTrackMediaItem"));
+    if (getMediaItemInfoValue.load() == nullptr)
+        getMediaItemInfoValue = reinterpret_cast<FnGetMediaItemInfo_Value>(rh(obj)->getReaperApi("GetMediaItemInfo_Value"));
+    if (getMediaTrackInfoValue.load() == nullptr)
+        getMediaTrackInfoValue = reinterpret_cast<FnGetMediaTrackInfo_Value>(rh(obj)->getReaperApi("GetMediaTrackInfo_Value"));
+    if (getTrackName.load() == nullptr)
+        getTrackName = reinterpret_cast<FnGetTrackName>(rh(obj)->getReaperApi("GetTrackName"));
 }
 
 void* HostLink::project() const
 {
     return reaperHost_ != nullptr ? rh(reaperHost_)->getReaperParent(3) : nullptr;
+}
+
+void* HostLink::track() const
+{
+    return reaperHost_ != nullptr ? rh(reaperHost_)->getReaperParent(1) : nullptr;
 }
 
 bool available() { return enumProjects.load() != nullptr; }
@@ -108,6 +133,25 @@ double cursorSec(void* project)
 {
     const auto f = getCursorPositionEx.load();
     return f != nullptr && project != nullptr ? f(project) : std::numeric_limits<double>::quiet_NaN();
+}
+
+bool trackInfo(void* track, TrackInfo& out)
+{
+    const auto count = countTrackMediaItems.load();
+    const auto item = getTrackMediaItem.load();
+    const auto info = getMediaItemInfoValue.load();
+    if (track == nullptr || count == nullptr || item == nullptr || info == nullptr) return false;
+    out = TrackInfo{};
+    if (const auto f = getTrackName.load()) {
+        std::vector<char> buf(512, 0);
+        f(track, buf.data(), (int)buf.size()); // false for an unnamed track, which still gets "Track N"
+        out.name = juce::String::fromUTF8(buf.data());
+    }
+    if (const auto f = getMediaTrackInfoValue.load()) out.number = (int)f(track, "IP_TRACKNUMBER");
+    const int n = count(track);
+    for (int i = 0; i < n; ++i)
+        if (void* it = item(track, i)) out.itemStarts.push_back(info(it, "D_POSITION"));
+    return true;
 }
 
 } // namespace glina::plugin::reaper

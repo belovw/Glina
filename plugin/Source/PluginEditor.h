@@ -21,6 +21,9 @@ public:
     bool valid() const { return mod_ != nullptr; }
     // Keeps the edited track after the host replaced its item or switched its take.
     void followTrack();
+    // The ARA track (with Glina items) that is this REAPER track: matched by where its items start,
+    // then by name and number. Null if none matches.
+    juce::ARARegionSequence* sequenceOfTrack(const reaper::TrackInfo& t) const;
 
     const Analysis* analysis() const override;
     Document& document() override { return mod_ != nullptr ? mod_->doc : dummyDoc_; }

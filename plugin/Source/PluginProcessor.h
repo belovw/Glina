@@ -42,6 +42,8 @@ public:
     // REAPER's edit cursor in project seconds; NaN until REAPER tells us which project we are in.
     double editCursorSec() const { return reaper::cursorSec(hostLink_.project()); }
     bool hasReaperProject() const { return hostLink_.project() != nullptr; }
+    // The REAPER track this FX sits on; false outside REAPER or before REAPER names it.
+    bool reaperTrack(reaper::TrackInfo& out) const { return reaper::trackInfo(hostLink_.track(), out); }
 
 protected:
     void didBindToARA() noexcept override;
