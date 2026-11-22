@@ -2416,6 +2416,7 @@ bool PitchEditor::centreOnProjectSec(double projectSec)
     if (host_ == nullptr || roll_->getWidth() <= 0) return false;
     const double visible = roll_->canvas().getWidth() / pps_;
     scroll_ = std::max(0.0, host_->fromProjectSec(projectSec) - visible * 0.5);
+    fitted_ = true; // the view is placed on purpose: a later fit to the first note would undo it
     roll_->repaint();
     return true;
 }
