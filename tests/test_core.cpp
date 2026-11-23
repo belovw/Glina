@@ -871,6 +871,17 @@ static void testDocumentV4(const Analysis& a)
     CHECK(deserialize(plain, p) && !p.edits.autoVibrato.active() && p.edits.notes[2].tiltR == 0, "v3 loads with features off");
 }
 
+// The worst overlap of any note with any earlier one (independent of the library's checks).
+static double worstOverlap(const std::vector<NoteTimes>& t)
+{
+    double w = 0, latest = -1e9;
+    for (const NoteTimes& n : t) {
+        w = std::max(w, latest - n.outStart);
+        latest = std::max(latest, n.outEnd);
+    }
+    return w;
+}
+
 static void testTrackViewCut()
 {
     std::printf("[track view] a note cut at an item's edge keeps its place in time\n");
@@ -916,15 +927,137 @@ static void testTrackViewCut()
     CHECK(std::abs(got - expected) < 1e-6, "the part in item B continues the note (%.6f vs %.6f)", got, expected);
 }
 
-// The worst overlap of any note with any earlier one (independent of the library's checks).
-static double worstOverlap(const std::vector<NoteTimes>& t)
+static void testSeparations(const Analysis& a)
 {
-    double w = 0, latest = -1e9;
-    for (const NoteTimes& n : t) {
-        w = std::max(w, latest - n.outStart);
-        latest = std::max(latest, n.outEnd);
+    std::printf("[separations] soft: the neighbour follows; hard: it stays; saved with the project\n");
+    const int n = (int)a.notes.size();
+    EditSet e0;
+    e0.notes.resize((size_t)n);
+    const auto t = noteTimes(a, e0);
+    int touch = -1, gap = -1; // a touching pair (b, b+1) and a pair with a gap, both away from the ends
+    for (int b = 1; b + 2 < n; ++b) {
+        const double g = t[(size_t)b + 1].outStart - t[(size_t)b].outEnd;
+        if (touch < 0 && std::abs(g) < 0.005) touch = b;
+        if (gap < 0 && g > 0.03 && g < 0.5) gap = b;
     }
-    return w;
+    std::printf("  touching pair at %d, pair with a gap at %d\n", touch, gap);
+    if (touch < 0 || gap < 0) { CHECK(false, "demo melody has both kinds of pairs"); return; }
+
+    CHECK(softSeparation(e0, a, touch), "touching notes: soft by default");
+    CHECK(!softSeparation(e0, a, gap), "notes with a gap: hard by default");
+
+    { // soft (default): moving the right note drags the left note's end
+        EditSet e = e0;
+        const double applied = moveNotes(e, a, {touch + 1}, 0.02);
+        const auto u = noteTimes(a, e);
+        CHECK(applied > 0.019 && std::abs(u[(size_t)touch].outEnd - (t[(size_t)touch].outEnd + 0.02)) < 1e-9,
+              "soft: the left neighbour's end follows");
+    }
+    { // hard: the left neighbour stays, a gap opens
+        EditSet e = e0;
+        toggleSeparation(e, a, touch);
+        CHECK(!softSeparation(e, a, touch), "toggled to hard");
+        const double applied = moveNotes(e, a, {touch + 1}, 0.02);
+        const auto u = noteTimes(a, e);
+        CHECK(applied > 0.019 && std::abs(u[(size_t)touch].outEnd - t[(size_t)touch].outEnd) < 1e-9,
+              "hard: the left neighbour stays put");
+        EditSet e2 = e0;
+        toggleSeparation(e2, a, touch);
+        const double into = moveNotes(e2, a, {touch + 1}, -0.02);
+        CHECK(std::abs(into) < 1e-9, "hard: a move into the touching neighbour is stopped (%.4f)", into);
+        // edge drag across a hard separation moves only the dragged edge
+        EditSet e3 = e0;
+        toggleSeparation(e3, a, touch);
+        moveBoundary(e3, a, touch, -0.02, {}, false);
+        const auto v = noteTimes(a, e3);
+        CHECK(std::abs(v[(size_t)touch + 1].outStart - t[(size_t)touch + 1].outStart) < 1e-9, "hard: edge drag leaves the neighbour");
+    }
+    { // soft across a gap: the neighbour follows and the gap is kept
+        EditSet e = e0;
+        toggleSeparation(e, a, gap);
+        CHECK(softSeparation(e, a, gap), "toggled to soft");
+        moveNotes(e, a, {gap + 1}, 0.01);
+        const auto u = noteTimes(a, e);
+        const double g0 = t[(size_t)gap + 1].outStart - t[(size_t)gap].outEnd;
+        const double g1 = u[(size_t)gap + 1].outStart - u[(size_t)gap].outEnd;
+        CHECK(std::abs(g1 - g0) < 1e-9, "soft across a gap: the gap is kept (%.4f vs %.4f)", g1, g0);
+    }
+    { // saved and read back; reset keeps it
+        Document d;
+        d.edits = e0;
+        toggleSeparation(d.edits, a, touch);
+        toggleSeparation(d.edits, a, gap);
+        Document r;
+        CHECK(deserialize(serialize(d), r), "reads back");
+        CHECK(r.edits.notes.size() == d.edits.notes.size() && !softSeparation(r.edits, a, touch) && softSeparation(r.edits, a, gap),
+              "separations survive save and load");
+        Document plain;
+        plain.edits = e0;
+        CHECK(serialize(plain).find("seps") == std::string::npos, "nothing extra is written without separations");
+        resetNoteEdits(r.edits, a, {touch, touch + 1, gap, gap + 1});
+        CHECK(!softSeparation(r.edits, a, touch) && softSeparation(r.edits, a, gap), "reset keeps separations");
+    }
+}
+
+static void testMoveCut(const Analysis& a)
+{
+    std::printf("[cut] moving a cut re-assigns audio between notes; the sound stays in time\n");
+    const int n = (int)a.notes.size();
+    const auto spans = spansOf(a);
+    int b = -1; // two notes that touch in the source
+    for (int i = 1; i + 2 < n; ++i)
+        if (spans[(size_t)i].end == spans[(size_t)i + 1].start && spans[(size_t)i].end - spans[(size_t)i].start > 30 &&
+            spans[(size_t)i + 1].end - spans[(size_t)i + 1].start > 30) { b = i; break; }
+    if (b < 0) { CHECK(false, "demo melody has two long notes touching in the source"); return; }
+    const double hopSec = (double)a.hop / a.sampleRate;
+
+    // Untouched notes: the cut moves 10 frames left; both notes stay unedited in time.
+    {
+        Document d;
+        conform(d, a);
+        const auto t0 = noteTimes(a, d.edits);
+        const double target = t0[(size_t)b].outEnd - 10 * hopSec;
+        CHECK(moveCut(d, a, b, false, target), "cut moved");
+        CHECK(d.edits.spans[(size_t)b].end == spans[(size_t)b].end - 10 && d.edits.spans[(size_t)b + 1].start == spans[(size_t)b].end - 10,
+              "the shared cut is 10 frames earlier (%d)", d.edits.spans[(size_t)b].end);
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        bool still = true;
+        for (const auto& t : noteTimes(eff, d.edits)) still = still && std::abs(t.outStart - t.inStart) < 1e-9 && std::abs(t.outEnd - t.inEnd) < 1e-9;
+        CHECK(still, "no note is moved or stretched by moving a cut");
+    }
+    // A stretched pair: the audio at the new cut plays where it did; the pair's outer ends stay.
+    {
+        Document d;
+        conform(d, a);
+        const auto t00 = noteTimes(a, d.edits);
+        setNoteDuration(d.edits, a, b, (t00[(size_t)b].inEnd - t00[(size_t)b].inStart) * 1.3); // the right note gives way (soft)
+        const auto t0 = noteTimes(a, d.edits);
+        const double target = t0[(size_t)b].outEnd + 12 * hopSec; // into the right note
+        CHECK(moveCut(d, a, b, false, target), "cut moved into the right note");
+        const int f = d.edits.spans[(size_t)b].end;
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto t1 = noteTimes(eff, d.edits);
+        // where the right note played source frame f before
+        const NoteTimes& R0 = t0[(size_t)b + 1];
+        const double secF = eff.notes[(size_t)b + 1].startSec;
+        const double expected = R0.outStart + (secF - R0.inStart) * (R0.outEnd - R0.outStart) / (R0.inEnd - R0.inStart);
+        std::printf("  cut to frame %d: notes meet at %.5f s, that audio played at %.5f s before\n", f, t1[(size_t)b].outEnd, expected);
+        CHECK(std::abs(t1[(size_t)b].outEnd - expected) < 1e-6 && std::abs(t1[(size_t)b + 1].outStart - expected) < 1e-6,
+              "the audio at the new cut plays where it did");
+        CHECK(std::abs(t1[(size_t)b].outStart - t0[(size_t)b].outStart) < 1e-9 && std::abs(t1[(size_t)b + 1].outEnd - t0[(size_t)b + 1].outEnd) < 1e-9,
+              "the pair's outer ends stay");
+        CHECK(worstOverlap(t1) < 1e-9, "no overlap");
+    }
+    // Limits: a cut dragged far stops so that each note keeps ~20 ms.
+    {
+        Document d;
+        conform(d, a);
+        CHECK(moveCut(d, a, b, false, 0.0), "cut dragged to the far left");
+        CHECK(d.edits.spans[(size_t)b].end - d.edits.spans[(size_t)b].start == 4, "the left note keeps 4 frames (%d)",
+              d.edits.spans[(size_t)b].end - d.edits.spans[(size_t)b].start);
+    }
 }
 
 static void testTimeFaults(const Analysis& a)
@@ -1528,6 +1661,8 @@ int main()
         testDocumentV4(a);
         testTransfer(a);
         testTimeFaults(a);
+        testSeparations(a);
+        testMoveCut(a);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

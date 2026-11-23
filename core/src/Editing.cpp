@@ -27,7 +27,9 @@ Bounds boundsOf(const Analysis& a, const std::vector<NoteTimes>& base)
     if (a.segments.empty()) return b;
     for (size_t i = 0; i < base.size(); ++i)
         for (const auto& s : a.segments)
-            if (base[i].inStart >= s.first - 1e-4 && base[i].inStart < s.second) {
+            // By the note's middle: its start sits half a frame before its first frame, so a note
+            // starting on an item's first frame would otherwise belong to no item (and have no bounds).
+            if (const double mid = 0.5 * (base[i].inStart + base[i].inEnd); mid >= s.first && mid < s.second) {
                 b[i] = {std::min(s.first, base[i].outStart), std::max(s.second, base[i].outEnd)};
                 break;
             }
@@ -195,6 +197,43 @@ std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e)
 
 double minNoteLength(const NoteTimes& t) { return minDur(t); }
 
+namespace {
+// Soft separation between note i and i + 1 in layout t (see NoteEdit::sepBefore).
+bool soft(const EditSet& e, const std::vector<NoteTimes>& t, int i)
+{
+    if (i < 0 || i + 1 >= (int)t.size()) return false;
+    const NoteEdit::Sep s = (size_t)i + 1 < e.notes.size() ? e.notes[(size_t)i + 1].sepBefore : NoteEdit::Sep::Auto;
+    if (s != NoteEdit::Sep::Auto) return s == NoteEdit::Sep::Soft;
+    return std::abs(t[(size_t)i + 1].outStart - t[(size_t)i].outEnd) < 0.005;
+}
+} // namespace
+
+bool softSeparation(const EditSet& e, const Analysis& a, int i)
+{
+    return soft(e, noteTimes(a, e), i);
+}
+
+bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after)
+{
+    return noNewFaults(before, after, limitsOf(a, before));
+}
+
+std::vector<bool> softSeparations(const EditSet& e, const Analysis& a)
+{
+    const std::vector<NoteTimes> t = noteTimes(a, e);
+    std::vector<bool> out(t.empty() ? 0 : t.size() - 1);
+    for (size_t i = 0; i < out.size(); ++i) out[i] = soft(e, t, (int)i);
+    return out;
+}
+
+void toggleSeparation(EditSet& e, const Analysis& a, int i)
+{
+    if (i < 0 || i + 1 >= (int)a.notes.size()) return;
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    const bool wasSoft = softSeparation(e, a, i);
+    e.notes[(size_t)i + 1].sepBefore = wasSoft ? NoteEdit::Sep::Hard : NoteEdit::Sep::Soft;
+}
+
 void setNoteTimes(NoteEdit& e, const NoteTimes& t)
 {
     const double inDur = std::max(1e-6, t.inEnd - t.inStart);
@@ -223,10 +262,9 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     if (left >= 0 && sel.count(left)) while (L0 - 1 >= 0 && sel.count(L0 - 1)) --L0;
     if (left + 1 < n && sel.count(left + 1)) while (R1 + 1 < n && sel.count(R1 + 1)) ++R1;
 
-    // Notes that touch at the boundary move together. If they do not touch (a gap
-    // between them), only the note whose edge is dragged changes; the neighbour stays.
-    const bool touching = left >= 0 && left + 1 < n &&
-                          std::abs(base[(size_t)left + 1].outStart - base[(size_t)left].outEnd) < 0.005;
+    // Across a soft separation the two notes move together. Across a hard one (by default
+    // where there is a gap) only the note whose edge is dragged changes; the neighbour stays.
+    const bool touching = soft(e, base, left);
 
     const bool moveLeft = left >= 0 && (touching || !startEdge);
     const bool moveRight = left + 1 < n && (touching || startEdge || left < 0);
@@ -286,9 +324,9 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
     const std::vector<NoteTimes> base = noteTimes(a, e);
     auto moved = [&](int i) { return i >= 0 && i < n && notes.count(i) > 0; };
 
-    // Notes that touch (no gap between them) are linked: the neighbour follows the move.
-    // Where there is a gap, the neighbour stays put and the moved note just moves in the gap.
-    auto touch = [&](int i) { return i >= 0 && i + 1 < n && std::abs(base[(size_t)i + 1].outStart - base[(size_t)i].outEnd) < 0.005; };
+    // Across a soft separation (by default where notes touch) the neighbour follows the move.
+    // Across a hard one (by default where there is a gap) the neighbour stays put.
+    auto touch = [&](int i) { return soft(e, base, i); };
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         for (int i = 0; i < n; ++i) {
@@ -310,7 +348,6 @@ void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes)
     if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
     const std::vector<NoteTimes> base = noteTimes(a, e);
     const Limits L = limitsOf(a, base);
-    auto touch = [](const NoteTimes& l, const NoteTimes& r) { return std::abs(r.outStart - l.outEnd) < 0.005; };
 
     // Timing: each run of consecutive notes goes back to where it was recorded, as one block;
     // a neighbour touching the run follows its edge, as in a move. If that would overlap or
@@ -323,15 +360,18 @@ void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes)
         if (b < 0 || r >= n) continue;
         std::vector<NoteTimes> c = t;
         for (int i = b; i <= r; ++i) { c[(size_t)i].outStart = c[(size_t)i].inStart; c[(size_t)i].outEnd = c[(size_t)i].inEnd; }
-        if (b > 0 && touch(t[(size_t)b - 1], t[(size_t)b])) c[(size_t)b - 1].outEnd = c[(size_t)b].outStart;
-        if (r + 1 < n && touch(t[(size_t)r], t[(size_t)r + 1])) c[(size_t)r + 1].outStart = c[(size_t)r].outEnd;
+        // A neighbour across a soft separation follows the run's edge, keeping the gap (none if they touch).
+        if (b > 0 && soft(e, t, b - 1)) c[(size_t)b - 1].outEnd = c[(size_t)b].outStart - (t[(size_t)b].outStart - t[(size_t)b - 1].outEnd);
+        if (r + 1 < n && soft(e, t, r)) c[(size_t)r + 1].outStart = c[(size_t)r].outEnd + (t[(size_t)r + 1].outStart - t[(size_t)r].outEnd);
         if (noNewFaults(t, c, L)) t = c;
     }
 
     // Everything else goes back to no edit; the drawn pitch on the notes is erased.
     for (int i : notes) {
         if (i < 0 || i >= n) continue;
+        const NoteEdit::Sep sep = e.notes[(size_t)i].sepBefore; // the separation is layout, not a sound edit
         e.notes[(size_t)i] = NoteEdit{};
+        e.notes[(size_t)i].sepBefore = sep;
         eraseDrawn(e, a.notes[(size_t)i].startFrame, a.notes[(size_t)i].endFrame);
     }
     for (int i = 0; i < n; ++i) {

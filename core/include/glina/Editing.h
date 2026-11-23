@@ -44,6 +44,17 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
 // the consonant before them; the neighbouring notes absorb the change.
 double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, double dt);
 
+// True if going from layout `before` to `after` (same notes) breaks none of the conditions above
+// that held and makes no broken one worse.
+bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after);
+
+// True if the separation between note `i` and `i + 1` is soft (see NoteEdit::sepBefore).
+bool softSeparation(const EditSet& e, const Analysis& a, int i);
+// The same for every boundary at once: element i is the separation between note i and i + 1.
+std::vector<bool> softSeparations(const EditSet& e, const Analysis& a);
+// Switch the separation between note `i` and `i + 1` between soft and hard.
+void toggleSeparation(EditSet& e, const Analysis& a, int i);
+
 // Reset `notes` to no edit (pitch, timing, pencil and the rest). Each run of consecutive notes
 // goes back to its recorded time as one block, touching neighbours following its edges; if that
 // would overlap or squeeze a neighbour, the run keeps its current timing.

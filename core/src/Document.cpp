@@ -73,10 +73,99 @@ bool splitNote(Document& d, const Analysis& eff, int i, int frame)
     const double mid = copy.tiltL + (copy.tiltR - copy.tiltL) * u;
     d.edits.notes[(size_t)i].tiltR = mid;
     copy.tiltL = mid;
+    copy.sepBefore = NoteEdit::Sep::Auto; // the halves touch: soft
     setNoteTimes(copy, right);
     d.edits.notes.insert(d.edits.notes.begin() + i + 1, copy);
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) v.noteMask.insert(v.noteMask.begin() + i + 1, v.noteMask[(size_t)i]);
+    return true;
+}
+
+bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double outSec)
+{
+    const int n = (int)eff.notes.size();
+    if (note < 0 || note >= n) return false;
+    if (d.edits.notes.size() > eff.notes.size()) return false;
+    const std::vector<NoteTimes> t = noteTimes(eff, d.edits);
+    std::vector<NoteSpan> spans = d.edits.spans.empty() ? spansOf(eff) : d.edits.spans;
+    if (spans.size() != eff.notes.size()) return false;
+    const int L = startEdge ? note - 1 : note, R = startEdge ? note : note + 1; // the notes left and right of the cut
+    const bool hasL = L >= 0, hasR = R < n;
+    // In a track view the audio of one item never moves into another: the cut stays in the note's item.
+    const double hopSec = (double)eff.hop / eff.sampleRate;
+    auto segOf = [&](int k) {
+        const Note& m = eff.notes[(size_t)k];
+        const double mid = 0.5 * (m.startSec + m.endSec);
+        for (size_t s = 0; s < eff.segments.size(); ++s)
+            if (mid >= eff.segments[s].first && mid < eff.segments[s].second) return (int)s;
+        return -1;
+    };
+    const bool shared = hasL && hasR && spans[(size_t)L].end == spans[(size_t)R].start && // they touch in the source
+                        segOf(L) == segOf(R);                                                // and in the same item
+    constexpr int kMinFrames = 4; // ~20 ms, as for a split
+
+    // Source frame <-> seconds, and output position of a source second under a note's mapping
+    // (also past its edges: an edge moved into a gap carries the note's stretch along).
+    auto frameSec = [&](int k, int f) {
+        const Note& m = eff.notes[(size_t)k];
+        return m.startSec + (double)(f - m.startFrame) * (m.endSec - m.startSec) / std::max(1, m.endFrame - m.startFrame);
+    };
+    auto secFrame = [&](int k, double sec) {
+        const Note& m = eff.notes[(size_t)k];
+        return m.startFrame + (sec - m.startSec) * std::max(1, m.endFrame - m.startFrame) / std::max(1e-9, m.endSec - m.startSec);
+    };
+    auto outOf = [&](int k, double sec) {
+        const NoteTimes& m = t[(size_t)k];
+        return m.outStart + (sec - m.inStart) * (m.outEnd - m.outStart) / std::max(1e-9, m.inEnd - m.inStart);
+    };
+    auto inOf = [&](int k, double out) {
+        const NoteTimes& m = t[(size_t)k];
+        return m.inStart + (out - m.outStart) * (m.inEnd - m.inStart) / std::max(1e-9, m.outEnd - m.outStart);
+    };
+
+    // Which note's mapping the new cut falls under: the note that now plays that moment;
+    // with no shared cut, the moved note's own (extended past its edge if need be).
+    const double cutOut = startEdge ? t[(size_t)note].outStart : t[(size_t)note].outEnd;
+    int owner = note;
+    if (shared) owner = outSec < cutOut ? L : R;
+    int f = (int)std::lround(secFrame(owner, inOf(owner, outSec)));
+    // Limits: every note keeps kMinFrames; an edge stops at the neighbour's span.
+    int lo = 0, hi = (int)eff.frames.size();
+    if (hasL) lo = std::max(lo, spans[(size_t)L].start + kMinFrames);
+    if (hasR) hi = std::min(hi, spans[(size_t)R].end - kMinFrames);
+    if (!shared) {
+        if (startEdge && hasL) lo = std::max(lo, spans[(size_t)L].end);
+        if (!startEdge && hasR) hi = std::min(hi, spans[(size_t)R].start);
+        if (startEdge) hi = std::min(hi, spans[(size_t)note].end - kMinFrames);
+        else lo = std::max(lo, spans[(size_t)note].start + kMinFrames);
+    }
+    if (const int sg = segOf(note); sg >= 0) {
+        lo = std::max(lo, (int)std::lround(eff.segments[(size_t)sg].first / hopSec));
+        hi = std::min(hi, (int)std::lround(eff.segments[(size_t)sg].second / hopSec));
+    }
+    if (lo > hi) return false;
+    f = std::clamp(f, lo, hi);
+    const int old = startEdge ? spans[(size_t)note].start : spans[(size_t)note].end;
+    if (f == old) return false;
+    // The owner by frame (exact): who holds the audio at the new cut now.
+    if (shared) owner = f < old ? L : R;
+    const double sec = frameSec(owner, f);
+    const double out = outOf(owner, sec);
+
+    std::vector<NoteTimes> u = t;
+    std::vector<NoteSpan> s2 = spans;
+    auto setEdge = [&](int k, bool start) {
+        if (start) { s2[(size_t)k].start = f; u[(size_t)k].inStart = sec; u[(size_t)k].outStart = out; }
+        else { s2[(size_t)k].end = f; u[(size_t)k].inEnd = sec; u[(size_t)k].outEnd = out; }
+    };
+    if (shared) { setEdge(L, false); setEdge(R, true); }
+    else setEdge(note, startEdge);
+    if (!noNewLayoutFaults(eff, t, u)) return false;
+
+    conform(d, eff);
+    d.edits.spans = s2;
+    for (int k : {L, R})
+        if (k >= 0 && k < n) setNoteTimes(d.edits.notes[(size_t)k], u[(size_t)k]);
     return true;
 }
 
@@ -93,12 +182,16 @@ bool joinNotes(Document& d, const Analysis& eff, int i)
     const std::vector<NoteTimes> t = noteTimes(eff, d.edits);
     const NoteTimes& L = t[(size_t)i];
     const NoteTimes& R = t[(size_t)i + 1];
+    // Timing: the joined note covers both, from the left note's start to the right note's end.
+    // (With the left note's offset and stretch alone it would end elsewhere and overlap.)
+    // Two notes squeezed so hard that the joined one would fall under the minimal length (the
+    // pause between them in the recording counts too) are not joined.
+    const NoteTimes joined{L.inStart, R.inEnd, L.outStart, std::max(L.outEnd, R.outEnd)};
+    if (joined.outEnd - joined.outStart < minNoteLength(joined) - 1e-9) return false;
     d.edits.spans[(size_t)i].end = d.edits.spans[(size_t)i + 1].end;
     d.edits.spans.erase(d.edits.spans.begin() + i + 1);
     d.edits.notes[(size_t)i].tiltR = d.edits.notes[(size_t)i + 1].tiltR; // the joined note ends where the right one did
-    // Timing: the joined note covers both, from the left note's start to the right note's end.
-    // (With the left note's offset and stretch alone it would end elsewhere and overlap.)
-    setNoteTimes(d.edits.notes[(size_t)i], NoteTimes{L.inStart, R.inEnd, L.outStart, std::max(L.outEnd, R.outEnd)});
+    setNoteTimes(d.edits.notes[(size_t)i], joined);
     d.edits.notes.erase(d.edits.notes.begin() + i + 1);
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) {
@@ -164,6 +257,17 @@ std::string serialize(const Document& d)
         if (v.noteMask.empty()) o << '-';
         else for (uint8_t m : v.noteMask) o << (m ? '1' : '0');
         o << '\n';
+    }
+    // Separations the user set (only when any): records an older reader does not know are skipped.
+    {
+        std::vector<size_t> set;
+        for (size_t i = 0; i < e.notes.size(); ++i)
+            if (e.notes[i].sepBefore != NoteEdit::Sep::Auto) set.push_back(i);
+        if (!set.empty()) {
+            o << "seps " << set.size();
+            for (size_t i : set) o << ' ' << i << ' ' << (int)e.notes[i].sepBefore;
+            o << '\n';
+        }
     }
     // Links to a reference (only when made): records an older reader does not know are skipped.
     if (!d.pins.empty()) {
@@ -232,6 +336,16 @@ bool deserialize(const std::string& text, Document& out)
         } else if (tag == "autovib") {
             readVib(d.edits.autoVibrato);
             in >> d.edits.vibratoSeed;
+        } else if (tag == "seps") {
+            size_t c = 0;
+            in >> c;
+            if (c > 10000000) return false;
+            for (size_t k = 0; k < c; ++k) {
+                size_t i = 0;
+                int v = 0;
+                in >> i >> v;
+                if (i < d.edits.notes.size() && v >= 0 && v <= 2) d.edits.notes[i].sepBefore = (NoteEdit::Sep)v;
+            }
         } else if (tag == "pinref") {
             in >> std::quoted(d.pinRef);
         } else if (tag == "pins") {

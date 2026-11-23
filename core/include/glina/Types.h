@@ -114,6 +114,11 @@ struct NoteEdit {
     double tiltL = 0, tiltR = 0;
     bool ownVibrato = false;   // true: `vibrato` below; false: the track's EditSet::autoVibrato
     AutoVibrato vibrato;
+    // The separation from the previous note. Soft: the two are linked, a time edit of one
+    // edge moves the other note's edge too (no gap opens, none closes). Hard: each moves alone.
+    // Auto: soft where they touch (gap under 5 ms), hard where there is a gap.
+    enum class Sep : uint8_t { Auto = 0, Soft = 1, Hard = 2 };
+    Sep sepBefore = Sep::Auto;
 };
 
 // A pencil-drawn stretch of pitch over analysis frames [start, start + delta.size()).

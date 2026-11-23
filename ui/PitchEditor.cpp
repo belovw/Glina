@@ -80,6 +80,27 @@ juce::MouseCursor cutCursor()
     }();
     return cursor;
 }
+// Cursor for Alt over a note boundary (drag: move the cut; click: join): a solid bar with
+// arrowheads to both sides, outlined like the cut cursor.
+juce::MouseCursor cutMoveCursor()
+{
+    static const juce::MouseCursor cursor = [] {
+        juce::Image img(juce::Image::ARGB, 21, 25, true);
+        juce::Graphics g(img);
+        const float x = 10.5f, y = 12.5f;
+        juce::Path arrows;
+        arrows.addTriangle(1.f, y, 6.f, y - 4.f, 6.f, y + 4.f);
+        arrows.addTriangle(20.f, y, 15.f, y - 4.f, 15.f, y + 4.f);
+        g.setColour(juce::Colour(0xcc000000));
+        g.drawLine(x, 0.f, x, 25.f, 3.f);
+        g.strokePath(arrows, juce::PathStrokeType(2.f));
+        g.setColour(juce::Colours::white);
+        g.drawLine(x, 0.f, x, 25.f, 1.5f);
+        g.fillPath(arrows);
+        return juce::MouseCursor(img, 10, 12);
+    }();
+    return cursor;
+}
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
 // Icons for the square toolbar buttons.
@@ -320,6 +341,54 @@ public:
         return Zone::Body;
     }
 
+    // The separation under `p` on note `i`'s edge strip: the boundary with the neighbour on that
+    // side (its index on the left), if the neighbour is close (gap under kSepGapSec); else -1.
+    static constexpr double kSepGapSec = 0.1;
+    int boundaryAt(int i, juce::Point<float> p) const
+    {
+        const Zone z = zoneOf(i, p);
+        const int b = (z == Zone::Left || z == Zone::CornerL) ? i - 1 : (z == Zone::Right || z == Zone::CornerR) ? i : -1;
+        return b >= 0 && b + 1 < (int)ed.eff_->notes.size() && separationGap(b) < kSepGapSec ? b : -1;
+    }
+    double separationGap(int b) const
+    {
+        return ed.outSec(ed.eff_->notes[(size_t)b + 1].startSec) - ed.outSec(ed.eff_->notes[(size_t)b].endSec);
+    }
+
+    // Separations between close neighbours: soft (linked) a thin line between the two notes;
+    // hard (each moves alone) a bracket at each note's edge, as in Melodyne.
+    void drawSeparations(juce::Graphics& g, const Analysis& A, const Document& d)
+    {
+        const auto c = canvas();
+        const float s = semi();
+        const int n = (int)A.notes.size();
+        const std::vector<bool> softSep = softSeparations(d.edits, A);
+        for (int b = 0; b + 1 < n && b < (int)softSep.size(); ++b) {
+            if (separationGap(b) >= kSepGapSec) continue;
+            const auto l = noteRect(b), r = noteRect(b + 1);
+            if (r.getX() < c.getX() - 10 || l.getRight() > c.getRight() + 10) continue;
+            const float top = std::min(l.getY(), r.getY()), bottom = std::max(l.getBottom(), r.getBottom());
+            if (softSep[(size_t)b]) {
+                const float x = 0.5f * (l.getRight() + r.getX());
+                g.setColour(col::dim.withAlpha(0.55f));
+                g.drawLine(x, top + 1, x, bottom - 1, 0.8f);
+            } else {
+                const float t = std::max(3.f, s * 0.18f); // bracket tick length
+                g.setColour(col::dim.withAlpha(0.9f));
+                juce::Path p; // "]" at the end of the left note, "[" at the start of the right one
+                p.startNewSubPath(l.getRight() - t, l.getY());
+                p.lineTo(l.getRight(), l.getY());
+                p.lineTo(l.getRight(), l.getBottom());
+                p.lineTo(l.getRight() - t, l.getBottom());
+                p.startNewSubPath(r.getX() + t, r.getY());
+                p.lineTo(r.getX(), r.getY());
+                p.lineTo(r.getX(), r.getBottom());
+                p.lineTo(r.getX() + t, r.getBottom());
+                g.strokePath(p, juce::PathStrokeType(1.2f));
+            }
+        }
+    }
+
     // ---- painting ------------------------------------------------------------------
     void paint(juce::Graphics& g) override
     {
@@ -388,6 +457,12 @@ public:
             drawTrackName(g);
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
+            drawSeparations(g, *A, *d);
+            if (cutMode && pressed >= 0 && (gesture == G::StretchL || gesture == G::StretchR)) {
+                const auto r = noteRect(pressed);
+                g.setColour(col::accent);
+                g.drawLine(cutX, r.getY() - semi(), cutX, r.getBottom() + semi(), 1.5f);
+            }
             drawCurves(g, *A);
             drawThreads(g, *d);
             if (!marquee.isEmpty()) {
@@ -919,8 +994,11 @@ public:
         if (th >= 0) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; } // thread: hand
         const int i = hitNote(e.position);
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
-        if (e.mods.isAltDown()) { setMouseCursor(cutCursor()); return; } // Alt+click cuts the note
         const Zone z = zoneOf(i, e.position);
+        if (e.mods.isAltDown()) { // Alt: the cut tool. Body: click cuts. Edge: drag moves the cut, click joins.
+            setMouseCursor(z == Zone::Body ? cutCursor() : cutMoveCursor());
+            return;
+        }
         setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
                        : (z == Zone::CornerL || z == Zone::CornerR) ? juce::MouseCursor::UpDownResizeCursor
                                                                     : juce::MouseCursor::LeftRightResizeCursor);
@@ -1023,6 +1101,13 @@ public:
         tiltRight = z == Zone::CornerR;
         gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR
                 : (z == Zone::CornerL || z == Zone::CornerR) ? G::PendingCorner : G::Pending;
+        // Alt on an edge: the cut tool (drag moves the cut, a click joins). An edge drag
+        // started without Alt switches to it when Alt is pressed on the way.
+        cutAtPress = e.mods.isAltDown() && z != Zone::Body;
+        if (cutAtPress) gesture = (z == Zone::Left || z == Zone::CornerL) ? G::StretchL : G::StretchR;
+        cutMode = cutAtPress;
+        movedAny = false;
+        cutX = e.position.x;
         ed.refresh();
     }
 
@@ -1108,6 +1193,18 @@ public:
             case G::Smooth:
                 break;
         }
+        if (std::abs(off.x) >= 2) movedAny = true;
+        if (gesture == G::StretchL || gesture == G::StretchR) {
+            cutMode = e.mods.isAltDown();
+            if (cutMode) { // moving the cut: nothing is stretched; the new cut shows as a line until release
+                d->edits = before.edits;
+                changed = false;
+                cutX = e.position.x;
+                ed.refreshCurves(false);
+                repaint();
+                return;
+            }
+        }
         const double dt = off.x / ed.pps_;
         if (gesture == G::Pitch) {
             double delta = -off.y / semi();
@@ -1176,6 +1273,17 @@ public:
             changed = false;
             return;
         }
+        if ((g0 == G::StretchL || g0 == G::StretchR) && cutMode && pressed >= 0) {
+            const bool startEdge = g0 == G::StretchL;
+            const int note = pressed;
+            cutMode = false;
+            pressed = -1;
+            changed = false;
+            if (movedAny) ed.moveCutAt(note, startEdge, secOf(e.position.x));
+            else if (cutAtPress) ed.joinAt(startEdge ? note - 1 : note); // Alt+click on a cut: join
+            else ed.refresh();
+            return;
+        }
         if (g0 == G::Pending && pressed >= 0 && e.mods.isAltDown() && !changed) {
             ed.splitAt(pressed, secOf(e.position.x));
         } else if (changed) {
@@ -1191,7 +1299,9 @@ public:
     {
         const int i = hitNote(e.position);
         const int gi = i < 0 ? hitGhost(e.position) : -1;
-        if (i >= 0) {
+        if (const int b = i >= 0 ? boundaryAt(i, e.position) : -1; b >= 0) {
+            ed.toggleSeparationAt(b); // double-click a separation: soft <-> hard
+        } else if (i >= 0) {
             ed.selection_ = {i};
             ed.snapToScale();
         } else if (gi >= 0) {
@@ -1329,6 +1439,10 @@ public:
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
+    bool cutMode = false;    // an edge drag with Alt: moves the cut (the source boundary), not the time
+    bool cutAtPress = false; // Alt was down when the edge was pressed (a click then joins)
+    bool movedAny = false;   // the mouse moved during this press
+    float cutX = 0;          // where the moved cut would go (screen x)
     int pressed = -1;
     bool changed = false;
     Document before;
@@ -2824,6 +2938,27 @@ void PitchEditor::toggleConsonant()
     edit([&](Document& d) {
         for (int i : sel) setConsonant(d.edits, a, i, on);
     }, true);
+}
+
+void PitchEditor::moveCutAt(int note, bool startEdge, double outSecond)
+{
+    if (eff_ == nullptr || note < 0 || note >= (int)eff_->notes.size()) { refresh(); return; }
+    const Analysis& a = *eff_;
+    edit([&](Document& d) { moveCut(d, a, note, startEdge, outSecond); }, true);
+}
+
+void PitchEditor::joinAt(int left)
+{
+    if (eff_ == nullptr || left < 0 || left + 1 >= (int)eff_->notes.size()) { refresh(); return; }
+    selection_ = {left};
+    joinSelected();
+}
+
+void PitchEditor::toggleSeparationAt(int i)
+{
+    if (eff_ == nullptr || i < 0 || i + 1 >= (int)eff_->notes.size()) return;
+    const Analysis& a = *eff_;
+    edit([&](Document& d) { toggleSeparation(d.edits, a, i); });
 }
 
 void PitchEditor::cycleGrid()

@@ -83,6 +83,12 @@ private:
     // selected (everything: the notes' own settings are dropped).
     void writeVibrato(Document& d, const AutoVibrato& v) const;
     void toggleConsonant();
+    // Switch the separation between note `i` and `i + 1` between soft (linked) and hard.
+    void toggleSeparationAt(int i);
+    // Move the cut at `note`'s start (or end) to the audio now heard at `outSecond` (see moveCut).
+    void moveCutAt(int note, bool startEdge, double outSecond);
+    // Join note `left` with the next one (Alt+click on the cut between them).
+    void joinAt(int left);
     void syncInspector();
     void layoutInspector(); // size the inspector to its controls inside its scrolling view
     // ---- other tracks ("ghosts") --------------------------------------------------

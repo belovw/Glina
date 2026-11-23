@@ -46,6 +46,14 @@ void conform(Document& d, const Analysis& eff);
 bool splitNote(Document& d, const Analysis& eff, int note, int frame);
 // Join note `note` with the next one (must be adjacent or separated by < 40 ms).
 bool joinNotes(Document& d, const Analysis& eff, int note);
+// Move a cut, for when the analysis put a note boundary in the wrong place: the edge of `note`
+// (its start if `startEdge`, else its end) goes to the source audio now heard at `outSec`.
+// The sound stays where it is in time; only which note a piece of audio belongs to changes
+// (with it, the pitch edit applied to it). If the neighbour on that side touches the note in
+// the source, the shared cut moves and the neighbour grows or shrinks; otherwise only this
+// note's edge moves (not past the neighbour). Each note keeps ~20 ms; a move that would make
+// notes overlap is refused. Returns true if the layout changed.
+bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double outSec);
 
 std::string serialize(const Document& d);
 bool deserialize(const std::string& text, Document& d);
