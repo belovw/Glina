@@ -343,7 +343,9 @@ public:
 
     // The separation under `p` on note `i`'s edge strip: the boundary with the neighbour on that
     // side (its index on the left), if the neighbour is close (gap under kSepGapSec); else -1.
-    static constexpr double kSepGapSec = 0.1;
+    // The gap is wider than the threshold a separation can be made at, so a hard separation whose
+    // notes were pushed apart still shows and can be double-clicked back to soft.
+    static constexpr double kSepGapSec = 0.3;
     int boundaryAt(int i, juce::Point<float> p) const
     {
         const Zone z = zoneOf(i, p);
