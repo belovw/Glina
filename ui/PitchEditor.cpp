@@ -62,44 +62,44 @@ bool inScale(int m, const Key& k)
     return false;
 }
 
+// Custom cursors are built in software images and owned by the editor, never static: a
+// static one outlived the editor and, released while the plug-in DLL was being unloaded,
+// tore down the GPU (Direct2D) device under the Windows loader lock. The graphics driver
+// then waited for a thread that needed that lock, and REAPER hung on exit with the
+// plug-in file locked.
+//
 // Cursor for Alt+click (cut): a thin vertical bar with a gap at the cut point, outlined so
-// that it shows on both the light and the dark theme. Built once, on first use.
-juce::MouseCursor cutCursor()
+// that it shows on both the light and the dark theme.
+juce::MouseCursor makeCutCursor()
 {
-    static const juce::MouseCursor cursor = [] {
-        juce::Image img(juce::Image::ARGB, 11, 25, true);
-        juce::Graphics g(img);
-        const float x = 5.5f;
-        g.setColour(juce::Colour(0xcc000000)); // outline
-        g.drawLine(x, 0.f, x, 10.f, 3.f);
-        g.drawLine(x, 14.f, x, 25.f, 3.f);
-        g.setColour(juce::Colours::white);
-        g.drawLine(x, 0.f, x, 10.f, 1.5f);
-        g.drawLine(x, 14.f, x, 25.f, 1.5f);
-        return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
-    }();
-    return cursor;
+    juce::Image img(juce::Image::ARGB, 11, 25, true, juce::SoftwareImageType());
+    juce::Graphics g(img);
+    const float x = 5.5f;
+    g.setColour(juce::Colour(0xcc000000)); // outline
+    g.drawLine(x, 0.f, x, 10.f, 3.f);
+    g.drawLine(x, 14.f, x, 25.f, 3.f);
+    g.setColour(juce::Colours::white);
+    g.drawLine(x, 0.f, x, 10.f, 1.5f);
+    g.drawLine(x, 14.f, x, 25.f, 1.5f);
+    return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
 }
 // Cursor for Alt over a note boundary (drag: move the cut; click: join): a solid bar with
 // arrowheads to both sides, outlined like the cut cursor.
-juce::MouseCursor cutMoveCursor()
+juce::MouseCursor makeCutMoveCursor()
 {
-    static const juce::MouseCursor cursor = [] {
-        juce::Image img(juce::Image::ARGB, 21, 25, true);
-        juce::Graphics g(img);
-        const float x = 10.5f, y = 12.5f;
-        juce::Path arrows;
-        arrows.addTriangle(1.f, y, 6.f, y - 4.f, 6.f, y + 4.f);
-        arrows.addTriangle(20.f, y, 15.f, y - 4.f, 15.f, y + 4.f);
-        g.setColour(juce::Colour(0xcc000000));
-        g.drawLine(x, 0.f, x, 25.f, 3.f);
-        g.strokePath(arrows, juce::PathStrokeType(2.f));
-        g.setColour(juce::Colours::white);
-        g.drawLine(x, 0.f, x, 25.f, 1.5f);
-        g.fillPath(arrows);
-        return juce::MouseCursor(img, 10, 12);
-    }();
-    return cursor;
+    juce::Image img(juce::Image::ARGB, 21, 25, true, juce::SoftwareImageType());
+    juce::Graphics g(img);
+    const float x = 10.5f, y = 12.5f;
+    juce::Path arrows;
+    arrows.addTriangle(1.f, y, 6.f, y - 4.f, 6.f, y + 4.f);
+    arrows.addTriangle(20.f, y, 15.f, y - 4.f, 15.f, y + 4.f);
+    g.setColour(juce::Colour(0xcc000000));
+    g.drawLine(x, 0.f, x, 25.f, 3.f);
+    g.strokePath(arrows, juce::PathStrokeType(2.f));
+    g.setColour(juce::Colours::white);
+    g.drawLine(x, 0.f, x, 25.f, 1.5f);
+    g.fillPath(arrows);
+    return juce::MouseCursor(img, 10, 12);
 }
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
@@ -287,6 +287,10 @@ public:
 class PitchEditor::Roll final : public juce::Component {
 public:
     explicit Roll(PitchEditor& o) : ed(o) { setWantsKeyboardFocus(true); }
+
+    // Alt cursors (see makeCutCursor): owned here, released with the editor.
+    const juce::MouseCursor cutCursor = makeCutCursor();
+    const juce::MouseCursor cutMoveCursor = makeCutMoveCursor();
 
     static constexpr float kKeysW = 46, kRulerH = 20, kStripH = 6;
     juce::Rectangle<float> canvas() const
@@ -1000,7 +1004,7 @@ public:
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
         const Zone z = zoneOf(i, e.position);
         if (e.mods.isAltDown()) { // Alt: the cut tool. Body: click cuts. Edge: drag moves the cut, click joins.
-            setMouseCursor(z == Zone::Body ? cutCursor() : cutMoveCursor());
+            setMouseCursor(z == Zone::Body ? cutCursor : cutMoveCursor);
             return;
         }
         setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
