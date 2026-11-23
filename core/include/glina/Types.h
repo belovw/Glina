@@ -105,7 +105,8 @@ struct NoteEdit {
     double vibratoAmount = 1;  // 1 = original, 0 = removed, 2 = doubled
     double formantShift = 0;   // semitones, 0 = natural formants
     double gainDb = 0;
-    bool muted = false;        // silent, but kept in place (shown as a ghost); consonants and harmonies follow
+    bool muted = false;        // silent, but kept in place (shown as a ghost); harmonies follow
+    bool consMuted = false;    // the unvoiced sound (consonant) before this note is silent
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier
     double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide

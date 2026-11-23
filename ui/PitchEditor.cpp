@@ -614,8 +614,46 @@ public:
         return (float)std::clamp((db - (ed.levelRef_ - 36.0)) / 36.0, 0.16, 1.0);
     }
 
+    // Unvoiced sound (consonant) in front of note i: from the end of note i-1 up to note i.
+    static bool hasConsonant(const Analysis& A, int i)
+    {
+        const int from = i > 0 ? A.notes[(size_t)i - 1].endFrame : 0;
+        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        for (int k = std::max(0, from); k < to; ++k) {
+            const FrameKind kd = A.frames[(size_t)k].kind;
+            if (kd == FrameKind::Sibilant || kd == FrameKind::Breath) return true;
+        }
+        return false;
+    }
+    juce::Rectangle<float> consRect(int i) const
+    {
+        const float x0 = i > 0 ? xOf(ed.noteEndSec(i - 1)) : canvas().getX();
+        const float x1 = xOf(ed.noteStartSec(i));
+        const float s = semi();
+        const float y = yOf(ed.editedCentre(i));
+        return {x0, y - s * 0.17f, std::max(0.f, x1 - x0), s * 0.34f};
+    }
+    // The note whose consonant zone is under a point, or -1.
+    int consonantAt(juce::Point<float> p) const
+    {
+        if (ed.eff_ == nullptr) return -1;
+        for (int i = 0; i < (int)ed.eff_->notes.size(); ++i)
+            if (hasConsonant(*ed.eff_, i) && consRect(i).contains(p)) return i;
+        return -1;
+    }
+
     void drawNotes(juce::Graphics& g, const Analysis& A, const Document& d)
     {
+        for (int i = 0; i < (int)A.notes.size() && i < (int)d.edits.notes.size(); ++i) {
+            if (!hasConsonant(A, i)) continue;
+            const auto r = consRect(i);
+            if (r.getWidth() < 2.f) continue;
+            const bool m = d.edits.notes[(size_t)i].consMuted;
+            g.setColour(col::dim.withAlpha(m ? 0.10f : 0.28f));
+            g.fillRoundedRectangle(r, 3.f);
+            g.setColour(col::dim.withAlpha(m ? 0.4f : 0.6f));
+            g.drawRoundedRectangle(r, 3.f, 0.8f);
+        }
         const auto c = canvas();
         const float s = semi();
         const double hopSec = (double)A.hop / A.sampleRate;
@@ -680,14 +718,20 @@ public:
         const int nf = (int)A.frames.size();
         const int k0 = std::clamp((int)(ed.inSec(secOf(c.getX())) / hopSec) - 2, 0, nf);
         const int k1 = std::clamp((int)(ed.inSec(secOf(c.getRight())) / hopSec) + 3, 0, nf);
-        auto draw = [&](auto valueAt, juce::Colour colr, float w) {
+        // Frames inside a muted note: their line is drawn paler.
+        std::vector<char> muted(A.frames.size(), 0);
+        if (const Document* d = ed.doc())
+            for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
+                if (d->edits.notes[i].muted)
+                    for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 1;
+        auto draw = [&](auto valueAt, juce::Colour colr, float w, bool wantMuted) {
             juce::Path p;
             bool pen = false;
             for (int k = k0; k < k1; ++k) {
                 // A gap opened between notes is silent: the line breaks there.
                 if (k > 0 && ed.timeMap_.silenceBetween((k - 1) * (double)A.hop, k * (double)A.hop)) pen = false;
                 const double m = valueAt(k);
-                if (m <= 0) { pen = false; continue; }
+                if (m <= 0 || (muted[(size_t)k] != 0) != wantMuted) { pen = false; continue; }
                 const juce::Point<float> pt(xOf(ed.outSec(k * hopSec)), yOf(m));
                 if (!pen) p.startNewSubPath(pt); else p.lineTo(pt);
                 pen = true;
@@ -695,13 +739,15 @@ public:
             g.setColour(colr);
             g.strokePath(p, juce::PathStrokeType(w));
         };
-        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f);
+        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f, false);
+        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig.withAlpha(0.3f), 1.f, true);
         if (ed.curve_.size() == A.frames.size()) {
-            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f);
+            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f, false);
+            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit.withAlpha(0.3f), 1.4f, true);
             // Pencil-drawn stretches on top, in their own colour.
             if (const Document* d = ed.doc(); d != nullptr && !d->edits.draw.empty()) {
                 const std::vector<float> dense = drawnDense(d->edits, nf);
-                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f);
+                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f, false);
             }
         }
     }
@@ -1040,6 +1086,16 @@ public:
             startHi_ = ed.hi_;
             startPps_ = ed.pps_;
             return;
+        }
+        // A click on a consonant zone mutes or unmutes that consonant.
+        if (!e.mods.isAnyModifierKeyDown() && !e.mods.isPopupMenu()) {
+            const int cons = consonantAt(e.position);
+            if (cons >= 0) {
+                ed.edit([cons](Document& d) {
+                    if (cons < (int)d.edits.notes.size()) d.edits.notes[(size_t)cons].consMuted = !d.edits.notes[(size_t)cons].consMuted;
+                });
+                return;
+            }
         }
         bool refEnd = false;
         const int pin = pinAt(e.position, refEnd);
@@ -2774,8 +2830,14 @@ void PitchEditor::toggleMuteSelection()
     bool anyLoud = false;
     if (Document* d = doc()) for (int i : selection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].muted) anyLoud = true;
     const bool m = anyLoud;
-    edit([this, m](Document& d) {
-        for (int i : selection_) if (i < (int)d.edits.notes.size()) d.edits.notes[(size_t)i].muted = m;
+    const int last = *selection_.rbegin();
+    edit([this, m, last](Document& d) {
+        for (int i : selection_) if (i < (int)d.edits.notes.size()) {
+            d.edits.notes[(size_t)i].muted = m;
+            d.edits.notes[(size_t)i].consMuted = m; // the consonant in front of it goes too
+        }
+        // The consonant after the last note is the one in front of the next note.
+        if (last + 1 < (int)d.edits.notes.size()) d.edits.notes[(size_t)last + 1].consMuted = m;
     });
 }
 

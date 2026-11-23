@@ -502,6 +502,15 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         const long e = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
         for (long o = b; o < e; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
     }
+    // Muted consonants: the output gap in front of a note (from the end of the note before it).
+    for (size_t i = 0; i < e.notes.size() && i < map.noteCount(); ++i) {
+        if (!e.notes[i].consMuted) continue;
+        const double s0 = i > 0 ? map.noteEndOut(i - 1) : 0.0, s1 = map.noteStartOut(i);
+        if (s1 <= s0) continue;
+        const long b = std::max(0L, (long)std::floor(s0 - fade));
+        const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+        for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+    }
     // Muted notes: silent over their whole output span (grains of the neighbours that reach
     // into it are removed too), so the mute is complete.
     for (size_t i = 0; i < e.notes.size() && i < map.noteCount(); ++i) {

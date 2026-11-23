@@ -263,6 +263,16 @@ std::string serialize(const Document& d)
         else for (uint8_t m : v.noteMask) o << (m ? '1' : '0');
         o << '\n';
     }
+    // Muted consonants (only when any): an older reader skips the record.
+    {
+        std::vector<size_t> set;
+        for (size_t i = 0; i < e.notes.size(); ++i) if (e.notes[i].consMuted) set.push_back(i);
+        if (!set.empty()) {
+            o << "consmutes " << set.size();
+            for (size_t i : set) o << ' ' << i;
+            o << '\n';
+        }
+    }
     // Muted notes (only when any): an older reader skips the record.
     {
         std::vector<size_t> set;
@@ -356,6 +366,15 @@ bool deserialize(const std::string& text, Document& out)
         } else if (tag == "autovib") {
             readVib(d.edits.autoVibrato);
             in >> d.edits.vibratoSeed;
+        } else if (tag == "consmutes") {
+            size_t c = 0;
+            in >> c;
+            if (c > 10000000) return false;
+            for (size_t k = 0; k < c; ++k) {
+                size_t i = 0;
+                in >> i;
+                if (i < d.edits.notes.size()) d.edits.notes[i].consMuted = true;
+            }
         } else if (tag == "mutes") {
             size_t c = 0;
             in >> c;

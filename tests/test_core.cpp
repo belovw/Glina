@@ -281,6 +281,9 @@ static void testDocumentIO(const Analysis& a)
     Document plain; // default mode and snap: no new record, same bytes as before
     CHECK(serialize(plain).find("\nmode ") == std::string::npos, "default mode written");
     CHECK(serialize(plain).find("leadmix") == std::string::npos, "default lead mix written");
+    Document cm = d; if (cm.edits.notes.size() > 1) cm.edits.notes[1].consMuted = true;
+    Document cr;
+    CHECK(deserialize(serialize(cm), cr) && cr.edits.notes.size() > 1 && cr.edits.notes[1].consMuted, "consonant mute lost on save");
     Document mu = d; if (mu.edits.notes.size() > 1) mu.edits.notes[1].muted = true;
     Document mr;
     CHECK(deserialize(serialize(mu), mr), "mute parse failed");
@@ -314,6 +317,15 @@ static void testMute(const test::SynthResult& s, const Analysis& a, double sr)
     const double before = rms(y0, k), after = rms(y1, k);
     CHECK(before > 1e-3, "note %zu silent even without mute", k);
     CHECK(after < before * 1e-3, "muted note still sounds: %.6f vs %.6f", after, before);
+    // Muted consonant in front of note k: the gap before it is silent.
+    EditSet cons = plain;
+    cons.notes[k].consMuted = true;
+    const auto y2 = render(s.audio.data(), s.audio.size(), a, cons);
+    const double g0 = a.notes[k - 1].endFrame * (double)a.hop / sr, g1 = a.notes[k].startFrame * (double)a.hop / sr;
+    const size_t from = (size_t)(g0 * sr), to = (size_t)(g1 * sr);
+    double gacc = 0;
+    for (size_t t = from; t < to && t < y2.size(); ++t) gacc += (double)y2[t] * y2[t];
+    CHECK(to <= from || gacc < 1e-6, "muted consonant still sounds: %.3g", gacc);
     const double other0 = rms(y0, 0), other1 = rms(y1, 0);
     CHECK(std::abs(other0 - other1) < 0.02 * other0, "neighbour changed by mute: %.6f vs %.6f", other0, other1);
     std::printf("  note %zu rms %.4f -> %.6f when muted; neighbour %.4f -> %.4f\n", k, before, after, other0, other1);
