@@ -19,6 +19,15 @@ struct NoteTimes {
 };
 std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e);
 void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t);
+// The time offset and stretch that put one note at t.outStart..t.outEnd.
+void setNoteTimes(NoteEdit& e, const NoteTimes& t);
+// The shortest a note may become: ~30 ms, or half its recorded length if that is shorter.
+double minNoteLength(const NoteTimes& t);
+
+// Time edits are limited only by the conditions they change: no note shorter than ~30 ms,
+// no note starting before the previous one ends, notes inside their item (track view) and the
+// clip. A fault the edit does not touch (an overlap elsewhere, left by an earlier build) does
+// not block it, and a note that overlaps its neighbour can still move away from it.
 
 // Move the boundary after note `left` (between `left` and `left + 1`) by `dt`
 // seconds. `left` = -1 is the start of the first note, `left` = n-1 the end of
@@ -35,8 +44,15 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
 // the consonant before them; the neighbouring notes absorb the change.
 double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, double dt);
 
+// Reset `notes` to no edit (pitch, timing, pencil and the rest). Each run of consecutive notes
+// goes back to its recorded time as one block, touching neighbours following its edges; if that
+// would overlap or squeeze a neighbour, the run keeps its current timing.
+void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes);
+
 // TEMP-MOVE-DIAG: names the first check the current layout fails ("valid" if none). Remove later.
 std::string whyLayoutInvalid(const EditSet& e, const Analysis& a);
+// TEMP-MOVE-DIAG: the condition that limited the last move or edge drag (empty if none). Remove later.
+std::string moveLimitReason();
 
 // Set note `i`'s output duration (seconds) by moving its end boundary.
 void setNoteDuration(EditSet& e, const Analysis& a, int i, double seconds);

@@ -13,19 +13,8 @@ constexpr double kMinNoteSec = 0.03;
 
 double minDur(const NoteTimes& t) { return std::min(kMinNoteSec, 0.5 * (t.inEnd - t.inStart)); }
 
-// Every note keeps a minimal length, nothing overlaps, nothing leaves the clip.
-// `lo` is the earliest boundary the layout may use. It is normally 0, but note
-// boundaries sit at frame centres, so a clip whose first note starts at frame 0
-// (singing from the very first sample) has its first boundary just below 0. Taking
-// 0 there would make the untouched layout invalid and block every move.
-// Overlaps and the clip end are judged with 1 µs of slack. Layouts saved by an earlier build
-// (or round-tripped through text) can touch with a rounding error of ~1e-9 s; a tighter test
-// called them invalid and blocked every time move, while 1 µs is far below any analysis frame.
+// Overlaps and the clip end are judged with 1 µs of slack in the diagnostic check below.
 constexpr double kTolSec = 1e-6;
-// Moves are chosen with half this slack, so the stored layout always sits inside it: the
-// largest move used to stop exactly at kTolSec, and the round trip through the stored edits
-// (about 0.1 us) then made the next check fail, blocking every later move in that place.
-constexpr double kMoveSlackSec = 0.5 * kTolSec;
 
 // Per note, where its output may lie: the item (segment) it belongs to in a track view, widened
 // to where it already is (so a layout that starts out of bounds does not block every move).
@@ -45,38 +34,123 @@ Bounds boundsOf(const Analysis& a, const std::vector<NoteTimes>& base)
     return b;
 }
 
-bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo, const Bounds& bounds, double slack = kTolSec)
+// The conditions a layout must meet, each as a margin that is >= 0 when it holds: every note
+// keeps its minimal length, starts after the end of every earlier note and after `floorSec`,
+// stays inside its item (track view) and ends inside the clip.
+// "Every earlier note", pair by pair, not just the previous one: in a layout an earlier build
+// left out of order, the previous note may lie far back, and a note could otherwise be put
+// onto others. Each condition is a difference of two note edges, so it changes linearly with
+// the dt of a time edit (every edit moves edges linearly).
+struct Limits {
+    double clipLen = 0, floorSec = 0;
+    Bounds bounds;
+};
+
+// A change below this (seconds) is rounding, not a change.
+constexpr double kChangeEps = 1e-9;
+
+// Calls f(before, after, note, condition) for every condition whose margin differs between the
+// layouts `a` and `b` (same notes). Conditions on edges that did not move are skipped: a pair
+// of notes neither of which moved keeps its margin.
+template <typename F>
+void eachChange(const std::vector<NoteTimes>& a, const std::vector<NoteTimes>& b, const Limits& L, F&& f)
 {
-    double last = lo;
-    for (size_t i = 0; i < t.size(); ++i) {
-        const auto& n = t[i];
-        if (n.outEnd - n.outStart < minDur(n) - kTolSec) return false;
-        if (n.outStart < last - slack) return false;
-        if (i < bounds.size() && (n.outStart < bounds[i].first - kTolSec || n.outEnd > bounds[i].second + kTolSec))
-            return false;
-        last = n.outEnd;
+    constexpr double kFree = 1e9; // a limit that does not exist (single clip: no item bounds)
+    const size_t n = std::min(a.size(), b.size());
+    auto cond = [&](double ma, double mb, size_t note, const char* what) {
+        if (std::abs(mb - ma) > kChangeEps) f(ma, mb, note, what);
+    };
+    std::vector<char> startMoved(n), endMoved(n);
+    for (size_t i = 0; i < n; ++i) {
+        startMoved[i] = std::abs(b[i].outStart - a[i].outStart) > kChangeEps;
+        endMoved[i] = std::abs(b[i].outEnd - a[i].outEnd) > kChangeEps;
+        if (!startMoved[i] && !endMoved[i]) continue;
+        cond(a[i].outEnd - a[i].outStart - minDur(a[i]), b[i].outEnd - b[i].outStart - minDur(b[i]), i, "length");
+        cond(a[i].outStart - L.floorSec, b[i].outStart - L.floorSec, i, "clip start");
+        cond(L.clipLen - a[i].outEnd, L.clipLen - b[i].outEnd, i, "clip end");
+        const bool hasB = i < L.bounds.size();
+        const double lo = hasB && std::isfinite(L.bounds[i].first) ? L.bounds[i].first : -kFree;
+        const double hi = hasB && std::isfinite(L.bounds[i].second) ? L.bounds[i].second : kFree;
+        cond(a[i].outStart - lo, b[i].outStart - lo, i, "item start");
+        cond(hi - a[i].outEnd, hi - b[i].outEnd, i, "item end");
     }
-    return t.empty() || last <= clipLen + kTolSec;
+    // Note k starts after note j (j < k) ends. Only pairs with a moved edge.
+    for (size_t k = 0; k < n; ++k)
+        if (startMoved[k])
+            for (size_t j = 0; j < k; ++j) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+    for (size_t j = 0; j < n; ++j)
+        if (endMoved[j])
+            for (size_t k = j + 1; k < n; ++k)
+                if (!startMoved[k]) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
 }
 
-// Largest part of `dt` (shrinking towards 0) for which `make` gives a valid layout.
-template <typename Make>
-double clampDt(double dt, double clipLen, double floorSec, const Bounds& bounds, Make&& make)
+std::string g_lastLimit; // TEMP-MOVE-DIAG
+
+// The full move takes layout t0 to t1, and every margin moves linearly in between:
+// m(x) = m0 + x (m1 - m0) for the share x of the move. The largest x in [0, 1] that breaks no
+// condition that held and makes no broken one worse is found directly, condition by condition.
+// A condition the move does not change does not limit it: a fault elsewhere in the clip (an
+// overlap left by an earlier build) does not block moves; a note that overlaps its neighbour
+// can still move away from it.
+double allowedShare(const std::vector<NoteTimes>& t0, const std::vector<NoteTimes>& t1, const Limits& L)
 {
-    auto ok = [&](double x) { return valid(make(x), clipLen, floorSec, bounds, kMoveSlackSec); };
-    if (ok(dt)) return dt;
-    double lo = 0, hi = 1;
-    for (int it = 0; it < 40; ++it) {
-        const double mid = 0.5 * (lo + hi);
-        if (ok(dt * mid)) lo = mid; else hi = mid;
-    }
-    return dt * lo;
+    double x = 1;
+    g_lastLimit.clear();
+    eachChange(t0, t1, L, [&](double m0, double m1, size_t note, const char* what) {
+        if (m1 >= m0) return; // better
+        const double xk = std::max(0.0, m0 / (m0 - m1));
+        if (xk < x) {
+            x = xk;
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "note %zu %s: margin %.6f, the full move would make it %.6f", note, what, m0, m1);
+            g_lastLimit = buf;
+        }
+    });
+    return x;
+}
+
+// True if going from `before` to `after` breaks no condition that held and makes no broken one worse.
+bool noNewFaults(const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after, const Limits& L)
+{
+    bool ok = true;
+    eachChange(before, after, L, [&](double m0, double m1, size_t, const char*) {
+        if (m1 < -kChangeEps && m1 < m0) ok = false;
+    });
+    return ok;
+}
+
+// The largest part of `dt` that `make` may apply (see allowedShare).
+template <typename Make>
+double limitDt(double dt, const Limits& L, Make&& make)
+{
+    const double x = allowedShare(make(0.0), make(dt), L);
+    return x >= 1 ? dt : dt * x;
+}
+
+// The last note may end a fraction of a millisecond past the clip (frame centres), and an
+// earlier build may have left a note past it: the limit is the latest of these.
+double clipLenOf(const Analysis& a, const std::vector<NoteTimes>& base)
+{
+    double len = (double)a.numSamples / a.sampleRate;
+    for (const NoteTimes& n : base) len = std::max(len, n.outEnd);
+    return len;
 }
 
 // The layout may not start before the clip, nor before where it already starts.
 double floorOf(const std::vector<NoteTimes>& base)
 {
-    return base.empty() ? 0.0 : std::min(0.0, base.front().outStart);
+    double f = 0;
+    for (const NoteTimes& n : base) f = std::min(f, n.outStart);
+    return f;
+}
+
+Limits limitsOf(const Analysis& a, const std::vector<NoteTimes>& base)
+{
+    Limits L;
+    L.clipLen = clipLenOf(a, base);
+    L.floorSec = floorOf(base);
+    L.bounds = boundsOf(a, base);
+    return L;
 }
 
 // Lay out the block of notes [b, e] (taken from `base`) so that it starts at
@@ -119,18 +193,23 @@ std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e)
     return t;
 }
 
+double minNoteLength(const NoteTimes& t) { return minDur(t); }
+
+void setNoteTimes(NoteEdit& e, const NoteTimes& t)
+{
+    const double inDur = std::max(1e-6, t.inEnd - t.inStart);
+    double off = t.outStart - t.inStart;
+    double st = (t.outEnd - t.outStart) / inDur;
+    if (std::abs(off) < 1e-7) off = 0;
+    if (std::abs(st - 1) < 1e-7) st = 1;
+    e.timeOffsetSec = off;
+    e.stretch = st;
+}
+
 void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t)
 {
     if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
-    for (size_t i = 0; i < t.size() && i < e.notes.size(); ++i) {
-        const double inDur = std::max(1e-6, t[i].inEnd - t[i].inStart);
-        double off = t[i].outStart - t[i].inStart;
-        double st = (t[i].outEnd - t[i].outStart) / inDur;
-        if (std::abs(off) < 1e-7) off = 0;
-        if (std::abs(st - 1) < 1e-7) st = 1;
-        e.notes[i].timeOffsetSec = off;
-        e.notes[i].stretch = st;
-    }
+    for (size_t i = 0; i < t.size() && i < e.notes.size(); ++i) setNoteTimes(e.notes[i], t[i]);
 }
 
 double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge)
@@ -138,9 +217,6 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     const int n = (int)a.notes.size();
     if (n == 0 || left < -1 || left > n - 1 || dt == 0) return 0;
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    // The last note may end a fraction of a millisecond past the clip (frame centres), so the
-    // limit is the later of the two; otherwise the untouched layout is invalid and no move works.
-    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
 
     // Selected notes touching the boundary form one block on each side.
     int L0 = left, R1 = left + 1;
@@ -162,16 +238,18 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
+    const double applied = limitDt(dt, limitsOf(a, base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
+
+std::string moveLimitReason() { return g_lastLimit; } // TEMP-MOVE-DIAG
 
 // TEMP-MOVE-DIAG: the first check the layout fails, with numbers. Remove later.
 std::string whyLayoutInvalid(const EditSet& e, const Analysis& a)
 {
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
+    const double clipLen = clipLenOf(a, base);
     const double lo = floorOf(base);
     const Bounds bounds = boundsOf(a, base);
     double last = lo;
@@ -184,7 +262,7 @@ std::string whyLayoutInvalid(const EditSet& e, const Analysis& a)
             return buf;
         }
         if (n.outStart < last - kTolSec) {
-            std::snprintf(buf, sizeof buf, "note %zu starts %.6f before previous end %.6f", i, n.outStart, last);
+            std::snprintf(buf, sizeof buf, "note %zu starts %.6f before an earlier note's end %.6f", i, n.outStart, last);
             return buf;
         }
         if (i < bounds.size() && (n.outStart < bounds[i].first - kTolSec || n.outEnd > bounds[i].second + kTolSec)) {
@@ -192,7 +270,7 @@ std::string whyLayoutInvalid(const EditSet& e, const Analysis& a)
                           n.outEnd, bounds[i].first, bounds[i].second);
             return buf;
         }
-        last = n.outEnd;
+        last = std::max(last, n.outEnd);
     }
     if (!base.empty() && last > clipLen + kTolSec) {
         std::snprintf(buf, sizeof buf, "last end %.6f after clip %.6f", last, clipLen);
@@ -206,9 +284,6 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
     const int n = (int)a.notes.size();
     if (n == 0 || notes.empty() || dt == 0) return 0;
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    // The last note may end a fraction of a millisecond past the clip (frame centres), so the
-    // limit is the later of the two; otherwise the untouched layout is invalid and no move works.
-    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
     auto moved = [&](int i) { return i >= 0 && i < n && notes.count(i) > 0; };
 
     // Notes that touch (no gap between them) are linked: the neighbour follows the move.
@@ -223,9 +298,47 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
         }
         return t;
     };
-    const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
+    const double applied = limitDt(dt, limitsOf(a, base), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
+}
+
+void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes)
+{
+    const int n = (int)a.notes.size();
+    if (n == 0 || notes.empty()) return;
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    const std::vector<NoteTimes> base = noteTimes(a, e);
+    const Limits L = limitsOf(a, base);
+    auto touch = [](const NoteTimes& l, const NoteTimes& r) { return std::abs(r.outStart - l.outEnd) < 0.005; };
+
+    // Timing: each run of consecutive notes goes back to where it was recorded, as one block;
+    // a neighbour touching the run follows its edge, as in a move. If that would overlap or
+    // squeeze a neighbour (the run was moved as part of a larger block), the run keeps its timing.
+    std::vector<NoteTimes> t = base;
+    for (auto it = notes.begin(); it != notes.end();) {
+        const int b = *it;
+        int r = b;
+        for (++it; it != notes.end() && *it == r + 1; ++it) ++r;
+        if (b < 0 || r >= n) continue;
+        std::vector<NoteTimes> c = t;
+        for (int i = b; i <= r; ++i) { c[(size_t)i].outStart = c[(size_t)i].inStart; c[(size_t)i].outEnd = c[(size_t)i].inEnd; }
+        if (b > 0 && touch(t[(size_t)b - 1], t[(size_t)b])) c[(size_t)b - 1].outEnd = c[(size_t)b].outStart;
+        if (r + 1 < n && touch(t[(size_t)r], t[(size_t)r + 1])) c[(size_t)r + 1].outStart = c[(size_t)r].outEnd;
+        if (noNewFaults(t, c, L)) t = c;
+    }
+
+    // Everything else goes back to no edit; the drawn pitch on the notes is erased.
+    for (int i : notes) {
+        if (i < 0 || i >= n) continue;
+        e.notes[(size_t)i] = NoteEdit{};
+        eraseDrawn(e, a.notes[(size_t)i].startFrame, a.notes[(size_t)i].endFrame);
+    }
+    for (int i = 0; i < n; ++i) {
+        const NoteTimes& was = base[(size_t)i];
+        const NoteTimes& now = t[(size_t)i];
+        if (notes.count(i) || now.outStart != was.outStart || now.outEnd != was.outEnd) setNoteTimes(e.notes[(size_t)i], now);
+    }
 }
 
 void setNoteDuration(EditSet& e, const Analysis& a, int i, double seconds)

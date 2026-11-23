@@ -1141,8 +1141,8 @@ public:
             const double applied = moveNotes(d->edits, *ed.eff_, moved, dt);
             tempMoveDiag(juce::String::formatted("Move nsel=%d dt=%.6f applied=%.6f", (int)moved.size(), dt,
                                                  applied)); // TEMP-MOVE-DIAG
-            if (applied == 0.0 && dt != 0.0) // TEMP-MOVE-DIAG
-                tempMoveDiag(juce::String("  blocked by: ") + whyLayoutInvalid(d->edits, *ed.eff_)); // TEMP-MOVE-DIAG
+            if (applied != dt) // TEMP-MOVE-DIAG
+                tempMoveDiag(juce::String("  limited by: ") + moveLimitReason()); // TEMP-MOVE-DIAG
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
@@ -2574,12 +2574,7 @@ void PitchEditor::applyCorrection()
 void PitchEditor::resetNotes()
 {
     if (selection_.empty() || eff_ == nullptr) return;
-    edit([&](Document& d) {
-        for (int i : selection_) {
-            d.edits.notes[(size_t)i] = NoteEdit{};
-            eraseDrawn(d.edits, eff_->notes[(size_t)i].startFrame, eff_->notes[(size_t)i].endFrame);
-        }
-    });
+    edit([&](Document& d) { glina::resetNoteEdits(d.edits, *eff_, selection_); });
 }
 
 void PitchEditor::erasePencilInSelection()

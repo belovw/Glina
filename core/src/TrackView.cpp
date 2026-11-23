@@ -165,6 +165,7 @@ std::vector<Document> splitTrackView(const TrackView& view, const Document& edit
     if (layoutChanged != nullptr) layoutChanged->assign(pieces.size(), false);
     if (view.analysis == nullptr || pieces.size() != view.maps.size()) return docs;
     const Analysis& v = *view.analysis;
+    const double hopSec = (double)v.hop / v.sampleRate;
     const std::vector<NoteSpan> vspans = edited.edits.spans.empty() ? spansOf(v) : edited.edits.spans;
     const size_t vn = std::min(vspans.size(), edited.edits.notes.size());
     const std::vector<float> vdraw = drawnDense(edited.edits, (int)v.frames.size());
@@ -195,7 +196,14 @@ std::vector<Document> splitTrackView(const TrackView& view, const Document& edit
         spans.insert(spans.end(), mid.begin(), mid.end());
         spans.insert(spans.end(), orig.begin() + after, orig.end());
         std::vector<NoteEdit> notes(d.edits.notes.begin(), d.edits.notes.begin() + first);
-        for (size_t i : midIdx) notes.push_back(edited.edits.notes[i]);
+        for (size_t j = 0; j < midIdx.size(); ++j) {
+            NoteEdit ne = edited.edits.notes[midIdx[j]];
+            // A note cut at the item's start keeps its place in time: the part in this item starts
+            // where the note's output had reached at the cut (as when a note is split).
+            const int cut = mid[j].start + off - vspans[midIdx[j]].start;
+            if (cut > 0) ne.timeOffsetSec += cut * hopSec * (ne.stretch - 1);
+            notes.push_back(ne);
+        }
         notes.insert(notes.end(), d.edits.notes.begin() + after, d.edits.notes.end());
 
         const bool layout = !sameSpans(spans, orig);

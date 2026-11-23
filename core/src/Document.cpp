@@ -1,4 +1,5 @@
 #include "glina/Document.h"
+#include "glina/Editing.h"
 #include "glina/Notes.h"
 #include "glina/Renderer.h"
 #include "glina/Tuning.h"
@@ -51,6 +52,17 @@ bool splitNote(Document& d, const Analysis& eff, int i, int frame)
     if (i < 0 || i >= (int)eff.notes.size()) return false;
     const Note& n = eff.notes[(size_t)i];
     if (frame - n.startFrame < 4 || n.endFrame - frame < 4) return false; // halves of at least ~20 ms
+    // Timing: the note stays where it is. The left half keeps the note's start and stretch; the
+    // right half starts where the left one ends. (With the same time offset, the right half of a
+    // stretched note would start elsewhere and overlap its neighbour.) A note squeezed so short
+    // that a half would fall under the minimal length is not split.
+    const NoteTimes was = noteTimes(eff, d.edits)[(size_t)i];
+    const double u = (double)(frame - n.startFrame) / std::max(1, n.endFrame - n.startFrame);
+    const double splitSec = was.inStart + (was.inEnd - was.inStart) * u;
+    const double splitOut = was.outStart + (was.outEnd - was.outStart) * u;
+    const NoteTimes left{was.inStart, splitSec, was.outStart, splitOut}, right{splitSec, was.inEnd, splitOut, was.outEnd};
+    if (left.outEnd - left.outStart < minNoteLength(left) - 1e-9 || right.outEnd - right.outStart < minNoteLength(right) - 1e-9)
+        return false;
     conform(d, eff);
     if (d.edits.spans.empty()) d.edits.spans = spansOf(eff);
     if (d.edits.spans.size() != eff.notes.size()) return false;
@@ -58,10 +70,10 @@ bool splitNote(Document& d, const Analysis& eff, int i, int frame)
     d.edits.spans.insert(d.edits.spans.begin() + i + 1, NoteSpan{frame, n.endFrame});
     NoteEdit copy = d.edits.notes[(size_t)i];
     // A tilt is split where it is: each half keeps its piece of the same line.
-    const double u = (double)(frame - n.startFrame) / std::max(1, n.endFrame - n.startFrame);
     const double mid = copy.tiltL + (copy.tiltR - copy.tiltL) * u;
     d.edits.notes[(size_t)i].tiltR = mid;
     copy.tiltL = mid;
+    setNoteTimes(copy, right);
     d.edits.notes.insert(d.edits.notes.begin() + i + 1, copy);
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) v.noteMask.insert(v.noteMask.begin() + i + 1, v.noteMask[(size_t)i]);
@@ -78,9 +90,15 @@ bool joinNotes(Document& d, const Analysis& eff, int i)
     conform(d, eff);
     if (d.edits.spans.empty()) d.edits.spans = spansOf(eff);
     if (d.edits.spans.size() != eff.notes.size()) return false;
+    const std::vector<NoteTimes> t = noteTimes(eff, d.edits);
+    const NoteTimes& L = t[(size_t)i];
+    const NoteTimes& R = t[(size_t)i + 1];
     d.edits.spans[(size_t)i].end = d.edits.spans[(size_t)i + 1].end;
     d.edits.spans.erase(d.edits.spans.begin() + i + 1);
     d.edits.notes[(size_t)i].tiltR = d.edits.notes[(size_t)i + 1].tiltR; // the joined note ends where the right one did
+    // Timing: the joined note covers both, from the left note's start to the right note's end.
+    // (With the left note's offset and stretch alone it would end elsewhere and overlap.)
+    setNoteTimes(d.edits.notes[(size_t)i], NoteTimes{L.inStart, R.inEnd, L.outStart, std::max(L.outEnd, R.outEnd)});
     d.edits.notes.erase(d.edits.notes.begin() + i + 1);
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) {

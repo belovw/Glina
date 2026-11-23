@@ -871,6 +871,183 @@ static void testDocumentV4(const Analysis& a)
     CHECK(deserialize(plain, p) && !p.edits.autoVibrato.active() && p.edits.notes[2].tiltR == 0, "v3 loads with features off");
 }
 
+static void testTrackViewCut()
+{
+    std::printf("[track view] a note cut at an item's edge keeps its place in time\n");
+    const double sr = 48000;
+    std::vector<test::SynthNote> melB = test::demoMelody();
+    for (auto& n : melB) n.midi += 2;
+    const test::SynthResult sa = test::synthesize(test::demoMelody(), sr);
+    const test::SynthResult sb = test::synthesize(melB, sr, 30, 5.2, 777);
+    auto effA = std::make_shared<const Analysis>(analyze(sa.audio.data(), sa.audio.size(), sr));
+    auto effB = std::make_shared<const Analysis>(analyze(sb.audio.data(), sb.audio.size(), sr));
+    const double hopSec = (double)effA->hop / sr;
+    std::vector<TrackPiece> pieces(2);
+    pieces[0].eff = effA;
+    pieces[0].winEnd = (double)effA->numSamples / sr;
+    pieces[1].eff = effB;
+    pieces[1].winStart = 0.05;
+    pieces[1].winEnd = (double)effB->numSamples / sr;
+    pieces[1].placeSec = pieces[0].winEnd + 0.3;
+    conform(pieces[0].doc, *effA);
+    conform(pieces[1].doc, *effB);
+    TrackView v;
+    if (!buildTrackView(pieces, 0, v) || v.analysis == nullptr) { CHECK(false, "view not built"); return; }
+    const Analysis& va = *v.analysis;
+    const size_t nA = effA->notes.size();
+    // One stretched view note running from A's last note into B's first one.
+    Document d = v.doc;
+    d.edits.spans[nA - 1].end = d.edits.spans[nA].end;
+    d.edits.spans.erase(d.edits.spans.begin() + (long)nA);
+    d.edits.notes.erase(d.edits.notes.begin() + (long)nA);
+    d.edits.notes[nA - 1].stretch = 1.2;
+    const auto docs = splitTrackView(v, d, pieces);
+    if (docs.size() != 2) { CHECK(false, "split back"); return; }
+    Document db = docs[1];
+    const Analysis effB2 = withLayout(*effB, db.edits.spans);
+    conform(db, effB2);
+    const NoteTimes tb = noteTimes(effB2, db.edits)[0];
+    const int off = v.maps[1].frameOffset;
+    const double vIn0 = va.notes[nA - 1].startSec;
+    const double cutIn = tb.inStart + off * hopSec;           // the cut, in view time
+    const double expected = vIn0 + (cutIn - vIn0) * 1.2;      // where the view note's output had reached there
+    const double got = tb.outStart + off * hopSec;
+    std::printf("  part in item B starts at %.4f s, the note had reached %.4f s there\n", got, expected);
+    CHECK(std::abs(got - expected) < 1e-6, "the part in item B continues the note (%.6f vs %.6f)", got, expected);
+}
+
+// The worst overlap of any note with any earlier one (independent of the library's checks).
+static double worstOverlap(const std::vector<NoteTimes>& t)
+{
+    double w = 0, latest = -1e9;
+    for (const NoteTimes& n : t) {
+        w = std::max(w, latest - n.outStart);
+        latest = std::max(latest, n.outEnd);
+    }
+    return w;
+}
+
+static void testTimeFaults(const Analysis& a)
+{
+    std::printf("[time edits] a fault elsewhere does not block; reset, split, join keep the layout sound\n");
+    const int n = (int)a.notes.size();
+    if (n < 8) { CHECK(false, "need 8 notes"); return; }
+
+    // An overlap left by an earlier build (note 2 pulled back onto note 1).
+    EditSet bad;
+    bad.notes.resize((size_t)n);
+    {
+        const auto t = noteTimes(a, bad);
+        bad.notes[2].timeOffsetSec = -0.5 * (t[1].outEnd - t[1].outStart);
+    }
+    const double ov = worstOverlap(noteTimes(a, bad));
+    CHECK(ov > 0.01, "setup: an overlap exists (%.4f)", ov);
+    {
+        EditSet e = bad;
+        const double applied = moveNotes(e, a, {6}, 0.01);
+        std::printf("  move far from the overlap: applied %.4f of 0.01\n", applied);
+        CHECK(std::abs(applied - 0.01) < 1e-9, "a move far from an overlap is not blocked (%.4f)", applied);
+        CHECK(std::abs(worstOverlap(noteTimes(a, e)) - ov) < 1e-9, "the old overlap is untouched");
+    }
+    {
+        EditSet e = bad;
+        const double deeper = moveNotes(e, a, {2}, -0.01);
+        CHECK(deeper == 0, "the overlapping note may not go deeper (%.4f)", deeper);
+        const double away = moveNotes(e, a, {2}, 0.01);
+        CHECK(std::abs(away - 0.01) < 1e-9, "the overlapping note may move away (%.4f)", away);
+        CHECK(worstOverlap(noteTimes(a, e)) < ov - 0.009, "moving away shrinks the overlap");
+    }
+
+    // Reset: a moved run goes back as one block, touching neighbours follow.
+    {
+        EditSet e;
+        e.notes.resize((size_t)n);
+        const double applied = moveNotes(e, a, {3, 4}, 0.04);
+        CHECK(applied > 0.02, "setup: run moved (%.4f)", applied);
+        e.notes[3].pitchOffset = 1;
+        resetNoteEdits(e, a, {3, 4});
+        double worst = 0;
+        for (const auto& t : noteTimes(a, e)) worst = std::max({worst, std::abs(t.outStart - t.inStart), std::abs(t.outEnd - t.inEnd)});
+        std::printf("  reset of a moved run: every note within %.2g s of its recorded time\n", worst);
+        CHECK(worst < 1e-9, "reset brings the run and its touching neighbours back (%.3g)", worst);
+        CHECK(e.notes[3].pitchOffset == 0, "reset clears the pitch");
+    }
+    // Reset of a note whose recorded place is taken now: pitch goes, timing stays.
+    {
+        EditSet e;
+        e.notes.resize((size_t)n);
+        std::set<int> tail;
+        for (int i = 4; i < n; ++i) tail.insert(i);
+        const double applied = moveNotes(e, a, tail, 0.06);
+        if (applied > 0.05) {
+            auto t = noteTimes(a, e);
+            NoteTimes n3 = t[3];
+            n3.outEnd = t[4].inStart + 0.03; // note 3 now reaches into note 4's recorded place, not touching it
+            setNoteTimes(e.notes[3], n3);
+            e.notes[4].pitchOffset = 1;
+            const auto before = noteTimes(a, e);
+            CHECK(worstOverlap(before) < 1e-9, "setup: sound layout");
+            resetNoteEdits(e, a, {4});
+            const auto after = noteTimes(a, e);
+            CHECK(std::abs(after[4].outStart - before[4].outStart) < 1e-9 && std::abs(after[4].outEnd - before[4].outEnd) < 1e-9,
+                  "note 4 keeps its timing: its recorded place is taken");
+            CHECK(e.notes[4].pitchOffset == 0, "note 4's pitch is reset anyway");
+            CHECK(worstOverlap(after) < 1e-9, "reset makes no overlap");
+        } else {
+            CHECK(false, "setup: tail moved (%.4f)", applied);
+        }
+    }
+
+    // Split of a stretched note: the halves stay where the note was.
+    {
+        Document d;
+        conform(d, a);
+        const auto t0 = noteTimes(a, d.edits);
+        setNoteDuration(d.edits, a, 2, (t0[2].inEnd - t0[2].inStart) * 1.5);
+        const auto before = noteTimes(a, d.edits);
+        const Note& nn = a.notes[2];
+        const int frame = (nn.startFrame + nn.endFrame) / 2;
+        CHECK(splitNote(d, a, 2, frame), "split done");
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto after = noteTimes(eff, d.edits);
+        std::printf("  split of a stretched note: halves %.4f-%.4f | %.4f-%.4f, note was %.4f-%.4f\n", after[2].outStart,
+                    after[2].outEnd, after[3].outStart, after[3].outEnd, before[2].outStart, before[2].outEnd);
+        CHECK(std::abs(after[2].outStart - before[2].outStart) < 1e-9, "left half starts where the note did");
+        CHECK(std::abs(after[3].outEnd - before[2].outEnd) < 1e-9, "right half ends where the note did");
+        CHECK(std::abs(after[3].outStart - after[2].outEnd) < 1e-9, "the halves touch");
+        CHECK(worstOverlap(after) < 1e-9, "split makes no overlap");
+    }
+    // A note squeezed to its minimal length is not split (its halves would be too short).
+    {
+        Document d;
+        conform(d, a);
+        setNoteDuration(d.edits, a, 2, 0.03);
+        const Note& nn = a.notes[2];
+        CHECK(!splitNote(d, a, 2, (nn.startFrame + nn.endFrame) / 2), "a squeezed note is not split");
+    }
+
+    // Join of two notes with different timing: the joined note covers both.
+    {
+        Document d;
+        conform(d, a);
+        const auto t0 = noteTimes(a, d.edits);
+        moveBoundary(d.edits, a, 3, 0.03, {}, false); // note 3 longer, note 4 shorter (if they touch)
+        moveNotes(d.edits, a, {4}, 0.02);
+        const auto before = noteTimes(a, d.edits);
+        CHECK(joinNotes(d, a, 3), "join done");
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto after = noteTimes(eff, d.edits);
+        std::printf("  join: %.4f-%.4f + %.4f-%.4f -> %.4f-%.4f\n", before[3].outStart, before[3].outEnd, before[4].outStart,
+                    before[4].outEnd, after[3].outStart, after[3].outEnd);
+        CHECK(std::abs(after[3].outStart - before[3].outStart) < 1e-9, "joined note starts where the left one did");
+        CHECK(std::abs(after[3].outEnd - before[4].outEnd) < 1e-9, "joined note ends where the right one did");
+        CHECK(worstOverlap(after) < 1e-9, "join makes no overlap");
+        (void)t0;
+    }
+}
+
 static void testTransfer(const Analysis& a)
 {
     std::printf("[transfer A] note edits copied with per-parameter share\n");
@@ -1321,6 +1498,7 @@ int main()
     testThreadAlign();
     testThreadFix();
     testTrackView();
+    testTrackViewCut();
     testPins();
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
@@ -1349,6 +1527,7 @@ int main()
         testAutoVibrato(sr);
         testDocumentV4(a);
         testTransfer(a);
+        testTimeFaults(a);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
