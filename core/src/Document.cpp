@@ -222,6 +222,7 @@ std::string serialize(const Document& d)
     // Written only when used: a document without them is written exactly as before.
     if (d.keyMode != -1 || d.snapAmount != 1.0) o << "mode " << d.keyMode << ' ' << d.snapAmount << '\n';
     o << "lead " << d.leadGainDb << '\n';
+    if (!d.leadEnabled || d.leadPan != 0) o << "leadmix " << (int)d.leadEnabled << ' ' << d.leadPan << '\n';
     o << "tempo " << d.tempoBpm << ' ' << d.beatsPerBar << ' ' << d.barOffsetSec << '\n';
     o << "global " << e.sibilantGainDb << ' ' << e.breathGainDb << ' ' << e.globalFormantShift << ' '
       << e.transitionMs << ' ' << e.edgeTaperMs << '\n';
@@ -307,6 +308,11 @@ bool deserialize(const std::string& text, Document& out)
             d.snapAmount = std::clamp(d.snapAmount, 0.0, 1.0);
         } else if (tag == "lead") {
             in >> d.leadGainDb;
+        } else if (tag == "leadmix") {
+            int en = 1;
+            in >> en >> d.leadPan;
+            d.leadEnabled = en != 0;
+            d.leadPan = std::clamp(d.leadPan, -1.0, 1.0);
         } else if (tag == "tempo") {
             in >> d.tempoBpm >> d.beatsPerBar >> d.barOffsetSec;
             d.beatsPerBar = std::clamp(d.beatsPerBar, 1, 16);
@@ -400,7 +406,7 @@ Mix renderMix(const float* x, size_t n, const Analysis& eff, const Document& d)
             return render(x, n, eff, harmonyEdits(eff, d.edits, key, *v));
         }));
     m.lead = render(x, n, eff, d.edits);
-    const float leadGain = (float)std::pow(10.0, d.leadGainDb / 20.0);
+    const float leadGain = d.leadEnabled ? (float)std::pow(10.0, d.leadGainDb / 20.0) : 0.f;
     if (leadGain != 1.f) for (float& s : m.lead) s *= leadGain;
 
     size_t len = m.lead.size();
@@ -418,7 +424,12 @@ Mix renderMix(const float* x, size_t n, const Analysis& eff, const Document& d)
 
     m.left.assign(len, 0.f);
     m.right.assign(len, 0.f);
-    for (size_t i = 0; i < m.lead.size(); ++i) { m.left[i] += m.lead[i]; m.right[i] += m.lead[i]; }
+    {
+        const double p = std::clamp(d.leadPan, -1.0, 1.0);
+        const float gl = (float)(p <= 0 ? 1.0 : std::cos(p * M_PI / 2));
+        const float gr = (float)(p >= 0 ? 1.0 : std::cos(-p * M_PI / 2));
+        for (size_t i = 0; i < m.lead.size(); ++i) { m.left[i] += m.lead[i] * gl; m.right[i] += m.lead[i] * gr; }
+    }
     for (size_t j = 0; j < m.voices.size(); ++j) {
         const double p = std::clamp(active[j]->pan, -1.0, 1.0);
         // Balance-style pan: centre = unity on both sides, the far side fades out.

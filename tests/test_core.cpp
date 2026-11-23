@@ -280,6 +280,11 @@ static void testDocumentIO(const Analysis& a)
     CHECK(r.keyMode == 2 && std::abs(r.snapAmount - 0.6) < 1e-9, "scale mode lost");
     Document plain; // default mode and snap: no new record, same bytes as before
     CHECK(serialize(plain).find("\nmode ") == std::string::npos, "default mode written");
+    CHECK(serialize(plain).find("leadmix") == std::string::npos, "default lead mix written");
+    Document lm = d; lm.leadEnabled = false; lm.leadPan = 0.5;
+    Document lr;
+    CHECK(deserialize(serialize(lm), lr), "lead mix parse failed");
+    CHECK(!lr.leadEnabled && std::abs(lr.leadPan - 0.5) < 1e-9, "lead enable / pan lost");
 }
 
 // Scale steps per mode, and the key a document resolves to.

@@ -24,6 +24,8 @@ struct Document {
     int keyMode = -1;
     double snapAmount = 1.0; // share of the way "К ладу" moves a note to its step, 0..1
     double leadGainDb = 0;   // lead level in the mix (harmonies have their own)
+    bool leadEnabled = true; // false: the lead is left out of the mix (its checkbox)
+    double leadPan = 0;      // lead position in the mix, -1 (left) .. +1 (right)
     // Musical grid for the standalone app (a DAW host supplies its own tempo map).
     double tempoBpm = 0;     // 0 = show seconds
     int beatsPerBar = 4;

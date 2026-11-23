@@ -1769,6 +1769,12 @@ public:
         EditSlider formant, gain, pan, delay, detune;
         juce::TextButton all, sel, remove;
     };
+    // The lead (original) row: on/off, level and pan only; no interval or humanising.
+    struct LeadRow {
+        juce::ToggleButton on;
+        juce::Label note;
+        EditSlider gain, pan;
+    };
 
     explicit Harmonies(PitchEditor& o) : ed(o)
     {
@@ -1780,6 +1786,23 @@ public:
                        "Цветные полоски на нотах — партии голосов."),
                      juce::dontSendNotification);
         addAndMakeVisible(hint);
+        lead.on.setButtonText(juce::String(0));
+        lead.on.setColour(juce::ToggleButton::tickColourId, col::dim);
+        quiet(lead.on);
+        lead.on.onClick = [this] {
+            const bool v = lead.on.getToggleState();
+            ed.edit([v](Document& d) { d.leadEnabled = v; });
+        };
+        addAndMakeVisible(lead.on);
+        lead.note.setText(T("оригинал"), juce::dontSendNotification);
+        lead.note.setColour(juce::Label::textColourId, col::dim);
+        addAndMakeVisible(lead.note);
+        wireSlider(lead.gain, "Гр.", -40, 12, 0.5, "");
+        lead.gain.apply = [](Document& d, double v) { d.leadGainDb = v; };
+        lead.gain.slider.setTooltip(T("Громкость оригинала, дБ"));
+        wireSlider(lead.pan, "Пан.", -100, 100, 1, "");
+        lead.pan.apply = [](Document& d, double v) { d.leadPan = v / 100.0; };
+        lead.pan.slider.setTooltip(T("Панорама оригинала: −100 лево, +100 право"));
         add.setButtonText(T("+ Голос"));
         quiet(add);
         add.onClick = [this] {
@@ -1802,13 +1825,19 @@ public:
     int preferredHeight() const
     {
         const Document* d = ed.doc();
-        return kHeader + kRow * (d != nullptr ? (int)d->voices.size() : 0) + 6;
+        return kHeader + kRow * (1 + (d != nullptr ? (int)d->voices.size() : 0)) + 6;
     }
 
     void setupSlider(Row& row, EditSlider& s, int j, const char* name, double lo, double hi, double step,
                      const char* suffix, std::function<void(HarmonyVoice&, double)> fn)
     {
         s.apply = [j, fn](Document& d, double v) { if (j < (int)d.voices.size()) fn(d.voices[(size_t)j], v); };
+        wireSlider(s, name, lo, hi, step, suffix);
+        juce::ignoreUnused(row);
+    }
+
+    void wireSlider(EditSlider& s, const char* name, double lo, double hi, double step, const char* suffix)
+    {
         s.label.setText(T(name), juce::dontSendNotification);
         s.label.setColour(juce::Label::textColourId, col::dim);
         s.label.setJustificationType(juce::Justification::centredRight);
@@ -1834,7 +1863,6 @@ public:
         };
         addAndMakeVisible(s.label);
         addAndMakeVisible(s.slider);
-        juce::ignoreUnused(row);
     }
 
     void buildRows(int count)
@@ -1912,6 +1940,17 @@ public:
         const int n = d != nullptr ? (int)d->voices.size() : 0;
         if (n != (int)rows.size()) buildRows(n);
         add.setEnabled(d != nullptr && n < kMaxVoices);
+        if (d != nullptr) {
+            lead.on.setToggleState(d->leadEnabled, juce::dontSendNotification);
+            auto setLead = [](EditSlider& s, double x) {
+                if (s.dragging) return;
+                s.updating = true;
+                s.slider.setValue(x, juce::dontSendNotification);
+                s.updating = false;
+            };
+            setLead(lead.gain, d->leadGainDb);
+            setLead(lead.pan, d->leadPan * 100);
+        }
         for (int j = 0; j < n; ++j) {
             const HarmonyVoice& v = d->voices[(size_t)j];
             Row& r = *rows[(size_t)j];
@@ -1939,9 +1978,11 @@ public:
         g.fillAll(col::panel);
         g.setColour(col::panelLine);
         g.drawHorizontalLine(0, 0.f, (float)getWidth());
+        g.setColour(col::dim);
+        g.fillRect(0, kHeader + 6, 3, kRow - 10);
         for (int j = 0; j < (int)rows.size(); ++j) {
             g.setColour(col::voice(j));
-            g.fillRect(0, kHeader + j * kRow + 6, 3, kRow - 10);
+            g.fillRect(0, kHeader + (j + 1) * kRow + 6, 3, kRow - 10);
         }
     }
 
@@ -1953,6 +1994,17 @@ public:
         add.setBounds(head.removeFromLeft(90));
         head.removeFromLeft(10);
         hint.setBounds(head);
+        {
+            auto line = r.removeFromTop(kRow).reduced(0, 3);
+            lead.on.setBounds(line.removeFromLeft(44));
+            lead.note.setBounds(line.removeFromLeft(140));
+            line.removeFromLeft(6);
+            const int sw = juce::jlimit(70, 150, (line.getWidth() - 260) / 5 - 50);
+            for (auto* s : {&lead.gain, &lead.pan}) {
+                s->label.setBounds(line.removeFromLeft(54));
+                s->slider.setBounds(line.removeFromLeft(sw + 50));
+            }
+        }
         for (auto& rp : rows) {
             Row& row = *rp;
             auto line = r.removeFromTop(kRow).reduced(0, 3);
@@ -1960,7 +2012,7 @@ public:
             row.interval.setBounds(line.removeFromLeft(140));
             line.removeFromLeft(6);
             const int sw = juce::jlimit(70, 150, (line.getWidth() - 260) / 5 - 50);
-            for (auto* s : {&row.formant, &row.gain, &row.pan, &row.delay, &row.detune}) {
+            for (auto* s : {&row.gain, &row.pan, &row.delay, &row.formant, &row.detune}) {
                 s->label.setBounds(line.removeFromLeft(54));
                 s->slider.setBounds(line.removeFromLeft(sw + 50));
             }
@@ -1974,6 +2026,7 @@ public:
     PitchEditor& ed;
     juce::Label title, hint;
     juce::TextButton add;
+    LeadRow lead;
     std::vector<std::unique_ptr<Row>> rows;
 };
 

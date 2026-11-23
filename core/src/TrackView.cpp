@@ -249,6 +249,8 @@ std::vector<Document> splitTrackView(const TrackView& view, const Document& edit
         take(d.keyMode, edited.keyMode, built.keyMode);
         take(d.snapAmount, edited.snapAmount, built.snapAmount);
         take(d.leadGainDb, edited.leadGainDb, built.leadGainDb);
+        take(d.leadEnabled, edited.leadEnabled, built.leadEnabled);
+        take(d.leadPan, edited.leadPan, built.leadPan);
         take(d.tempoBpm, edited.tempoBpm, built.tempoBpm);
         take(d.beatsPerBar, edited.beatsPerBar, built.beatsPerBar);
         take(d.barOffsetSec, edited.barOffsetSec, built.barOffsetSec);
