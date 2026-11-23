@@ -267,7 +267,10 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     const bool touching = soft(e, base, left);
 
     const bool moveLeft = left >= 0 && (touching || !startEdge);
-    const bool moveRight = left + 1 < n && (touching || startEdge || left < 0);
+    // A selected note across a hard separation moves with the dragged edge too; unselected
+    // neighbours behind a hard separation stay put.
+    const bool rightSelected = left + 1 < n && sel.count(left + 1) > 0;
+    const bool moveRight = left + 1 < n && (touching || startEdge || left < 0 || rightSelected);
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         if (moveLeft) // left block: start fixed, end follows the boundary
