@@ -627,7 +627,19 @@ public:
     }
     juce::Rectangle<float> consRect(int i) const
     {
-        const float x0 = i > 0 ? xOf(ed.noteEndSec(i - 1)) : canvas().getX();
+        float x0 = i > 0 ? xOf(ed.noteEndSec(i - 1)) : canvas().getX();
+        // Start the zone at the first non-silent frame, so the pause before a consonant stays empty.
+        if (ed.eff_ != nullptr && i < (int)ed.eff_->notes.size()) {
+            const Analysis& A = *ed.eff_;
+            const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
+            const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+            const double hopSec = (double)A.hop / A.sampleRate;
+            for (int f = from; f < to; ++f) {
+                if (A.frames[(size_t)f].kind == FrameKind::Silence) continue;
+                x0 = std::max(x0, xOf(ed.outSec(f * hopSec)));
+                break;
+            }
+        }
         const float x1 = xOf(ed.noteStartSec(i));
         const float s = semi();
         const float y = yOf(ed.editedCentre(i));
