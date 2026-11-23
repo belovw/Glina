@@ -28,9 +28,11 @@ std::vector<ThreadFrame> threadOf(const Analysis& a, const EditSet& e, const std
         const Frame& f = a.frames[(size_t)k];
         ThreadFrame tf;
         tf.t = toCommon ? toCommon(t) : t;
-        tf.midi = (f.f0 > 0 && curve[(size_t)k] > 0) ? (float)curve[(size_t)k] : 0.f;
-        tf.kind = f.kind;
-        tf.rmsDb = f.rmsDb;
+        if (map.gainAt(t * sr, 0.0) > 0) { // a gap opened between notes stays silent (the defaults)
+            tf.midi = (f.f0 > 0 && curve[(size_t)k] > 0) ? (float)curve[(size_t)k] : 0.f;
+            tf.kind = f.kind;
+            tf.rmsDb = f.rmsDb;
+        }
         out.push_back(tf);
     }
     return out;

@@ -126,8 +126,11 @@ bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double 
     // Which note's mapping the new cut falls under: the note that now plays that moment;
     // with no shared cut, the moved note's own (extended past its edge if need be).
     const double cutOut = startEdge ? t[(size_t)note].outStart : t[(size_t)note].outEnd;
+    // Notes that touched in the recording but were pulled apart (a hard separation): the dragged
+    // edge follows the pointer and each note keeps its own place, so the gap stays.
+    const bool apart = shared && std::abs(t[(size_t)R].outStart - t[(size_t)L].outEnd) > 1e-4;
     int owner = note;
-    if (shared) owner = outSec < cutOut ? L : R;
+    if (shared && !apart) owner = outSec < cutOut ? L : R;
     int f = (int)std::lround(secFrame(owner, inOf(owner, outSec)));
     // Limits: every note keeps kMinFrames; an edge stops at the neighbour's span.
     int lo = 0, hi = (int)eff.frames.size();
@@ -148,15 +151,16 @@ bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double 
     const int old = startEdge ? spans[(size_t)note].start : spans[(size_t)note].end;
     if (f == old) return false;
     // The owner by frame (exact): who holds the audio at the new cut now.
-    if (shared) owner = f < old ? L : R;
+    if (shared && !apart) owner = f < old ? L : R;
     const double sec = frameSec(owner, f);
     const double out = outOf(owner, sec);
 
     std::vector<NoteTimes> u = t;
     std::vector<NoteSpan> s2 = spans;
     auto setEdge = [&](int k, bool start) {
-        if (start) { s2[(size_t)k].start = f; u[(size_t)k].inStart = sec; u[(size_t)k].outStart = out; }
-        else { s2[(size_t)k].end = f; u[(size_t)k].inEnd = sec; u[(size_t)k].outEnd = out; }
+        const double o = apart ? outOf(k, sec) : out;
+        if (start) { s2[(size_t)k].start = f; u[(size_t)k].inStart = sec; u[(size_t)k].outStart = o; }
+        else { s2[(size_t)k].end = f; u[(size_t)k].inEnd = sec; u[(size_t)k].outEnd = o; }
     };
     if (shared) { setEdge(L, false); setEdge(R, true); }
     else setEdge(note, startEdge);

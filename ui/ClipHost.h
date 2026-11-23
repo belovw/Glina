@@ -222,6 +222,10 @@ inline ClipHost::Ghost buildGhost(const Analysis& a, const EditSet& e,
     bool open = false;
     for (size_t k = 0; k < curve.size() && k < a.frames.size(); ++k) {
         const double t = map.inToOut(a.frameTime((int)k) * a.sampleRate) / a.sampleRate; // TimeMap works in samples
+        if (open && k > 0 && map.silenceBetween(a.frameTime((int)k - 1) * a.sampleRate, a.frameTime((int)k) * a.sampleRate)) {
+            g.curve.push_back({0.0, nan}); // a gap opened between notes: the line breaks
+            open = false;
+        }
         const bool ok = a.frames[k].f0 > 0 && std::isfinite(curve[k]) && curve[k] > 0 && t >= lo && t <= hi;
         if (!ok) {
             if (open) g.curve.push_back({0.0, nan});

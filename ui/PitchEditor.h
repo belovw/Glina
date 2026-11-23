@@ -66,7 +66,11 @@ private:
     void commit(const Document& before, bool layoutChanged = false);
     template <typename Fn> void edit(Fn&& fn, bool layoutChanged = false);
     double outSec(double inSec) const;
+    double outSecBefore(double inSec) const; // at a gap opened between notes: its start, not its end
     double inSec(double outSec) const;
+    // Output start and end of note i, as it sounds (a gap opened next to it stays out).
+    double noteStartSec(int i) const;
+    double noteEndSec(int i) const;
     double editedCentre(int note) const;
     std::vector<ClipHost::GridLine> gridLines(double t0, double t1) const;
     juce::String keyLabel(int tonic, bool minor) const;

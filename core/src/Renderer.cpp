@@ -80,19 +80,37 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
 {
     TimeMap m;
     const double sr = a.sampleRate;
+    const double minSilence = kMinSilenceSec * sr;
     m.in_.push_back(0);
     m.out_.push_back(0);
+    m.noteOut_.reserve(a.notes.size());
     double lastIn = 0, lastOut = 0;
     for (size_t i = 0; i < a.notes.size(); ++i) {
         const NoteEdit& ed = i < e.notes.size() ? e.notes[i] : kNoEdit;
         const double stretch = ed.consonant ? 1.0 : ed.stretch;
         if (ed.timeOffsetSec != 0 || stretch != 1) m.identity_ = false;
-        const double ai = std::max(lastIn + 1, a.notes[i].startSec * sr);
-        const double bi = std::max(ai + 1, a.notes[i].endSec * sr);
+        const double startIn = a.notes[i].startSec * sr;
+        double ai = std::max(lastIn + 1, startIn);
         // A note keeps its own position unless moved; a stretched or moved
         // neighbour that would overlap pushes it later instead.
         double ao = ai + ed.timeOffsetSec * sr;
         ao = std::max(ao, lastOut + 0.1 * (ai - lastIn));
+        // Further from the audio before it than in the recording: the pause (breath, consonant)
+        // keeps its length just before the note and the rest is silence. Stretched, the pause
+        // (or, between notes that touched, the one sample of their joint) would buzz.
+        const double pauseIn = std::max(0.0, startIn - lastIn);
+        if (ao - lastOut - pauseIn > minSilence) {
+            const double s1 = ao - pauseIn;
+            m.silence_.emplace_back(lastOut, s1);
+            m.silenceIn_.push_back(lastIn);
+            if (pauseIn > 0) {
+                m.in_.push_back(lastIn);
+                m.out_.push_back(s1);
+            } else {
+                ai = lastIn; // the notes touched: this one starts where the last one ended
+            }
+        }
+        const double bi = std::max(ai + 1, a.notes[i].endSec * sr);
         double bo = ao + (bi - ai) * std::max(0.05, stretch);
         bo = std::max(bo, ao + 0.1 * (bi - ai));
         m.in_.push_back(ai); m.out_.push_back(ao);
@@ -105,29 +123,87 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
             m.in_.push_back(bi - rel); m.out_.push_back(bo - rel);
         }
         m.in_.push_back(bi); m.out_.push_back(bo);
+        m.noteOut_.emplace_back(ao, bo);
         lastIn = bi; lastOut = bo;
     }
     const double end = std::max((double)a.numSamples, lastIn + 1);
-    m.in_.push_back(end);
     // The clip keeps its length (in a DAW the item does not grow): the tail after
-    // the last note absorbs any change, unless notes were pushed past the end.
-    m.out_.push_back(e.keepLength ? std::max(end, lastOut + 0.1 * (end - lastIn)) : lastOut + (end - lastIn));
-    if (m.identity_) { m.in_ = {0, end}; m.out_ = {0, end}; }
+    // the last note absorbs any change, unless notes were pushed past the end. A tail
+    // that would grow keeps its length after the last note and silence fills the rest.
+    const double endOut = e.keepLength ? std::max(end, lastOut + 0.1 * (end - lastIn)) : lastOut + (end - lastIn);
+    const double tailIn = end - lastIn;
+    if (!a.notes.empty() && endOut - lastOut - tailIn > minSilence) {
+        m.in_.push_back(end);
+        m.out_.push_back(lastOut + tailIn);
+        m.silence_.emplace_back(lastOut + tailIn, endOut);
+        m.silenceIn_.push_back(end);
+    }
+    m.in_.push_back(end);
+    m.out_.push_back(endOut);
+    if (m.identity_) {
+        m.in_ = {0, end};
+        m.out_ = {0, end};
+        m.silence_.clear();
+        m.silenceIn_.clear();
+    }
     return m;
 }
 
+// Where xs holds the same time twice (a silence: input time stands still), interpMap
+// gives the later output and interpMapBefore the earlier one.
 static double interpMap(const std::vector<double>& xs, const std::vector<double>& ys, double t)
 {
     if (xs.size() < 2) return t;
-    if (t <= xs.front()) return ys.front() + (t - xs.front());
+    if (t < xs.front()) return ys.front() + (t - xs.front());
     if (t >= xs.back()) return ys.back() + (t - xs.back());
     const size_t j = std::upper_bound(xs.begin(), xs.end(), t) - xs.begin();
     const double x0 = xs[j - 1], x1 = xs[j], y0 = ys[j - 1], y1 = ys[j];
     return x1 > x0 ? y0 + (y1 - y0) * (t - x0) / (x1 - x0) : y0;
 }
 
+static double interpMapBefore(const std::vector<double>& xs, const std::vector<double>& ys, double t)
+{
+    if (xs.size() < 2) return t;
+    if (t <= xs.front()) return ys.front() + (t - xs.front());
+    if (t > xs.back()) return ys.back() + (t - xs.back());
+    const size_t j = std::lower_bound(xs.begin(), xs.end(), t) - xs.begin(); // first x >= t (j >= 1)
+    if (xs[j] == t) return ys[j];
+    const double x0 = xs[j - 1], x1 = xs[j], y0 = ys[j - 1], y1 = ys[j];
+    return x1 > x0 ? y0 + (y1 - y0) * (t - x0) / (x1 - x0) : y0;
+}
+
 double TimeMap::inToOut(double t) const { return identity_ ? t : interpMap(in_, out_, t); }
+double TimeMap::inToOutBefore(double t) const { return identity_ ? t : interpMapBefore(in_, out_, t); }
 double TimeMap::outToIn(double t) const { return identity_ ? t : interpMap(out_, in_, t); }
+
+bool TimeMap::silenceBetween(double inA, double inB) const
+{
+    const auto it = std::upper_bound(silenceIn_.begin(), silenceIn_.end(), inA);
+    return it != silenceIn_.end() && *it <= inB;
+}
+
+namespace {
+// Level around one silence [s0, s1): fades out over `fade` before it, in after it.
+double silenceEnv(double t, double s0, double s1, double fade)
+{
+    if (t >= s0 && t < s1) return 0.0;
+    if (fade <= 0) return 1.0;
+    if (t < s0 && t >= s0 - fade) return 0.5 + 0.5 * std::cos(M_PI * (t - (s0 - fade)) / fade);
+    if (t >= s1 && t < s1 + fade) return 0.5 - 0.5 * std::cos(M_PI * (t - s1) / fade);
+    return 1.0;
+}
+} // namespace
+
+double TimeMap::gainAt(double t, double fade) const
+{
+    if (silence_.empty()) return 1.0;
+    // The first silence whose fade-in is not over by t; then every one whose fade-out has begun.
+    auto it = std::lower_bound(silence_.begin(), silence_.end(), t,
+                               [&](const std::pair<double, double>& s, double x) { return s.second + fade <= x; });
+    double g = 1.0;
+    for (; it != silence_.end() && it->first - fade <= t; ++it) g *= silenceEnv(t, it->first, it->second, fade);
+    return g;
+}
 
 // ---------------------------------------------------------------------------
 // Auto vibrato of one note, on the OUTPUT timeline (a stretched note keeps its
@@ -141,7 +217,10 @@ static bool addAutoVibrato(const Analysis& a, const TimeMap& map, const AutoVibr
     const Note& nt = a.notes[(size_t)ni];
     const double sr = a.sampleRate;
     const double t0 = map.inToOut(nt.startFrame * (double)a.hop) / sr;
-    const double t1 = map.inToOut(nt.endFrame * (double)a.hop) / sr;
+    double t1 = map.inToOut(nt.endFrame * (double)a.hop) / sr;
+    // A silence opened at the note's end: the vibrato fades out before it, as at the clip's end.
+    if (map.silenceBetween(nt.endSec * sr - 1, nt.endFrame * (double)a.hop))
+        t1 = map.inToOutBefore(nt.endSec * sr) / sr + 0.5 * a.hop / sr;
     const double rate = std::clamp(v.rateHz, 0.5, 20.0);
     const double delay = std::max(0.0, v.delayMs / 1000.0);
     if (t1 - t0 <= delay) return false;
@@ -414,6 +493,14 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         }
 
         ts += voiced ? halfR / beta : halfR;
+    }
+
+    // Gaps opened between notes: silence, with short fades in the audio on either side.
+    const double fade = kSilenceFadeSec * a.sampleRate;
+    for (const auto& [s0, s1] : map.silences()) {
+        const long b = std::max(0L, (long)std::floor(s0 - fade));
+        const long e = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+        for (long o = b; o < e; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
     }
 
     std::vector<float> out(outN);

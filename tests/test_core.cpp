@@ -1058,6 +1058,123 @@ static void testMoveCut(const Analysis& a)
         CHECK(d.edits.spans[(size_t)b].end - d.edits.spans[(size_t)b].start == 4, "the left note keeps 4 frames (%d)",
               d.edits.spans[(size_t)b].end - d.edits.spans[(size_t)b].start);
     }
+    // Pulled apart (hard separation): the dragged edge follows the pointer, the gap stays.
+    {
+        Document d;
+        conform(d, a);
+        toggleSeparation(d.edits, a, b);
+        moveBoundary(d.edits, a, b, -0.1, {}, false); // the left note ends 0.1 s earlier
+        const auto t0 = noteTimes(a, d.edits);
+        const double g0 = t0[(size_t)b + 1].outStart - t0[(size_t)b].outEnd;
+        CHECK(g0 > 0.09, "a gap is open (%.4f)", g0);
+        const double target = t0[(size_t)b + 1].outStart - 5 * hopSec; // the right note's start, 5 frames left
+        CHECK(moveCut(d, a, b + 1, true, target), "cut moved");
+        CHECK(d.edits.spans[(size_t)b + 1].start == spans[(size_t)b].end - 5, "the cut is 5 frames earlier (%d)",
+              d.edits.spans[(size_t)b + 1].start - spans[(size_t)b].end);
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto t1 = noteTimes(eff, d.edits);
+        const double g1 = t1[(size_t)b + 1].outStart - t1[(size_t)b].outEnd;
+        std::printf("  apart: gap %.4f s before, %.4f s after; right note starts %.4f s (pointer %.4f s)\n", g0, g1,
+                    t1[(size_t)b + 1].outStart, target);
+        CHECK(std::abs(t1[(size_t)b + 1].outStart - target) < 1e-6, "the dragged edge follows the pointer");
+        CHECK(g1 > 0.5 * g0, "the gap stays open");
+        CHECK(std::abs(t1[(size_t)b + 1].outEnd - t0[(size_t)b + 1].outEnd) < 1e-9 && std::abs(t1[(size_t)b].outStart - t0[(size_t)b].outStart) < 1e-9,
+              "the outer ends stay");
+    }
+}
+
+static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[gaps] notes pulled apart: the gap is silent; a pause keeps its length before the later note\n");
+    const int n = (int)a.notes.size();
+    EditSet e0;
+    e0.notes.resize((size_t)n);
+    const auto t = noteTimes(a, e0);
+    int touch = -1, gap = -1;
+    for (int b = 1; b + 2 < n; ++b) {
+        const double g = t[(size_t)b + 1].outStart - t[(size_t)b].outEnd;
+        const double dl = t[(size_t)b].outEnd - t[(size_t)b].outStart, dr = t[(size_t)b + 1].outEnd - t[(size_t)b + 1].outStart;
+        if (touch < 0 && std::abs(g) < 0.005 && dl > 0.3 && dr > 0.15) touch = b;
+        if (gap < 0 && g > 0.03 && g < 0.5 && dr > 0.15) gap = b;
+    }
+    std::printf("  touching pair at %d, pair with a pause at %d\n", touch, gap);
+    if (touch < 0 || gap < 0) { CHECK(false, "demo melody has both kinds of pairs"); return; }
+    const double fade = kSilenceFadeSec * sr;
+    const std::vector<float> y0 = render(s.audio.data(), s.audio.size(), a, e0);
+
+    { // soft: the neighbour follows, nothing opens
+        EditSet e = e0;
+        moveNotes(e, a, {touch + 1}, 0.02);
+        CHECK(TimeMap::build(a, e).silences().empty(), "soft move: no silence");
+    }
+    { // hard: the left note's end pulled back 0.2 s; the right note stays
+        EditSet e = e0;
+        toggleSeparation(e, a, touch);
+        const double applied = moveBoundary(e, a, touch, -0.2, {}, false);
+        const TimeMap m = TimeMap::build(a, e);
+        CHECK(applied < -0.19, "the edge moved (%.4f)", applied);
+        CHECK(m.silences().size() == 1, "one silence (%d)", (int)m.silences().size());
+        if (m.silences().size() != 1) return;
+        const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
+        std::printf("  touching pair: silence %.4f..%.4f s\n", s0 / sr, s1 / sr);
+        CHECK(std::abs(s0 - m.noteEndOut((size_t)touch)) < 1e-6 && std::abs(s1 - m.noteStartOut((size_t)touch + 1)) < 1e-6,
+              "the silence is the gap between the notes");
+        CHECK(std::abs(m.noteStartOut((size_t)touch + 1) / sr - t[(size_t)touch + 1].outStart) < 2.0 / sr, "the right note stays in place");
+        CHECK(std::abs((s1 - s0) / sr - 0.2) < 0.003, "the gap is 0.2 s (%.4f)", (s1 - s0) / sr);
+        const double joint = a.notes[(size_t)touch].endSec * sr;
+        CHECK(std::abs(m.inToOutBefore(joint) - s0) < 1 && std::abs(m.inToOut(joint) - s1) < 1, "the joint maps to both ends of the silence");
+        // The line of the right note's first frame sits after the silence, the left note's last before it.
+        const int fr = a.notes[(size_t)touch + 1].startFrame;
+        CHECK(m.silenceBetween((fr - 1) * (double)a.hop, fr * (double)a.hop), "the pitch line breaks at the silence");
+        CHECK(m.inToOut(fr * (double)a.hop) > s1 && m.inToOut((fr - 1) * (double)a.hop) < s0, "frames on either side");
+        const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
+        CHECK(y.size() == y0.size(), "the clip keeps its length");
+        double peak = 0;
+        for (long o = (long)std::ceil(s0); o < (long)std::floor(s1) && o < (long)y.size(); ++o) peak = std::max(peak, std::abs((double)y[(size_t)o]));
+        double after = 0;
+        for (long o = (long)(s1 + fade); o < (long)(s1 + fade + 0.05 * sr) && o < (long)y.size(); ++o) after += (double)y[(size_t)o] * y[(size_t)o];
+        after = std::sqrt(after / (0.05 * sr));
+        std::printf("  rendered: peak in the gap %.6f, level after it %.4f\n", peak, after);
+        CHECK(peak == 0, "the gap is silent");
+        CHECK(after > 0.01, "the right note sounds after it");
+        CHECK(m.gainAt(0.5 * (s0 + s1), fade) == 0 && m.gainAt(s1 + 2 * fade, fade) == 1 && m.gainAt(s0 - 2 * fade, fade) == 1,
+              "A/B follows the same silence");
+        const double mid = m.gainAt(s0 - 0.5 * fade, fade);
+        CHECK(mid > 0.4 && mid < 0.6, "a short fade before the silence (%.3f)", mid);
+    }
+    { // a pause between the notes: the right note moved later; the pause keeps its length before it
+        EditSet e = e0;
+        const double applied = moveNotes(e, a, {gap + 1}, 0.1);
+        const TimeMap m = TimeMap::build(a, e);
+        const double pause = a.notes[(size_t)gap + 1].startSec - a.notes[(size_t)gap].endSec;
+        std::printf("  pause %.4f s, note moved %.4f s, %d silence(s)\n", pause, applied, (int)m.silences().size());
+        CHECK(applied > 3 * kMinSilenceSec, "the note moved");
+        CHECK(m.silences().size() == 1, "one silence");
+        if (m.silences().size() != 1) return;
+        const double r = m.noteStartOut((size_t)gap + 1) / sr;
+        CHECK(std::abs(m.silences()[0].second / sr - (r - pause)) < 1e-6, "the silence ends where the pause begins");
+        CHECK(std::abs((m.silences()[0].second - m.silences()[0].first) / sr - applied) < 1e-3, "the silence is the move");
+        CHECK(std::abs(m.outToIn((r - 0.5 * pause) * sr) / sr - (a.notes[(size_t)gap + 1].startSec - 0.5 * pause)) < 1e-6,
+              "the pause plays at its own speed just before the note");
+    }
+    { // grown by less than the shortest silence: stretched as before
+        EditSet e = e0;
+        moveNotes(e, a, {gap + 1}, 0.5 * kMinSilenceSec);
+        CHECK(TimeMap::build(a, e).silences().empty(), "a small widening: no silence");
+    }
+    { // the last note shortened: the tail keeps its length, silence fills the clip to its end
+        EditSet e = e0;
+        const double applied = moveBoundary(e, a, n - 1, -0.2, {}, false);
+        const TimeMap m = TimeMap::build(a, e);
+        CHECK(applied < -0.19 && m.silences().size() == 1, "tail: one silence (%d, %.4f)", (int)m.silences().size(), applied);
+        if (m.silences().size() != 1) return;
+        const double tail = (double)a.numSamples - a.notes[(size_t)n - 1].endSec * sr;
+        CHECK(std::abs(m.silences()[0].first - m.noteEndOut((size_t)n - 1) - tail) < 2, "the tail keeps its length");
+        CHECK(std::abs(m.silences()[0].second - m.inToOut((double)a.numSamples)) < 1e-6 &&
+                  std::abs(m.inToOut((double)a.numSamples) - (double)a.numSamples) < 1e-6,
+              "silence to the clip's end; the clip keeps its length");
+    }
 }
 
 static void testTimeFaults(const Analysis& a)
@@ -1663,6 +1780,7 @@ int main()
         testTimeFaults(a);
         testSeparations(a);
         testMoveCut(a);
+        testSilentGaps(s, a, sr);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

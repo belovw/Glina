@@ -301,7 +301,7 @@ public:
     juce::Rectangle<float> noteRect(int i) const
     {
         const Note& n = ed.eff_->notes[(size_t)i];
-        const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
+        const float x0 = xOf(ed.noteStartSec(i)), x1 = xOf(ed.noteEndSec(i));
         const float s = semi();
         double centre = ed.editedCentre(i);
         // While a tilt is dragged the box stays put and only the line moves; it settles on release.
@@ -354,7 +354,7 @@ public:
     }
     double separationGap(int b) const
     {
-        return ed.outSec(ed.eff_->notes[(size_t)b + 1].startSec) - ed.outSec(ed.eff_->notes[(size_t)b].endSec);
+        return ed.noteStartSec(b + 1) - ed.noteEndSec(b);
     }
 
     // Separations between close neighbours: soft (linked) a thin line between the two notes;
@@ -679,6 +679,8 @@ public:
             juce::Path p;
             bool pen = false;
             for (int k = k0; k < k1; ++k) {
+                // A gap opened between notes is silent: the line breaks there.
+                if (k > 0 && ed.timeMap_.silenceBetween((k - 1) * (double)A.hop, k * (double)A.hop)) pen = false;
                 const double m = valueAt(k);
                 if (m <= 0) { pen = false; continue; }
                 const juce::Point<float> pt(xOf(ed.outSec(k * hopSec)), yOf(m));
@@ -708,8 +710,7 @@ public:
             const juce::Colour vc = col::voice((int)j);
             for (size_t i = 0; i < hp.size(); ++i) {
                 if (std::isnan(hp[i])) continue;
-                const Note& n = A.notes[i];
-                const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
+                const float x0 = xOf(ed.noteStartSec((int)i)), x1 = xOf(ed.noteEndSec((int)i));
                 const juce::Rectangle<float> r(x0, yOf(hp[i]) - s * 0.17f, std::max(2.f, x1 - x0), s * 0.34f);
                 g.setColour(vc.withAlpha(0.22f));
                 g.fillRoundedRectangle(r, 3.f);
@@ -731,7 +732,7 @@ public:
             int e = k + 1;
             while (e < (int)A.frames.size() && A.frames[(size_t)e].kind == kind) ++e;
             if (kind == FrameKind::Sibilant || kind == FrameKind::Breath) {
-                const float x0 = xOf(ed.outSec((k - 0.5) * hopSec)), x1 = xOf(ed.outSec((e - 0.5) * hopSec));
+                const float x0 = xOf(ed.outSec((k - 0.5) * hopSec)), x1 = xOf(ed.outSecBefore((e - 0.5) * hopSec));
                 if (x1 >= c.getX() && x0 <= c.getRight()) {
                     g.setColour(kind == FrameKind::Sibilant ? col::sibilant : col::breath);
                     g.fillRect(x0, y + 1, std::max(1.f, x1 - x0), kStripH - 2);
@@ -753,6 +754,7 @@ public:
         const Note& L = ed.eff_->notes[(size_t)i - 1];
         const Note& R = ed.eff_->notes[(size_t)i];
         if (R.startFrame - L.endFrame > 1) return false; // a gap: no glide to shape
+        if (ed.noteStartSec(i) - ed.noteEndSec(i - 1) > kMinSilenceSec * 0.5) return false; // pulled apart
         if ((size_t)i >= d->edits.notes.size() || d->edits.notes[(size_t)i].consonant ||
             d->edits.notes[(size_t)i - 1].consonant) return false;
         const auto bL = noteRect(i - 1), bR = noteRect(i);
@@ -2514,6 +2516,26 @@ double PitchEditor::outSec(double in) const
     return timeMap_.inToOut(in * eff_->sampleRate) / eff_->sampleRate;
 }
 
+double PitchEditor::outSecBefore(double in) const
+{
+    if (eff_ == nullptr || timeMap_.isIdentity()) return in;
+    return timeMap_.inToOutBefore(in * eff_->sampleRate) / eff_->sampleRate;
+}
+
+double PitchEditor::noteStartSec(int i) const
+{
+    if (eff_ == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
+    if (timeMap_.isIdentity() || timeMap_.noteCount() != eff_->notes.size()) return outSec(eff_->notes[(size_t)i].startSec);
+    return timeMap_.noteStartOut((size_t)i) / eff_->sampleRate;
+}
+
+double PitchEditor::noteEndSec(int i) const
+{
+    if (eff_ == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
+    if (timeMap_.isIdentity() || timeMap_.noteCount() != eff_->notes.size()) return outSec(eff_->notes[(size_t)i].endSec);
+    return timeMap_.noteEndOut((size_t)i) / eff_->sampleRate;
+}
+
 double PitchEditor::inSec(double out) const
 {
     if (eff_ == nullptr || timeMap_.isIdentity()) return out;
@@ -2645,7 +2667,7 @@ void PitchEditor::fitView()
     lo_ = std::floor(mn) - 4;
     hi_ = std::ceil(mx) + 4;
     if (hi_ - lo_ < 14) { const double c = 0.5 * (lo_ + hi_); lo_ = c - 7; hi_ = c + 7; }
-    const double first = outSec(eff_->notes.front().startSec), last = outSec(eff_->notes.back().endSec);
+    const double first = noteStartSec(0), last = noteEndSec((int)eff_->notes.size() - 1);
     const double span = std::max(1.0, last - first + 1.0);
     pps_ = std::max(2.0, roll_->canvas().getWidth() / span);
     scroll_ = std::max(0.0, first - 0.5);
@@ -3108,7 +3130,7 @@ void PitchEditor::selectStep(int dir, bool extend)
     if (!extend) selection_.clear();
     selection_.insert(i);
     // Keep the note visible.
-    const double t0 = outSec(eff_->notes[(size_t)i].startSec), t1 = outSec(eff_->notes[(size_t)i].endSec);
+    const double t0 = noteStartSec(i), t1 = noteEndSec(i);
     const double visible = roll_->canvas().getWidth() / pps_;
     if (t0 < scroll_ || t1 > scroll_ + visible) scroll_ = std::max(0.0, t0 - 0.2 * visible);
     refresh();
