@@ -281,10 +281,42 @@ static void testDocumentIO(const Analysis& a)
     Document plain; // default mode and snap: no new record, same bytes as before
     CHECK(serialize(plain).find("\nmode ") == std::string::npos, "default mode written");
     CHECK(serialize(plain).find("leadmix") == std::string::npos, "default lead mix written");
+    Document mu = d; if (mu.edits.notes.size() > 1) mu.edits.notes[1].muted = true;
+    Document mr;
+    CHECK(deserialize(serialize(mu), mr), "mute parse failed");
+    CHECK(mr.edits.notes.size() > 1 && mr.edits.notes[1].muted, "mute lost on save");
     Document lm = d; lm.leadEnabled = false; lm.leadPan = 0.5;
     Document lr;
     CHECK(deserialize(serialize(lm), lr), "lead mix parse failed");
     CHECK(!lr.leadEnabled && std::abs(lr.leadPan - 0.5) < 1e-9, "lead enable / pan lost");
+}
+
+// Mute: a muted note goes silent and keeps its place; the others are unchanged.
+static void testMute(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[mute] a muted note is silent, the rest keep sounding\n");
+    (void)s;
+    if (a.notes.size() < 3) { std::printf("  skipped: too few notes\n"); return; }
+    EditSet plain;
+    plain.notes.resize(a.notes.size());
+    EditSet muted = plain;
+    const size_t k = 1;
+    muted.notes[k].muted = true;
+    const auto y0 = render(s.audio.data(), s.audio.size(), a, plain);
+    const auto y1 = render(s.audio.data(), s.audio.size(), a, muted);
+    CHECK(y0.size() == y1.size(), "length changed by mute");
+    auto rms = [&](const std::vector<float>& y, size_t i) {
+        const size_t from = (size_t)(a.notes[i].startSec * sr), to = (size_t)(a.notes[i].endSec * sr);
+        double acc = 0;
+        for (size_t t = from; t < to && t < y.size(); ++t) acc += (double)y[t] * y[t];
+        return std::sqrt(acc / std::max<size_t>(1, to - from));
+    };
+    const double before = rms(y0, k), after = rms(y1, k);
+    CHECK(before > 1e-3, "note %zu silent even without mute", k);
+    CHECK(after < before * 1e-3, "muted note still sounds: %.6f vs %.6f", after, before);
+    const double other0 = rms(y0, 0), other1 = rms(y1, 0);
+    CHECK(std::abs(other0 - other1) < 0.02 * other0, "neighbour changed by mute: %.6f vs %.6f", other0, other1);
+    std::printf("  note %zu rms %.4f -> %.6f when muted; neighbour %.4f -> %.4f\n", k, before, after, other0, other1);
 }
 
 // Scale steps per mode, and the key a document resolves to.
@@ -1786,6 +1818,7 @@ int main()
         testSeparations(a);
         testMoveCut(a);
         testSilentGaps(s, a, sr);
+        testMute(s, a, sr);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

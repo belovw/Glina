@@ -502,6 +502,15 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         const long e = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
         for (long o = b; o < e; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
     }
+    // Muted notes: silent over their whole output span (grains of the neighbours that reach
+    // into it are removed too), so the mute is complete.
+    for (size_t i = 0; i < e.notes.size() && i < map.noteCount(); ++i) {
+        if (!e.notes[i].muted) continue;
+        const double s0 = map.noteStartOut(i), s1 = map.noteEndOut(i);
+        const long b = std::max(0L, (long)std::floor(s0 - fade));
+        const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+        for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+    }
 
     std::vector<float> out(outN);
     for (size_t k = 0; k < outN; ++k) out[k] = (float)acc[k];

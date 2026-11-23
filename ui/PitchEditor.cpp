@@ -651,11 +651,12 @@ public:
             for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k].x, yc - top[k].y);
             for (size_t k = top.size() - 1; k >= 1; --k) p.lineTo(top[k].x, yc + top[k].y);
             p.closeSubPath();
-            g.setColour(fill.withAlpha(sel ? 0.62f : 0.36f));
+            // Muted: a faint ghost of the note, kept in place.
+            g.setColour(fill.withAlpha(e.muted ? 0.14f : sel ? 0.62f : 0.36f));
             g.fillPath(p);
             // Thin, quiet outline: the fill carries the colour. Selected: the note's own colour,
             // lighter, a little thicker.
-            g.setColour(sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
+            g.setColour(e.muted ? fill.withAlpha(0.45f) : sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
             g.strokePath(p, juce::PathStrokeType(sel ? 1.2f : 0.6f));
 
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
@@ -2766,6 +2767,18 @@ void PitchEditor::applyCorrection()
     });
 }
 
+// M: mutes the selected notes; if all are muted already, unmutes them.
+void PitchEditor::toggleMuteSelection()
+{
+    if (selection_.empty() || eff_ == nullptr) return;
+    bool anyLoud = false;
+    if (Document* d = doc()) for (int i : selection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].muted) anyLoud = true;
+    const bool m = anyLoud;
+    edit([this, m](Document& d) {
+        for (int i : selection_) if (i < (int)d.edits.notes.size()) d.edits.notes[(size_t)i].muted = m;
+    });
+}
+
 void PitchEditor::resetNotes()
 {
     if (selection_.empty() || eff_ == nullptr) return;
@@ -3390,6 +3403,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         resetNotes();
         return true;
     }
+    if ((ch == 'm' || ch == 'M') && !cmd && !mods.isAltDown()) { toggleMuteSelection(); return true; }
     if (code == juce::KeyPress::homeKey) {
         scroll_ = 0;
         roll_->repaint();
