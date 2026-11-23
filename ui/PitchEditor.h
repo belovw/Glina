@@ -135,6 +135,7 @@ private:
     std::vector<std::vector<double>> harm_;    // per voice: pitch per note (NaN = muted)
     float levelRef_ = -20.f;
     std::set<int> selection_;
+    std::set<int> consSelection_; // consonant zones selected by a click: M mutes them
     double lastVibDepth_ = 30; // depth Shift+V turns auto vibrato back on with
     bool fitted_ = false;
     int toolbarH_ = 40;     // height of the toolbar (it wraps onto more lines when narrow)

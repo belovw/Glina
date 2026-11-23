@@ -642,6 +642,40 @@ public:
         return -1;
     }
 
+    // Waveform of the unvoiced sound in a consonant zone: its level frame by frame, drawn like
+    // a note's blob. Sibilants and breaths get their own shades.
+    void drawUnvoiced(juce::Graphics& g, const Analysis& A, int i, juce::Rectangle<float> r, bool muted) const
+    {
+        const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
+        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        if (to <= from) return;
+        const double hopSec = (double)A.hop / A.sampleRate;
+        const float yc = r.getCentreY();
+        const float half = semi() * 0.45f;
+        const int stride = std::max(1, (int)((to - from) / std::max(4.f, r.getWidth() / 2.f)));
+        for (int kind = 0; kind < 2; ++kind) { // 0 sibilant, 1 breath
+            const FrameKind want = kind == 0 ? FrameKind::Sibilant : FrameKind::Breath;
+            std::vector<juce::Point<float>> top, bottom;
+            for (int f = from; f < to; f += stride) {
+                const FrameKind kd = A.frames[(size_t)f].kind;
+                if (kd != want) continue;
+                const float x = xOf(ed.outSec(f * hopSec));
+                const float a = half * levelOf(A, f, 0.0);
+                top.push_back({x, yc - a});
+                bottom.push_back({x, yc + a});
+            }
+            if (top.size() < 2) continue;
+            juce::Path p;
+            p.startNewSubPath(top.front());
+            for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k]);
+            for (size_t k = bottom.size(); k-- > 0;) p.lineTo(bottom[k]);
+            p.closeSubPath();
+            const float alpha = muted ? 0.18f : (kind == 0 ? 0.55f : 0.35f);
+            g.setColour((kind == 0 ? col::offTune : col::dim).withAlpha(alpha));
+            g.fillPath(p);
+        }
+    }
+
     void drawNotes(juce::Graphics& g, const Analysis& A, const Document& d)
     {
         for (int i = 0; i < (int)A.notes.size() && i < (int)d.edits.notes.size(); ++i) {
@@ -649,10 +683,12 @@ public:
             const auto r = consRect(i);
             if (r.getWidth() < 2.f) continue;
             const bool m = d.edits.notes[(size_t)i].consMuted;
-            g.setColour(col::dim.withAlpha(m ? 0.10f : 0.28f));
+            const bool sel = ed.consSelection_.count(i) > 0;
+            g.setColour(col::dim.withAlpha(m ? 0.10f : sel ? 0.45f : 0.28f));
             g.fillRoundedRectangle(r, 3.f);
-            g.setColour(col::dim.withAlpha(m ? 0.4f : 0.6f));
-            g.drawRoundedRectangle(r, 3.f, 0.8f);
+            g.setColour(sel ? col::lift : col::dim.withAlpha(m ? 0.4f : 0.6f));
+            g.drawRoundedRectangle(r, 3.f, sel ? 1.4f : 0.8f);
+            drawUnvoiced(g, A, i, r, m);
         }
         const auto c = canvas();
         const float s = semi();
@@ -1087,16 +1123,16 @@ public:
             startPps_ = ed.pps_;
             return;
         }
-        // A click on a consonant zone mutes or unmutes that consonant.
+        // A click on a consonant zone selects it; M then mutes the selected zones.
         if (!e.mods.isAnyModifierKeyDown() && !e.mods.isPopupMenu()) {
             const int cons = consonantAt(e.position);
             if (cons >= 0) {
-                ed.edit([cons](Document& d) {
-                    if (cons < (int)d.edits.notes.size()) d.edits.notes[(size_t)cons].consMuted = !d.edits.notes[(size_t)cons].consMuted;
-                });
+                ed.consSelection_ = {cons};
+                repaint();
                 return;
             }
         }
+        if (!ed.consSelection_.empty()) { ed.consSelection_.clear(); repaint(); }
         bool refEnd = false;
         const int pin = pinAt(e.position, refEnd);
         if (pin >= 0 && !e.mods.isPopupMenu()) {
@@ -2826,6 +2862,16 @@ void PitchEditor::applyCorrection()
 // M: mutes the selected notes; if all are muted already, unmutes them.
 void PitchEditor::toggleMuteSelection()
 {
+    if (!consSelection_.empty()) {
+        bool anyLoud = false;
+        if (Document* d = doc()) for (int i : consSelection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].consMuted) anyLoud = true;
+        const bool cm = anyLoud;
+        const std::set<int> zones = consSelection_;
+        edit([zones, cm](Document& d) {
+            for (int i : zones) if (i < (int)d.edits.notes.size()) d.edits.notes[(size_t)i].consMuted = cm;
+        });
+        return;
+    }
     if (selection_.empty() || eff_ == nullptr) return;
     bool anyLoud = false;
     if (Document* d = doc()) for (int i : selection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].muted) anyLoud = true;
