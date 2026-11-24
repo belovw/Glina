@@ -242,6 +242,8 @@ public:
             "  N — связи с первым показанным треком: где их нитки совпадают по времени (звук не меняется)\n"
             "  F — при связях: неверные ноты (на полутон и больше от того трека) сдвинуть целыми полутонами;\n"
             "      с интервалом (прима, терция…) — подтянуть ноты к тому треку по высоте и времени. Выделенные или все\n"
+            "  Shift+N — правка связей: тянуть связь (или от нитки) — её конец на референсе едет за мышью;\n"
+            "      квадратики — свои связи: тянуть, двойной щелчок или Delete — удалить; правая кнопка — меню\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -499,7 +501,9 @@ public:
                         if (ed.links_.info.octave != 0)
                             st << T(", октава ") << (ed.links_.info.octave > 0 ? "+" : "") << ed.links_.info.octave;
                         if (ed.links_.info.part) st << T(", другая партия");
-                        if (ed.intervalSteps() != kNoInterval) {
+                        if (ed.editLinks_) {
+                            st << T(" · ПРАВКА СВЯЗЕЙ: тяни связь, Esc — выйти");
+                        } else if (ed.intervalSteps() != kNoInterval) {
                             juce::String from;
                             const Key ik = ed.intervalKey(&from);
                             st << T(" · ") << ed.intervalName();
@@ -749,6 +753,7 @@ public:
         const double every = std::max(0.08, 14.0 / ed.pps_);
         double next = -1e9;
         juce::Path p, dots;
+        segs_.clear();
         for (const auto& f : L.tgt) {
             if (f.midi <= 0 || f.t < next) continue;
             const float x0 = xOf(f.t);
@@ -760,6 +765,7 @@ public:
             const juce::Point<float> a(x0, yOf(f.midi)), b(xOf(rt), yOf(rm + sh));
             p.startNewSubPath(a);
             p.lineTo(b);
+            segs_.push_back({f.t, juce::Line<float>(a, b)});
             dots.addEllipse(a.x - 1.5f, a.y - 1.5f, 3.f, 3.f);
             dots.addEllipse(b.x - 1.5f, b.y - 1.5f, 3.f, 3.f);
             next = f.t + every;
@@ -770,9 +776,24 @@ public:
         g.setColour(link);
         g.fillPath(dots);
 
-        // Pins: a square at each end (target on this track, reference on the reference).
+        // The link a press would take (link editing): drawn thick.
+        if (ed.editLinks_ && !std::isnan(hoverLinkT_) && gesture == G::None) {
+            const juce::Point<float> a = linkEnd(hoverLinkT_, false), b = linkEnd(L.warp.map(hoverLinkT_), true);
+            if (a.x > -1e8f && b.x > -1e8f) {
+                g.setColour(link);
+                g.drawLine(juce::Line<float>(a, b), 2.5f);
+            }
+        }
+        // Pins: a thick line and a square at each end (target on this track, reference on the reference).
         if (L.pinsOn) {
             const auto& pins = ed.doc()->pins;
+            for (size_t i = 0; i < pins.size(); ++i) {
+                const auto a = pinPoint(pins[i], false), b = pinPoint(pins[i], true);
+                if (a.x > -1e8f && b.x > -1e8f) {
+                    g.setColour(link.withAlpha(0.9f));
+                    g.drawLine(juce::Line<float>(a, b), ed.hoverPin_ == (int)i ? 3.f : 2.2f);
+                }
+            }
             for (size_t i = 0; i < pins.size(); ++i)
                 for (int k = 0; k < 2; ++k) {
                     const auto q = pinPoint(pins[i], k == 1);
@@ -920,7 +941,13 @@ public:
         bool refEnd = false;
         const int pin = pinAt(e.position, refEnd);
         if (pin != ed.hoverPin_) { ed.hoverPin_ = pin; repaint(); }
-        if (pin >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
+        if (pin >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); setHoverLink(NAN); return; }
+        if (ed.editLinks_) {
+            const double t = linkUnder(e.position);
+            setHoverLink(t);
+            setMouseCursor(std::isnan(t) ? juce::MouseCursor::NormalCursor : juce::MouseCursor::DraggingHandCursor);
+            return;
+        }
         if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
         const int th = hitThread(e.position);
         if (th != hoverThread) { hoverThread = th; repaint(); }
@@ -937,6 +964,7 @@ public:
     void mouseExit(const juce::MouseEvent&) override
     {
         ed.hoverPin_ = -1;
+        setHoverLink(NAN);
         if (hoverThread >= 0) { hoverThread = -1; repaint(); }
     }
 
@@ -963,13 +991,42 @@ public:
             return;
         }
         bool refEnd = false;
-        const int pin = pinAt(e.position, refEnd);
+        int pin = pinAt(e.position, refEnd);
+        if (pin < 0 && ed.editLinks_) { pin = pinLineAt(e.position); refEnd = true; } // the line of a pin: its reference end
+        if (ed.editLinks_ && e.mods.isPopupMenu()) { showLinksMenu(pin); return; }
         if (pin >= 0 && !e.mods.isPopupMenu()) {
             if (e.getNumberOfClicks() >= 2) { ed.removePin(pin); return; } // double click removes it
             gesture = G::PinEnd;
             pinIdx_ = (size_t)pin;
             pinRefEnd_ = refEnd;
+            pinFresh_ = false;
             before = *ed.doc();
+            pinsBase_ = before.pins;
+            return;
+        }
+        if (ed.editLinks_) {
+            // Any link (or a point of either thread) taken: it becomes a pin, its end on this track
+            // stays, its end on the reference follows the mouse. A click without a drag adds nothing.
+            const double t = linkUnder(e.position);
+            if (std::isnan(t) || ed.ghosts_.empty() || e.getNumberOfClicks() >= 2) return;
+            Document* d = ed.doc();
+            const std::string id = ed.ghosts_.front().id.toStdString();
+            std::vector<Pin> pins = d->pinRef == id ? d->pins : std::vector<Pin>{};
+            const Pin np{t, ed.links_.warp.map(t)};
+            if (!glina::addPin(pins, np)) return; // on a pin already
+            size_t k = 0;
+            while (k < pins.size() && pins[k].tgt != np.tgt) ++k;
+            if (k == pins.size()) return;
+            before = *d;
+            d->pins = pins;
+            d->pinRef = id;
+            pinsBase_ = pins;
+            gesture = G::PinEnd;
+            pinIdx_ = k;
+            pinRefEnd_ = true;
+            pinFresh_ = true;
+            pinDown_ = e.position;
+            setHoverLink(NAN);
             return;
         }
         if (e.mods.isAltDown() && !e.mods.isPopupMenu() && onOurThread(e.position)) {
@@ -1066,7 +1123,7 @@ public:
             return;
         }
         if (gesture == G::PinEnd) {
-            d->pins = before.pins;
+            d->pins = pinsBase_;
             if (glina::movePin(d->pins, pinIdx_, pinRefEnd_, secOf(e.position.x))) {
                 changed = true;
                 ed.refreshLinks();
@@ -1162,9 +1219,17 @@ public:
         marquee = {};
         if (g0 == G::ViewPan || g0 == G::ViewZoom) return;
         if (g0 == G::PinEnd) {
-            if (changed) ed.commit(before);
+            Document* d = ed.doc();
+            const bool dragged = !pinFresh_ || pinDown_.getDistanceFrom(e.position) > 4.f;
+            if (pinFresh_ && !dragged && d != nullptr) { // a click: the pin it made goes again
+                d->pins = before.pins;
+                d->pinRef = before.pinRef;
+                ed.refreshLinks();
+                ed.refresh();
+            } else if (changed || pinFresh_) ed.commit(before);
             else ed.refresh();
             changed = false;
+            pinFresh_ = false;
             return;
         }
         if (g0 == G::PinNew) {
@@ -1190,6 +1255,9 @@ public:
 
     void mouseDoubleClick(const juce::MouseEvent& e) override
     {
+        // Link editing, or a pin under the pointer: the double click was for the link (mouseDown removes a pin).
+        bool refEnd = false;
+        if (ed.editLinks_ || pinAt(e.position, refEnd) >= 0) return;
         const int i = hitNote(e.position);
         const int gi = i < 0 ? hitGhost(e.position) : -1;
         if (i >= 0) {
@@ -1346,6 +1414,78 @@ public:
     juce::Point<float> viewFrom_;   // ViewPan / ViewZoom: where the drag started
     double startScroll_ = 0, startLo_ = 0, startHi_ = 0, startPps_ = 1; // the view at that moment
     juce::Point<float> pinAnchor_;  // PinNew: where the drag started, on this track's thread
+    std::vector<Pin> pinsBase_;     // PinEnd: the pins as the drag started (with the new one)
+    bool pinFresh_ = false;         // PinEnd: the pin was made by this press (link editing)
+    juce::Point<float> pinDown_;    // PinEnd: where that press was
+    double hoverLinkT_ = NAN;       // link editing: the link a press would take (this track's time)
+    struct Seg { double t; juce::Line<float> line; };
+    std::vector<Seg> segs_;         // the links drawn last (this track's time, line on the roll)
+
+    void setHoverLink(double t)
+    {
+        if (std::isnan(t) && std::isnan(hoverLinkT_)) return;
+        if (!std::isnan(t) && !std::isnan(hoverLinkT_) && std::abs(t - hoverLinkT_) < 1e-9) return;
+        hoverLinkT_ = t;
+        repaint();
+    }
+    // A point of a thread: this track's at its time `sec`, or the reference's (lifted with the ghost).
+    juce::Point<float> linkEnd(double sec, bool ref) const
+    {
+        const float sh = ed.ghostShift_ ? (float)ghostShift(0) : 0.f;
+        const float m = ref ? ed.linkRefMidi(sec) : ed.linkTgtMidi(sec);
+        if (m <= 0.f) return {-1e9f, -1e9f};
+        return {xOf(sec), yOf(ref ? m + sh : m)};
+    }
+    // Link editing: the link under p, as this track's time: on this track's thread (that time),
+    // on the reference's thread (the time that maps there), or on a drawn link line. NaN = none.
+    double linkUnder(juce::Point<float> p) const
+    {
+        if (!ed.editLinks_ || !ed.links_.ok || !canvas().contains(p)) return NAN;
+        const double t = secOf(p.x);
+        if (onOurThread(p)) return t;
+        const float sh = ed.ghostShift_ ? (float)ghostShift(0) : 0.f;
+        const float rm = ed.linkRefMidi(t);
+        if (rm > 0.f && std::abs(yOf(rm + sh) - p.y) <= 8.f) {
+            const double tt = ed.links_.warp.unmap(t);
+            if (ed.linkTgtMidi(tt) > 0.f) return tt;
+        }
+        double best = 6.0, bt = NAN;
+        for (const auto& sg : segs_) {
+            juce::Point<float> q;
+            const double dist = sg.line.getDistanceFromPoint(p, q);
+            if (dist < best) { best = dist; bt = sg.t; }
+        }
+        return bt;
+    }
+    // The pin whose line (between its ends) passes within 5 px of p; -1 when none.
+    int pinLineAt(juce::Point<float> p) const
+    {
+        if (!ed.links_.pinsOn || ed.doc() == nullptr) return -1;
+        const auto& pins = ed.doc()->pins;
+        for (size_t i = 0; i < pins.size(); ++i) {
+            const auto a = pinPoint(pins[i], false), b = pinPoint(pins[i], true);
+            if (a.x < -1e8f || b.x < -1e8f) continue;
+            juce::Point<float> q;
+            if (juce::Line<float>(a, b).getDistanceFromPoint(p, q) <= 5.f) return (int)i;
+        }
+        return -1;
+    }
+    void showLinksMenu(int pin)
+    {
+        juce::PopupMenu m;
+        const int own = ed.links_.pinsOn && ed.doc() != nullptr ? (int)ed.doc()->pins.size() : 0;
+        m.addItem(1, T("Удалить эту связь\tDel"), pin >= 0);
+        m.addItem(2, T("Удалить все свои связи (") + juce::String(own) + ")", own > 0);
+        m.addSeparator();
+        m.addItem(3, T("Закончить правку связей\tShift+N"), true);
+        juce::Component::SafePointer<Roll> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withMousePosition(), [safe, pin](int r) {
+            if (safe == nullptr) return;
+            if (r == 1 && pin >= 0) safe->ed.removePin(pin);
+            else if (r == 2) safe->ed.removeAllPins();
+            else if (r == 3) safe->ed.setEditLinks(false);
+        });
+    }
 
     // The pin end under p (index, reference end?); -1 when none.
     int pinAt(juce::Point<float> p, bool& refEnd) const
@@ -2371,6 +2511,13 @@ PitchEditor::PitchEditor()
         roll_->repaint();
     };
     addChildComponent(intervalBox_);
+    editLinksBtn_.setButtonText(T("Править связи"));
+    editLinksBtn_.setTooltip(T("Правка связей (Shift+N): тянуть связь или нитку — конец связи на референсе едет за мышью; "
+                               "свои связи — с квадратиками: тянуть концы, двойной щелчок или Delete — удалить, правая кнопка — меню. "
+                               "Ноты в этом режиме не трогаются; применяет связи F"));
+    editLinksBtn_.onClick = [this] { setEditLinks(!editLinks_); };
+    quiet(editLinksBtn_);
+    addChildComponent(editLinksBtn_);
     corr(timeSlider_, timeLbl_, "Время", 92, "Насколько подтянуть ноты по времени к тому треку при F с интервалом");
     timeSlider_.setVisible(false);
     timeLbl_.setVisible(false);
@@ -2654,6 +2801,8 @@ void PitchEditor::layoutInspector()
 // ---- self-test hooks -------------------------------------------------------------------
 juce::Rectangle<float> PitchEditor::noteRectForTest(int i) const { return roll_->noteRect(i); }
 
+juce::Point<float> PitchEditor::linkEndForTest(float x, bool ref) const { return roll_->linkEnd(roll_->secOf(x), ref); }
+
 juce::Point<float> PitchEditor::threadHandleForTest(int i) const
 {
     return roll_->hasThread(i) ? roll_->threadHandle(i) : juce::Point<float>(-1.f, -1.f);
@@ -2858,11 +3007,28 @@ void PitchEditor::removePin(int i)
     edit([&](Document& d) { if (i >= 0 && (size_t)i < d.pins.size()) d.pins.erase(d.pins.begin() + i); });
 }
 
+void PitchEditor::removeAllPins()
+{
+    hoverPin_ = -1;
+    edit([](Document& d) { d.pins.clear(); });
+}
+
+void PitchEditor::setEditLinks(bool on)
+{
+    if (on && !showLinks_) toggleLinks();
+    editLinks_ = on && showLinks_;
+    hoverPin_ = -1;
+    updateToolbar();
+    roll_->repaint();
+}
+
 void PitchEditor::toggleLinks()
 {
     showLinks_ = !showLinks_;
-    for (juce::Component* c : std::initializer_list<juce::Component*>{&intervalBox_, &timeLbl_, &timeSlider_})
+    if (!showLinks_) editLinks_ = false;
+    for (juce::Component* c : std::initializer_list<juce::Component*>{&intervalBox_, &timeLbl_, &timeSlider_, &editLinksBtn_})
         c->setVisible(showLinks_);
+    updateToolbar();
     resized();
     refreshLinks();
     roll_->repaint();
@@ -3146,6 +3312,8 @@ void PitchEditor::updateToolbar()
     const bool by = host_ != nullptr && host_->isBypassed();
     abBtn_.setColour(juce::TextButton::buttonColourId, by ? col::warn.darker(col::light ? 0.f : 0.3f) : col::button);
     harmBtn_.setColour(juce::TextButton::buttonColourId, showHarmonies_ ? col::buttonOn : col::button);
+    editLinksBtn_.setColour(juce::TextButton::buttonColourId, editLinks_ ? col::buttonOn : col::button);
+    editLinksBtn_.setEnabled(ready);
     tracksBtn_.on = showTracks_;
     shiftBtn_.on = ghostShift_;
     triBtn_.on = triplets_;
@@ -3183,7 +3351,8 @@ void PitchEditor::resized()
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},
-        {&intervalBox_, 132, 4, 110}, {&timeLbl_, 44, 2, 44},    {&timeSlider_, 118, 12, 100},
+        {&intervalBox_, 132, 4, 110}, {&timeLbl_, 44, 2, 44},    {&timeSlider_, 118, 4, 100},
+        {&editLinksBtn_, 118, 12, 118},
         {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
@@ -3260,6 +3429,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     if (code == juce::KeyPress::F1Key || (ch == '?' && !cmd)) { showHelp(!help_->isVisible()); return true; }
     if (code == juce::KeyPress::escapeKey) {
         if (help_->isVisible()) showHelp(false);
+        else if (editLinks_) setEditLinks(false);
         else if (pencil_) setPencil(false);
         else { selection_.clear(); refresh(); }
         return true;
@@ -3285,6 +3455,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) {
         if (hoverPin_ >= 0) { removePin(hoverPin_); return true; }
+        if (editLinks_) return true; // link editing: Delete touches only links
         resetNotes();
         return true;
     }
@@ -3307,7 +3478,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         case 'b': toggleBypass(); return true;
         case 'h': showHarmonies_ = !showHarmonies_; resized(); updateToolbar(); return true;
         case 't': toggleTracks(); return true;
-        case 'n': toggleLinks(); return true;
+        case 'n': if (mods.isShiftDown()) setEditLinks(!editLinks_); else toggleLinks(); return true;
         case 'f': applyLinkFixes(); return true;
         case '0': fitView(); return true;
         case '+': case '=': pps_ = std::min(4000.0, pps_ * 1.4); roll_->repaint(); return true;

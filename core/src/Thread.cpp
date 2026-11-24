@@ -77,6 +77,16 @@ double Warp::map(double t) const
     return x1 > x0 ? ref[j - 1] + (ref[j] - ref[j - 1]) * (t - x0) / (x1 - x0) : ref[j - 1];
 }
 
+double Warp::unmap(double r) const
+{
+    if (ref.empty()) return r;
+    if (ref.size() == 1 || r <= ref.front()) return tgt.front() + (r - ref.front());
+    if (r >= ref.back()) return tgt.back() + (r - ref.back());
+    const size_t j = (size_t)(std::upper_bound(ref.begin(), ref.end(), r) - ref.begin());
+    const double y0 = ref[j - 1], y1 = ref[j];
+    return y1 > y0 ? tgt[j - 1] + (tgt[j] - tgt[j - 1]) * (r - y0) / (y1 - y0) : tgt[j - 1];
+}
+
 namespace {
 
 // Frames on a uniform grid t0 + k * step (nearest frame of a time-sorted thread).

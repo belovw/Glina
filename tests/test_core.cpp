@@ -1012,6 +1012,9 @@ static void testThreadAlign()
         const double e = std::abs(w.map(p.tgt) - p.ref);
         std::printf("  pin: passes %.1f ms from the pinned point\n", e * 1000);
         CHECK(e < 0.012, "pin missed by %.1f ms", e * 1000);
+        double worst = 0;
+        for (double t = 0.1; t < 4.0; t += 0.037) worst = std::max(worst, std::abs(w.unmap(w.map(t)) - t));
+        CHECK(worst < 1e-6, "unmap is not the inverse of map (%.2e s)", worst);
     }
 }
 

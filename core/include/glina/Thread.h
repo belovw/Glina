@@ -53,6 +53,7 @@ struct AlignOptions {
 struct Warp {
     std::vector<double> tgt, ref; // anchors, both increasing
     double map(double tgtSec) const;
+    double unmap(double refSec) const; // the inverse: the target time that maps to refSec
     bool empty() const { return tgt.size() < 2; }
 };
 

@@ -44,6 +44,10 @@ public:
     void setIntervalForTest(int boxId) { intervalBox_.setSelectedId(boxId); } // links: 1 off, 2 unison, 3 third up ...
     void pressThemeButtonForTest() { themeBtn_.triggerClick(); }
     void dragForTest(juce::Point<float> from, juce::Point<float> to);
+    // Links: the roll point of this track's thread (ref: the reference's) at roll x; pins in the document.
+    juce::Point<float> linkEndForTest(float x, bool ref) const;
+    int pinCountForTest() const { return doc() != nullptr ? (int)doc()->pins.size() : 0; }
+    bool editLinksForTest() const { return editLinks_; }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -96,6 +100,9 @@ private:
     float linkTgtMidi(double t) const; // this track's pitch at time t (0 = none)
     void addLinkPin(double tgtSec, double refSec); // a pin between this track and the reference
     void removePin(int i);
+    void removeAllPins();
+    // Link editing mode (button «Править связи», Shift+N): the mouse works on the links only.
+    void setEditLinks(bool on);
     void pollTracks();
     void switchTrack(const juce::String& id);
     void toggleTracks();
@@ -172,6 +179,8 @@ private:
     IconButton shiftBtn_;   // visual +3 semitone shift of the ghosts
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     bool showLinks_ = false;
+    bool editLinks_ = false;                         // link editing mode (notes are not touched)
+    juce::TextButton editLinksBtn_;
     MouseScheme scheme_;                             // wheel and drag actions by modifier keys
     int hoverPin_ = -1;                              // pin end under the pointer (Delete removes it)
     struct Links {

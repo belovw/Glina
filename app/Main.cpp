@@ -306,6 +306,7 @@ public:
             if (args[i] == "--selftest") { selftest_ = true; continue; }
             if (args[i] == "--links") { links_ = true; continue; }
             if (args[i] == "--fix") { fix_ = true; continue; }
+            if (args[i] == "--links-edit-test") { linksEdit_ = true; continue; }
             if (args[i] == "--interval" && i + 1 < args.size()) { interval_ = args[++i].getIntValue(); continue; } // box id: 2 unison, 3 third up...
             if (args[i] == "--light") continue;
             if (args[i] == "--toggle-theme") { ++toggleTheme_; continue; } // switch live, as the button does (check)
@@ -375,6 +376,7 @@ private:
                 return;
             }
             if (fix_ && !fixDone_) { fixDone_ = true; m.editor().keyPressed(juce::KeyPress('f', {}, 'f')); return; }
+            if (linksEdit_ && !linksEditDone_) { linksEditDone_ = true; linksEditTest(m); return; }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
                 demoDone_ = true;
@@ -392,6 +394,45 @@ private:
     }
 
     // End-to-end check of editor actions through the real UI paths. Returns true when finished.
+    // Link editing with the mouse (after --links): add by dragging a link, a click adds nothing,
+    // add from the reference's thread, move a pin's end, Delete over a pin, undo.
+    static void linksEditTest(MainComponent& m)
+    {
+        auto& ed = m.editor();
+        int fails = 0;
+        auto check = [&](bool ok, const char* what) { std::printf("%s %s\n", ok ? "PASS" : "FAIL", what); if (!ok) ++fails; };
+        ed.keyPressed(juce::KeyPress('N', juce::ModifierKeys::shiftModifier, 'N'));
+        check(ed.editLinksForTest(), "Shift+N turns link editing on");
+        const int n0 = ed.pinCountForTest();
+        const auto r4 = ed.noteRectForTest(4);
+        const auto a = ed.linkEndForTest(r4.getCentreX(), false);
+        std::printf("  note 4 centre x %.0f, our thread at (%.0f, %.0f)\n", r4.getCentreX(), a.x, a.y);
+        ed.dragForTest(a, a.translated(40.f, -30.f));
+        check(ed.pinCountForTest() == n0 + 1, "a drag from this track's thread adds a pin");
+        const auto r6 = ed.noteRectForTest(6);
+        const auto c = ed.linkEndForTest(r6.getCentreX(), false);
+        ed.dragForTest(c, c.translated(2.f, 0.f));
+        check(ed.pinCountForTest() == n0 + 1, "a click (no drag) adds nothing");
+        const auto r2 = ed.noteRectForTest(2);
+        const auto b = ed.linkEndForTest(r2.getCentreX(), true);
+        std::printf("  reference thread at (%.0f, %.0f)\n", b.x, b.y);
+        ed.dragForTest(b, b.translated(-25.f, 0.f));
+        check(ed.pinCountForTest() == n0 + 2, "a drag from the reference's thread adds a pin");
+        const auto r1 = ed.noteRectForTest(1);
+        const auto e = ed.linkEndForTest(r1.getCentreX(), false);
+        ed.dragForTest(e, e); // only hovers and clicks: nothing under it changes
+        check(ed.pinCountForTest() == n0 + 2, "a click elsewhere keeps the pins");
+        ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+        check(ed.pinCountForTest() == n0 + 1, "undo takes the last pin back");
+        ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+        check(ed.pinCountForTest() == n0, "undo again: no pins");
+        const juce::ModifierKeys redo(juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier);
+        ed.keyPressed(juce::KeyPress('z', redo, 'z'));
+        ed.keyPressed(juce::KeyPress('z', redo, 'z'));
+        check(ed.pinCountForTest() == n0 + 2, "redo brings both pins back");
+        std::printf("LINKS EDIT: %d failure(s)\n", fails);
+    }
+
     bool selfTestStep(MainComponent& m)
     {
         Session& s = m.session();
@@ -742,6 +783,7 @@ private:
     std::unique_ptr<juce::Timer> poll_;
     juce::File shotFile_;
     int interval_ = 0; // --interval: the links' interval box id
+    bool linksEdit_ = false, linksEditDone_ = false; // --links-edit-test
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;
     bool tracksShown_ = false;
