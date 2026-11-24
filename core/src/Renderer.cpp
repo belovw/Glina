@@ -85,6 +85,7 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
     m.out_.push_back(0);
     m.noteOut_.reserve(a.notes.size());
     double lastIn = 0, lastOut = 0;
+    bool lastDeleted = false;
     for (size_t i = 0; i < a.notes.size(); ++i) {
         const NoteEdit& ed = i < e.notes.size() ? e.notes[i] : kNoEdit;
         const double stretch = ed.consonant ? 1.0 : ed.stretch;
@@ -92,9 +93,12 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         const double startIn = a.notes[i].startSec * sr;
         double ai = std::max(lastIn + 1, startIn);
         // A note keeps its own position unless moved; a stretched or moved
-        // neighbour that would overlap pushes it later instead.
+        // neighbour that would overlap pushes it later instead. A deleted note (silent)
+        // and the pause next to it give way instead: a neighbour stretched over them
+        // squeezes them and does not push the notes after them.
+        const double squeeze = ed.deleted || lastDeleted ? 1e-3 : 0.1;
         double ao = ai + ed.timeOffsetSec * sr;
-        ao = std::max(ao, lastOut + 0.1 * (ai - lastIn));
+        ao = std::max(ao, lastOut + squeeze * (ai - lastIn));
         // Further from the audio before it than in the recording: the pause (breath, consonant)
         // keeps its length just before the note and the rest is silence. Stretched, the pause
         // (or, between notes that touched, the one sample of their joint) would buzz.
@@ -113,18 +117,22 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         const double bi = std::max(ai + 1, a.notes[i].endSec * sr);
         double bo = ao + (bi - ai) * std::max(0.05, stretch);
         bo = std::max(bo, ao + 0.1 * (bi - ai));
+        if (ed.deleted) // ends where its own layout ends, however far a neighbour pushed its start
+            bo = std::max(startIn + ed.timeOffsetSec * sr + (a.notes[i].endSec * sr - startIn) * std::max(0.05, stretch),
+                          ao + 1e-3 * (bi - ai));
         m.in_.push_back(ai); m.out_.push_back(ao);
         // Only the steady middle of a note is stretched: the attack and the
         // transition into the next note keep their timing, so transients stay crisp.
         const double din = bi - ai, dout = bo - ao;
         const double att = std::min(0.040 * sr, 0.30 * din), rel = std::min(0.030 * sr, 0.20 * din);
-        if (std::abs(dout - din) > 1 && dout - att - rel > 0.15 * (din - att - rel)) {
+        if (!ed.deleted && std::abs(dout - din) > 1 && dout - att - rel > 0.15 * (din - att - rel)) {
             m.in_.push_back(ai + att); m.out_.push_back(ao + att);
             m.in_.push_back(bi - rel); m.out_.push_back(bo - rel);
         }
         m.in_.push_back(bi); m.out_.push_back(bo);
         m.noteOut_.emplace_back(ao, bo);
         lastIn = bi; lastOut = bo;
+        lastDeleted = ed.deleted;
     }
     const double end = std::max((double)a.numSamples, lastIn + 1);
     // The clip keeps its length (in a DAW the item does not grow): the tail after

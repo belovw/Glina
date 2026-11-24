@@ -325,6 +325,21 @@ static void testDelete(const test::SynthResult& s, const Analysis& a, double sr)
     deleteBreaths(br, a, {(int)k});
     restoreDeleted(br, (int)k - 1);
     CHECK(!br.notes[k].breathDeleted, "alt-drag did not bring the breath back");
+    // The note before a deleted one stretched over it: the notes after stay where they were.
+    if (a.notes.size() >= 4) {
+        EditSet over = plain;
+        deleteNotes(over, a, {1, 2});
+        const std::vector<NoteTimes> t0 = noteTimes(a, over);
+        const double want = t0[3].outStart - 1e-3; // just before the next live note
+        moveBoundary(over, a, 0, want - t0[0].outEnd, {0}, false);
+        const std::vector<NoteTimes> t1 = noteTimes(a, over);
+        CHECK(t1[0].outEnd > t0[2].outStart, "the stretch did not reach over the deleted notes (%.3f)", t1[0].outEnd);
+        const TimeMap m0 = TimeMap::build(a, plain), m1 = TimeMap::build(a, over);
+        for (size_t i = 3; i < a.notes.size(); ++i)
+            CHECK(std::abs(m1.noteStartOut(i) - m0.noteStartOut(i)) < 1e-3 * sr,
+                  "note %zu pushed by the stretch over deleted notes: %.4f s", i,
+                  (m1.noteStartOut(i) - m0.noteStartOut(i)) / sr);
+    }
 }
 
 static void testMute(const test::SynthResult& s, const Analysis& a, double sr)
