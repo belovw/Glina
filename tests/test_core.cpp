@@ -1154,10 +1154,18 @@ static void testDeletedNeighbours(const test::SynthResult& s, const Analysis& a)
         CHECK(rms(y1, t1[(size_t)p + 3].outStart + 0.01, t1[(size_t)p].outEnd - 0.01) >
                   1.05 * rms(y0, t1[(size_t)p + 3].outStart + 0.01, t1[(size_t)p].outEnd - 0.01),
               "the overlay is not heard");
-        // It cannot reach past the end of the note it lies over.
+        // On past the end of the note it lies over: nothing after it moves either.
         EditSet far = base;
-        moveBoundary(far, a, p, t0[(size_t)p + 3].outEnd + 0.5 - t0[(size_t)p].outEnd, {p}, false, true);
-        CHECK(noteTimes(a, far)[(size_t)p].outEnd <= t0[(size_t)p + 3].outEnd + 1e-6, "the stretch passed the end of the note under it");
+        const double dtFar = t0[(size_t)p + 3].outEnd + 0.05 - t0[(size_t)p].outEnd;
+        CHECK(std::abs(moveBoundary(far, a, p, dtFar, {p}, false, true) - dtFar) < 1e-6, "the stretch stopped at the end of the note under it");
+        const auto tf = noteTimes(a, far);
+        for (int k = p + 3; k < n; ++k)
+            CHECK(std::abs(tf[(size_t)k].outStart - t0[(size_t)k].outStart) < 1e-9, "note %d moved by the long stretch", k);
+        const TimeMap mf = TimeMap::build(a, far);
+        for (int k = p + 3; k < n; ++k)
+            CHECK(std::abs(mf.noteStartOut((size_t)k) - m0.noteStartOut((size_t)k)) < 1.0, "note %d sounds elsewhere after the long stretch", k);
+        const auto yf = render(s.audio.data(), s.audio.size(), a, far);
+        CHECK(yf.size() == y0.size(), "the long stretch changed the length");
     }
     // 2. The live note after them pulled to the left by its start: it does not stretch to the right,
     //    and the sound (time map) has it where the layout has it; past the note before, it lies over it.
@@ -1184,6 +1192,18 @@ static void testDeletedNeighbours(const test::SynthResult& s, const Analysis& a)
         CHECK(std::abs(m2.noteStartOut((size_t)p + 3) / sr - t2[(size_t)p + 3].outStart) < 2e-3, "the pulled note sounds at %.4f s, not %.4f s",
               m2.noteStartOut((size_t)p + 3) / sr, t2[(size_t)p + 3].outStart);
         CHECK(std::abs(m2.noteEndOut((size_t)p) / sr - t2[(size_t)p].outEnd) < 2e-3, "the note before does not keep its end");
+        // On past the start of the note before: that note is all under it.
+        EditSet back = base;
+        const double dt3 = t0[(size_t)p].outStart - 0.05 - t0[(size_t)p + 3].outStart;
+        CHECK(std::abs(moveBoundary(back, a, p + 2, dt3, {p + 3}, true, true) - dt3) < 1e-6, "the start stopped at the start of the note before");
+        const auto t3 = noteTimes(a, back);
+        const TimeMap m3 = TimeMap::build(a, back);
+        CHECK(std::abs(m3.noteStartOut((size_t)p + 3) / sr - t3[(size_t)p + 3].outStart) < 2e-3, "pulled back far, it sounds at %.4f s, not %.4f s",
+              m3.noteStartOut((size_t)p + 3) / sr, t3[(size_t)p + 3].outStart);
+        CHECK(std::abs(m3.noteStartOut((size_t)p) / sr - t3[(size_t)p].outStart) < 2e-3 && std::abs(m3.noteEndOut((size_t)p) / sr - t3[(size_t)p].outEnd) < 2e-3,
+              "the note under it sounds elsewhere");
+        const auto y3 = render(s.audio.data(), s.audio.size(), a, back);
+        CHECK(!y3.empty(), "render");
     }
     // 3. The cut after note p moved (Alt) far to the right: it runs through both deleted notes up to
     //    the live one; they are gone and their audio is part of note p.

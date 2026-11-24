@@ -47,9 +47,10 @@ struct Limits {
     double clipLen = 0, floorSec = 0;
     Bounds bounds;
     std::vector<char> ignore; // deleted notes: they do not limit the order of the others
-    // A pair of notes that may overlap (an edge dragged past a hard separation): the later one
-    // may start before the earlier one ends, but not before it starts, nor end before it ends.
-    int ovL = -1, ovR = -1;
+    // A note whose edge, dragged past a hard separation, may go over other notes (they overlap):
+    // its end over the later notes (ovLater), or its start back over the earlier ones.
+    int ovNote = -1;
+    bool ovLater = true;
 };
 
 static bool ignored(const Limits& L, size_t i) { return i < L.ignore.size() && L.ignore[i]; }
@@ -85,11 +86,7 @@ void eachChange(const std::vector<NoteTimes>& a, const std::vector<NoteTimes>& b
     // Note k starts after note j (j < k) ends. Only pairs with a moved edge.
     auto order = [&](size_t j, size_t k) {
         if (ignored(L, j) || ignored(L, k)) return;
-        if ((int)j == L.ovL && (int)k == L.ovR) {
-            cond(a[k].outStart - a[j].outStart, b[k].outStart - b[j].outStart, k, "overlap start");
-            cond(a[k].outEnd - a[j].outEnd, b[k].outEnd - b[j].outEnd, k, "overlap end");
-            return;
-        }
+        if (L.ovNote >= 0 && (L.ovLater ? (int)j == L.ovNote : (int)k == L.ovNote)) return; // may overlap
         cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
     };
     for (size_t k = 0; k < n; ++k)
@@ -311,19 +308,16 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    // Past a hard separation (a gap, or deleted notes) the dragged edge may go over the next
-    // live note: the notes overlap, that note is neither moved nor squeezed.
-    auto deletedAt = [&](int i) { return i >= 0 && i < (int)e.notes.size() && e.notes[(size_t)i].deleted; };
+    // Past a hard separation (a gap, or deleted notes) the dragged edge may go over the notes
+    // beyond: they overlap; those notes are neither moved nor squeezed.
     Limits lim = limitsOf(a, base, e);
     if (overlap && !touching) {
         if (!startEdge && left >= 0 && !rightSelected) {
-            int r = left + 1;
-            while (r < n && deletedAt(r)) ++r;
-            if (r < n) { lim.ovL = left; lim.ovR = r; }
+            lim.ovNote = left;
+            lim.ovLater = true;
         } else if (startEdge && left + 1 < n && !(left >= 0 && sel.count(left))) {
-            int l = left;
-            while (l >= 0 && deletedAt(l)) --l;
-            if (l >= 0) { lim.ovL = l; lim.ovR = left + 1; }
+            lim.ovNote = left + 1;
+            lim.ovLater = false;
         }
     }
     const double applied = limitDt(dt, lim, make);
