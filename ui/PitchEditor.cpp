@@ -859,6 +859,8 @@ public:
     {
         const Document* d = ed.doc();
         if (ed.eff_ == nullptr || d == nullptr || i < 1 || i >= (int)ed.eff_->notes.size()) return false;
+        // A transition into or out of a deleted note is not shown (nor its handle).
+        if (i < (int)d->edits.notes.size() && (d->edits.notes[(size_t)i].deleted || d->edits.notes[(size_t)i - 1].deleted)) return false;
         const Note& L = ed.eff_->notes[(size_t)i - 1];
         const Note& R = ed.eff_->notes[(size_t)i];
         if (R.startFrame - L.endFrame > 1) return false; // a gap: no glide to shape
