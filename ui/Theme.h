@@ -30,7 +30,7 @@ inline void setLight(bool on)
     using C = juce::Colour;
     if (!on) {
         bg = C(0xff131519); panel = C(0xff1a1d23); panelLine = C(0xff2a2e37);
-        laneWhite = C(0xff16181d); laneBlack = C(0xff121418); laneScale = C(0xff181b21); grid = C(0xff262a32);
+        laneWhite = C(0xff16181d); laneBlack = C(0xff121418); laneScale = C(0xff2b2f38); grid = C(0xff262a32);
         keyWhite = C(0xffd8dade); keyBlack = C(0xff2a2d33); keyWhiteText = C(0xff131519); keyBlackText = C(0xffc9ccd3);
         text = C(0xffc9ccd3); dim = C(0xff7d828c);
         pitchOrig = C(0x80a0a6b0); pitchEdit = C(0xfff2f4f8); playhead = C(0xff4fb3ff);
@@ -45,7 +45,7 @@ inline void setLight(bool on)
         lift = C(0xffffffff); labelText = C(0xffffffff); labelBox = C(0x59ffffff);
     } else {
         bg = C(0xfff4f5f7); panel = C(0xffeaecf0); panelLine = C(0xffd3d7de);
-        laneWhite = C(0xfff3f4f7); laneBlack = C(0xffe9ebef); laneScale = C(0xfffcfcfd); grid = C(0xffd6dae0);
+        laneWhite = C(0xfff1f2f5); laneBlack = C(0xffdfe2e7); laneScale = C(0xffffffff); grid = C(0xffd6dae0);
         keyWhite = C(0xffffffff); keyBlack = C(0xffc6cbd3); keyWhiteText = C(0xff59606b); keyBlackText = C(0xff3e444e);
         text = C(0xff23272e); dim = C(0xff6b7280);
         pitchOrig = C(0x80808896); pitchEdit = C(0xff1e2229); playhead = C(0xff2f7fe0);

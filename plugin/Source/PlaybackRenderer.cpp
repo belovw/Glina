@@ -55,7 +55,8 @@ bool GlinaPlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 // A/B and while rendering: original audio at the same musical position.
                 const double inPos = haveCache ? cache->map.outToIn(modT * cache->sampleRate) * (data.sampleRate / cache->sampleRate)
                                                : modT * data.sampleRate;
-                const float s = cubic(data.mono.data(), data.mono.size(), inPos);
+                float s = cubic(data.mono.data(), data.mono.size(), inPos);
+                if (haveCache) s *= (float)cache->map.gainAt(modT * cache->sampleRate, kSilenceFadeSec * cache->sampleRate);
                 mixL_[(size_t)i] += s;
                 mixR_[(size_t)i] += s;
             } else {

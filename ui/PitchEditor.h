@@ -8,6 +8,8 @@
 
 #include "glina/Renderer.h"
 
+#include "MouseScheme.h"
+
 #include <memory>
 #include <set>
 
@@ -20,6 +22,8 @@ public:
 
     // The clip to edit (may be null). Call again when the host's clip changes.
     void setHost(ClipHost* host);
+    // Scroll so that the given PROJECT time is in the middle of the view (false: view not ready yet).
+    bool centreOnProjectSec(double projectSec);
     // Switch the shown clip (track or take) and keep the zoom, scroll and note range.
     void rebindHost(ClipHost* h);
     ClipHost* host() const { return host_; }
@@ -50,16 +54,23 @@ private:
     class Harmonies;
     class Tracks;
     class Help;
+    class Navigator;
 
     // ---- model helpers ----------------------------------------------------------
     void refresh();        // re-read host model, rebuild curves, update panels
-    void refreshCurves();  // curves only (live preview during gestures)
+    // Curves only (live preview during gestures). harmonies = false while notes move in time:
+    // their pitch does not change, so the harmony pitches stay until the gesture ends (commit refreshes).
+    void refreshCurves(bool harmonies = true);
     Document* doc() const { return host_ != nullptr ? &host_->document() : nullptr; }
     std::vector<int> targets() const; // selection, or every note when nothing is selected
     void commit(const Document& before, bool layoutChanged = false);
     template <typename Fn> void edit(Fn&& fn, bool layoutChanged = false);
     double outSec(double inSec) const;
+    double outSecBefore(double inSec) const; // at a gap opened between notes: its start, not its end
     double inSec(double outSec) const;
+    // Output start and end of note i, as it sounds (a gap opened next to it stays out).
+    double noteStartSec(int i) const;
+    double noteEndSec(int i) const;
     double editedCentre(int note) const;
     std::vector<ClipHost::GridLine> gridLines(double t0, double t1) const;
     juce::String keyLabel(int tonic, bool minor) const;
@@ -69,6 +80,9 @@ private:
     void snapToScale();
     void applyCorrection();
     void resetNotes();
+    void toggleMuteSelection();
+    void deleteSelection();
+    void deleteBreathSelection();
     void toggleDrift();
     void cycleVibrato();
     void toggleAutoVibrato(); // Shift+V: auto vibrato on (last depth, ±30 ¢ the first time) / off
@@ -76,6 +90,12 @@ private:
     // selected (everything: the notes' own settings are dropped).
     void writeVibrato(Document& d, const AutoVibrato& v) const;
     void toggleConsonant();
+    // Switch the separation between note `i` and `i + 1` between soft (linked) and hard.
+    void toggleSeparationAt(int i);
+    // Move the cut at `note`'s start (or end) to the audio now heard at `outSecond` (see moveCut).
+    void moveCutAt(int note, bool startEdge, double outSecond);
+    // Join note `left` with the next one (Alt+click on the cut between them).
+    void joinAt(int left);
     void syncInspector();
     void layoutInspector(); // size the inspector to its controls inside its scrolling view
     // ---- other tracks ("ghosts") --------------------------------------------------
@@ -85,6 +105,9 @@ private:
     void toggleLinks();
     void refreshLinks();
     float linkRefMidi(double t) const; // reference pitch at time t (0 = none)
+    float linkTgtMidi(double t) const; // this track's pitch at time t (0 = none)
+    void addLinkPin(double tgtSec, double refSec); // a pin between this track and the reference
+    void removePin(int i);
     void pollTracks();
     void switchTrack(const juce::String& id);
     void toggleTracks();
@@ -114,6 +137,7 @@ private:
     std::vector<std::vector<double>> harm_;    // per voice: pitch per note (NaN = muted)
     float levelRef_ = -20.f;
     std::set<int> selection_;
+    std::set<int> consSelection_; // consonant zones selected by a click: M mutes them
     double lastVibDepth_ = 30; // depth Shift+V turns auto vibrato back on with
     bool fitted_ = false;
     int toolbarH_ = 40;     // height of the toolbar (it wraps onto more lines when narrow)
@@ -121,6 +145,7 @@ private:
     bool wasBusy_ = true, wasPlaying_ = false;
 
     std::unique_ptr<Roll> roll_;
+    std::unique_ptr<Navigator> navigator_; // overview strip under the roll: whole track, shown part
     std::unique_ptr<Inspector> inspector_;
     juce::Viewport inspView_;
     std::unique_ptr<Harmonies> harmonies_;
@@ -136,8 +161,9 @@ private:
     };
     juce::TextButton playBtn_, applyBtn_, splitBtn_, joinBtn_, abBtn_, harmBtn_, helpBtn_, fitBtn_;
     IconButton undoBtn_, redoBtn_;
-    juce::ComboBox keyBox_;
-    juce::Slider corrPitch_, corrDrift_;
+    juce::ComboBox keyBox_, modeBox_;
+    juce::Slider corrPitch_, corrDrift_, snapSlider_;
+    juce::Label snapLbl_;
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
     bool showTracks_ = false;
@@ -148,8 +174,11 @@ private:
     IconButton shiftBtn_;   // visual +3 semitone shift of the ghosts
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     bool showLinks_ = false;
+    MouseScheme scheme_;                             // wheel and drag actions by modifier keys
+    int hoverPin_ = -1;                              // pin end under the pointer (Delete removes it)
     struct Links {
         bool ok = false;
+        bool pinsOn = false;               // the document's pins are for this reference
         juce::String name;                 // the reference track
         std::vector<ThreadFrame> tgt, ref; // this clip's thread, the reference's (this clip's timeline)
         Warp warp;

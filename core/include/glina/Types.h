@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace glina {
@@ -48,6 +49,8 @@ struct Note {
 struct Key {
     int tonic = 0;          // 0 = C, 1 = C#, ... 11 = B
     bool minor = false;
+    int minorForm = 0;      // minor only: 0 natural, 1 melodic, 2 harmonic
+    bool just = false;      // natural tuning: pure intervals (ratios), not equal steps
     double confidence = 0;  // correlation with the best key profile
     std::string name() const;
 };
@@ -68,6 +71,9 @@ struct Analysis {
     std::vector<float> fastDev;
     std::vector<int> noteOfFrame;     // note index per frame, -1 outside notes
     Key key;
+    // Track view only (several items of a track shown as one clip): the [start, end) seconds of
+    // each item's part of the timeline. Time edits keep a note inside its item. Empty = one clip.
+    std::vector<std::pair<double, double>> segments;
 
     double frameTime(int i) const { return (double)i * hop / sampleRate; }
 };
@@ -99,6 +105,14 @@ struct NoteEdit {
     double vibratoAmount = 1;  // 1 = original, 0 = removed, 2 = doubled
     double formantShift = 0;   // semitones, 0 = natural formants
     double gainDb = 0;
+    bool muted = false;        // silent, but kept in place (shown as a ghost); harmonies follow
+    bool consMuted = false;    // the unvoiced sound (consonant) before this note is silent
+    // Deleted (Alt+Delete): silent and not drawn, its audio kept. Dragging an edge that touches
+    // it brings it back (restoreDeleted). Set together with muted and consMuted.
+    bool deleted = false;
+    // The breath (Breath frames) in the unvoiced sound before this note is deleted: silent and
+    // hidden, its consonants kept. Dragging this note's left edge brings it back.
+    bool breathDeleted = false;
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier
     double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide
@@ -108,6 +122,11 @@ struct NoteEdit {
     double tiltL = 0, tiltR = 0;
     bool ownVibrato = false;   // true: `vibrato` below; false: the track's EditSet::autoVibrato
     AutoVibrato vibrato;
+    // The separation from the previous note. Soft: the two are linked, a time edit of one
+    // edge moves the other note's edge too (no gap opens, none closes). Hard: each moves alone.
+    // Auto: soft where they touch (gap under 5 ms), hard where there is a gap.
+    enum class Sep : uint8_t { Auto = 0, Soft = 1, Hard = 2 };
+    Sep sepBefore = Sep::Auto;
 };
 
 // A pencil-drawn stretch of pitch over analysis frames [start, start + delta.size()).

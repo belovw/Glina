@@ -4,6 +4,7 @@
 #pragma once
 
 #include "glina/Harmony.h"
+#include "glina/Thread.h"
 #include "glina/Types.h"
 
 #include <atomic>
@@ -18,11 +19,21 @@ struct Document {
     int keyTonic = -1;       // -1 = use the detected key
     bool keyMinor = false;
     bool chromatic = false;  // correct to semitones instead of the scale
+    // Scale mode when set: -1 = as before (major/minor from keyMinor or the analysis),
+    // 0 major, 1 natural minor, 2 melodic minor, 3 harmonic minor, 4 pure major, 5 pure minor.
+    int keyMode = -1;
+    double snapAmount = 1.0; // share of the way "К ладу" moves a note to its step, 0..1
     double leadGainDb = 0;   // lead level in the mix (harmonies have their own)
+    bool leadEnabled = true; // false: the lead is left out of the mix (its checkbox)
+    double leadPan = 0;      // lead position in the mix, -1 (left) .. +1 (right)
     // Musical grid for the standalone app (a DAW host supplies its own tempo map).
     double tempoBpm = 0;     // 0 = show seconds
     int beatsPerBar = 4;
     double barOffsetSec = 0; // where bar 1 starts
+    // Links to the reference track (see Thread.h): this clip's time -> the reference's time.
+    // pinRef names the reference they were made with; other references ignore them.
+    std::vector<Pin> pins;   // sorted by tgt
+    std::string pinRef;
 
     Key key(const Analysis& a) const;
     // Correction target for a pitch: nearest scale note (or semitone in chromatic mode).
@@ -37,6 +48,14 @@ void conform(Document& d, const Analysis& eff);
 bool splitNote(Document& d, const Analysis& eff, int note, int frame);
 // Join note `note` with the next one (must be adjacent or separated by < 40 ms).
 bool joinNotes(Document& d, const Analysis& eff, int note);
+// Move a cut, for when the analysis put a note boundary in the wrong place: the edge of `note`
+// (its start if `startEdge`, else its end) goes to the source audio now heard at `outSec`.
+// The sound stays where it is in time; only which note a piece of audio belongs to changes
+// (with it, the pitch edit applied to it). If the neighbour on that side touches the note in
+// the source, the shared cut moves and the neighbour grows or shrinks; otherwise only this
+// note's edge moves (not past the neighbour). Each note keeps ~20 ms; a move that would make
+// notes overlap is refused. Returns true if the layout changed.
+bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double outSec);
 
 std::string serialize(const Document& d);
 bool deserialize(const std::string& text, Document& d);

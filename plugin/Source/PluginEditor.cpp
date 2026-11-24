@@ -4,11 +4,17 @@
 #include <ARA_Library/Utilities/ARATimelineConversion.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace glina::plugin {
 
 using ui::T;
+
+namespace {
+// A track's Glina items, by where they start (defined with the track helpers below).
+std::vector<juce::ARAPlaybackRegion*> glinaItemsOf(juce::ARARegionSequence* seq);
+} // namespace
 
 // ============================================================================
 PluginClip::PluginClip(GlinaDocumentController* dc, GlinaProcessor& proc) : dc_(dc), proc_(proc)
@@ -32,31 +38,275 @@ void PluginClip::setRegion(juce::ARAPlaybackRegion* region)
     mod_ = mod;
     if (region_ != nullptr) { region_->addListener(this); seq_ = region_->getRegionSequence(); }
     if (mod_ != nullptr) { mod_->addListener(this); lastMod_ = mod_; }
+    if (region_ != nullptr) refreshView();
     changes.sendChangeMessage();
 }
 
 const Analysis* PluginClip::analysis() const
 {
+    if (viewOn_) return viewPending_ ? nullptr : view_.analysis.get();
     if (mod_ == nullptr || !mod_->getGlinaSource()->data->analysisReady) return nullptr;
     return mod_->effective.get();
 }
 
+Document& PluginClip::document()
+{
+    if (viewOn_) return view_.doc;
+    return mod_ != nullptr ? mod_->doc : dummyDoc_;
+}
+
+ui::DocumentHistory& PluginClip::history()
+{
+    if (viewOn_) return dummyHistory_; // the track view keeps its own steps (below)
+    return mod_ != nullptr ? mod_->history : dummyHistory_;
+}
+
+void PluginClip::recordEdit(const Document& before)
+{
+    if (!viewOn_) { ui::ClipHost::recordEdit(before); return; }
+    // The takes the edit changed were collected by documentChanged: that is one step.
+    if (viewHist_ != nullptr && !openStep_.empty()) viewHist_->push(std::move(openStep_));
+    openStep_.clear();
+}
+
+bool PluginClip::canUndo()
+{
+    if (!viewOn_) return ui::ClipHost::canUndo();
+    return viewHist_ != nullptr && !viewHist_->undo.empty();
+}
+
+bool PluginClip::canRedo()
+{
+    if (!viewOn_) return ui::ClipHost::canRedo();
+    return viewHist_ != nullptr && !viewHist_->redo.empty();
+}
+
+bool PluginClip::undoStep(bool redo)
+{
+    if (!viewOn_) return ui::ClipHost::undoStep(redo);
+    if (viewHist_ == nullptr || dc_ == nullptr) return false;
+    auto& from = redo ? viewHist_->redo : viewHist_->undo;
+    auto& to = redo ? viewHist_->undo : viewHist_->redo;
+    if (from.empty()) return false;
+    GlinaDocumentController::TrackStep step = std::move(from.back());
+    from.pop_back();
+    GlinaDocumentController::TrackStep back; // the same takes as they are now: the way back
+    int hidden = 0, gone = 0;
+    for (auto& part : step) {
+        if (part.alive == nullptr || !part.alive->load()) { ++gone; continue; }
+        auto* mod = part.mod;
+        back.push_back({mod, part.alive, mod->doc});
+        const auto& now = mod->doc.edits.spans;
+        const auto& was = part.before.edits.spans;
+        const bool layout = now.size() != was.size() ||
+                            !std::equal(now.begin(), now.end(), was.begin(), [](const NoteSpan& a, const NoteSpan& b) {
+                                return a.start == b.start && a.end == b.end;
+                            });
+        mod->doc = std::move(part.before);
+        dc_->documentChanged(mod, layout);
+        if (std::none_of(viewItems_.begin(), viewItems_.end(), [&](const ViewItem& it) { return it.mod == mod; })) ++hidden;
+    }
+    if (!back.empty()) to.push_back(std::move(back));
+    const juce::String what = redo ? T("повтор") : T("отмена");
+    juce::String note;
+    if (hidden > 0) note = what + T(" в тэйке, которого сейчас не видно");
+    if (gone > 0) note << (note.isEmpty() ? what + T(": ") : T("; ")) << T("тэйк удалён, его часть пропущена");
+    if (note.isNotEmpty()) {
+        notice_ = note;
+        noticeMs_ = juce::Time::getMillisecondCounter();
+        logLine(T("вид трека: ") + note);
+    }
+    refreshView(true); // the takes changed: show them as they are now
+    return true;
+}
+
+juce::String PluginClip::noticeText() const
+{
+    if (notice_.isEmpty() || juce::Time::getMillisecondCounter() - noticeMs_ > 5000) return {};
+    return notice_;
+}
+
 void PluginClip::documentChanged(bool layoutChanged)
 {
-    if (mod_ != nullptr && dc_ != nullptr) dc_->documentChanged(mod_, layoutChanged);
+    if (dc_ == nullptr) return;
+    if (!viewOn_) {
+        if (mod_ != nullptr) dc_->documentChanged(mod_, layoutChanged);
+        return;
+    }
+    if (viewPending_ || view_.analysis == nullptr) return;
+    // The items must still be those the view was built from (a take deleted meanwhile: rebuild).
+    const auto now = viewItemsNow();
+    bool same = now.size() == viewItems_.size();
+    for (size_t k = 0; same && k < now.size(); ++k)
+        same = now[k].region == viewItems_[k].region && now[k].mod == viewItems_[k].mod && now[k].eff == viewItems_[k].eff;
+    if (!same) {
+        logLine(T("вид трека: айтемы изменились во время правки, правка не записана"));
+        refreshView(true);
+        return;
+    }
+    std::vector<bool> layout;
+    const auto docs = splitTrackView(view_, view_.doc, viewPieces_, &layout);
+    if (docs.size() != viewPieces_.size()) return;
+    bool anyLayout = false;
+    for (size_t k = 0; k < docs.size(); ++k) {
+        if (serialize(docs[k]) == serialize(viewPieces_[k].doc)) continue;
+        auto* mod = viewItems_[k].mod;
+        // The undo step keeps each take as it was before this edit (first change only).
+        if (std::none_of(openStep_.begin(), openStep_.end(), [&](const auto& p) { return p.mod == mod; }))
+            openStep_.push_back({mod, mod->alive, mod->doc});
+        mod->doc = docs[k];
+        dc_->documentChanged(mod, layout[k]); // its own render, as for a single item
+        anyLayout = anyLayout || layout[k];
+    }
+    if (anyLayout) { refreshView(true); return; } // the view's notes changed
+    for (size_t k = 0; k < docs.size(); ++k) viewPieces_[k].doc = docs[k];
+    view_.built = view_.doc;
+    viewItems_ = viewItemsNow(); // no rebuild for our own edit
+}
+
+
+bool PluginClip::summary(ClipHost::Summary& out) const
+{
+    if (!viewOn_) return false;
+    out = {};
+    out.t1 = viewEnd_ - viewStart_;
+    reaper::TrackInfo track; // the take numbers: REAPER's items at the same places as the regions
+    const bool haveTrack = proc_.reaperTrack(track);
+    for (const auto& it : viewItems_) {
+        const double t0 = it.playStart - viewStart_;
+        const double offset = it.playStart - it.modStart - viewStart_; // view time of the analysis' start
+        juce::String name;
+        const char* nm = it.region->getName();
+        if (nm != nullptr) name = juce::String::fromUTF8(nm);
+        int take = 0;
+        if (haveTrack)
+            for (size_t k = 0; k < track.itemStarts.size() && k < track.itemTakes.size(); ++k)
+                if (std::abs(track.itemStarts[k] - it.region->getStartInPlaybackTime()) < 0.005) { take = track.itemTakes[k]; break; }
+        if (take > 0) name = juce::String(take) + " " + name;
+        if (it.eff != nullptr) out.add(name, t0, t0 + (it.modEnd - it.modStart), *it.eff, offset);
+    }
+    return true;
+}
+
+std::vector<PluginClip::ViewItem> PluginClip::viewItemsNow() const
+{
+    std::vector<ViewItem> out;
+    if (seq_ == nullptr) return out;
+    auto* doc = arDoc();
+    if (doc == nullptr) return out;
+    const auto& all = doc->getRegionSequences();
+    if (std::find(all.begin(), all.end(), seq_) == all.end()) return out; // track is gone
+    for (auto* r : glinaItemsOf(seq_)) {
+        ViewItem it;
+        it.region = r;
+        it.mod = dynamic_cast<GlinaAudioModification*>(r->getAudioModification());
+        if (it.mod == nullptr) continue;
+        it.eff = it.mod->getGlinaSource()->data->analysisReady ? it.mod->effective.get() : nullptr;
+        it.version = it.mod->editVersion;
+        it.playStart = r->getStartInPlaybackTime();
+        it.modStart = r->getStartInAudioModificationTime();
+        it.modEnd = r->getEndInAudioModificationTime();
+        out.push_back(it);
+    }
+    return out;
+}
+
+void PluginClip::refreshView(bool force)
+{
+    auto turnOff = [this] {
+        const bool was = viewOn_;
+        viewOn_ = viewPending_ = false;
+        view_ = TrackView{};
+        viewPieces_.clear();
+        viewItems_.clear();
+        viewSeq_ = nullptr;
+        viewPrimary_ = -1;
+        viewHist_ = nullptr; // the track's history stays with the controller
+        if (was) changes.sendChangeMessage();
+    };
+    auto refuse = [&](const juce::String& why) {
+        turnOff();
+        if (why != viewRefused_) logLine(T("вид трека выключен: ") + why);
+        viewRefused_ = why;
+    };
+    const auto items = viewItemsNow();
+    if (items.size() < 2) { turnOff(); return; }
+    for (const auto& it : items) {
+        const double pd = it.region->getDurationInPlaybackTime(), md = it.region->getDurationInAudioModificationTime();
+        if (std::abs(pd - md) > 1e-6) { refuse(T("у айтема изменена скорость воспроизведения")); return; }
+    }
+    int primary = 0;
+    for (int k = 0; k < (int)items.size(); ++k)
+        if (items[(size_t)k].region == region_) primary = k;
+    if (!force && viewOn_ && seq_ == viewSeq_ && primary == viewPrimary_ && items == viewItems_) return; // nothing changed
+
+    const bool newTrack = seq_ != viewSeq_;
+    // View time 0 is where the first item starts in the project.
+    viewStart_ = items.front().playStart;
+    viewEnd_ = viewStart_;
+    for (const auto& it : items) viewEnd_ = std::max(viewEnd_, it.playStart + (it.modEnd - it.modStart));
+    if (std::any_of(items.begin(), items.end(), [](const ViewItem& it) { return it.eff == nullptr; })) {
+        viewOn_ = viewPending_ = true; // "Анализ вокала…" until every item is ready
+        view_ = TrackView{};
+        viewItems_ = items;
+        viewSeq_ = seq_;
+        viewPrimary_ = primary;
+        changes.sendChangeMessage();
+        return;
+    }
+    std::vector<TrackPiece> pieces;
+    for (const auto& it : items) {
+        TrackPiece p;
+        p.eff = it.mod->effective;
+        p.doc = it.mod->doc;
+        p.placeSec = it.playStart - it.modStart - viewStart_; // view time of the item's clip time 0
+        p.winStart = it.modStart;
+        p.winEnd = it.modEnd;
+        pieces.push_back(std::move(p));
+    }
+    TrackView v;
+    if (!buildTrackView(pieces, primary, v)) { refuse(T("у айтемов трека разная частота дискретизации")); return; }
+    viewHist_ = dc_ != nullptr ? &dc_->trackHistory(seq_) : nullptr; // the track's shared undo steps
+    if (newTrack) openStep_.clear();
+    view_ = std::move(v);
+    viewPieces_ = std::move(pieces);
+    viewItems_ = items;
+    viewPrimary_ = primary;
+    viewSeq_ = seq_;
+    viewOn_ = true;
+    viewPending_ = false;
+    viewRefused_.clear();
+    if (newTrack)
+        logLine(T("вид трека: айтемов ") + juce::String((int)items.size()) + T(", нот ") +
+                juce::String((int)view_.analysis->notes.size()));
+    changes.sendChangeMessage();
+}
+
+void PluginClip::setBypassed(bool b)
+{
+    if (viewOn_) {
+        for (const auto& it : viewItems_) it.mod->bypass.store(b);
+        return;
+    }
+    if (mod_ != nullptr) mod_->bypass.store(b);
 }
 
 juce::String PluginClip::busyText() const
 {
     if (mod_ == nullptr)
         return T("Выберите item с вокалом. В REAPER Glina ставится как FX на сам item (Take FX), а не на трек.");
+    if (viewOn_ && viewPending_) return T("Анализ вокала…");
     if (!mod_->getGlinaSource()->data->analysisReady) return T("Анализ вокала…");
     return {};
 }
 
 bool PluginClip::isRendering() const
 {
-    return mod_ != nullptr && (mod_->renderRunning || mod_->renderedVersion != mod_->editVersion);
+    auto rendering = [](const GlinaAudioModification* m) {
+        return m->renderRunning || m->renderedVersion != m->editVersion;
+    };
+    if (viewOn_) return std::any_of(viewItems_.begin(), viewItems_.end(), [&](const ViewItem& it) { return rendering(it.mod); });
+    return mod_ != nullptr && rendering(mod_);
 }
 
 double PluginClip::playheadSec() const
@@ -67,6 +317,7 @@ double PluginClip::playheadSec() const
         if (!proc_.playing.load() && song == locatorHostSong_) return locatorSec_;
         locatorSet_ = false; // playing, or the host moved its own cursor
     }
+    if (viewOn_) return song < viewStart_ || song > viewEnd_ ? -1 : song - viewStart_;
     if (song < region_->getStartInPlaybackTime() || song > region_->getEndInPlaybackTime()) return -1;
     const double pd = region_->getDurationInPlaybackTime();
     const double ratio = pd > 0 ? region_->getDurationInAudioModificationTime() / pd : 1.0;
@@ -90,6 +341,7 @@ juce::ARAMusicalContext* PluginClip::musicalContext() const
 
 double PluginClip::toSong(double t) const
 {
+    if (viewOn_) return viewStart_ + t;
     const double md = region_->getDurationInAudioModificationTime();
     const double ratio = md > 0 ? region_->getDurationInPlaybackTime() / md : 1.0;
     return region_->getStartInPlaybackTime() + (t - region_->getStartInAudioModificationTime()) * ratio;
@@ -97,6 +349,7 @@ double PluginClip::toSong(double t) const
 
 double PluginClip::fromSong(double song) const
 {
+    if (viewOn_) return song - viewStart_;
     const double pd = region_->getDurationInPlaybackTime();
     const double ratio = pd > 0 ? region_->getDurationInAudioModificationTime() / pd : 1.0;
     return region_->getStartInAudioModificationTime() + (song - region_->getStartInPlaybackTime()) * ratio;
@@ -166,6 +419,27 @@ std::vector<juce::ARARegionSequence*> PluginClip::glinaSequences() const
     out.erase(std::remove_if(out.begin(), out.end(), [](auto* s) { return glinaItemsOf(s).empty(); }), out.end());
     std::stable_sort(out.begin(), out.end(), [](auto* a, auto* b) { return a->getOrderIndex() < b->getOrderIndex(); });
     return out;
+}
+
+juce::ARARegionSequence* PluginClip::sequenceOfTrack(const reaper::TrackInfo& t) const
+{
+    juce::ARARegionSequence* best = nullptr;
+    int bestScore = 0;
+    for (auto* seq : glinaSequences()) {
+        int hits = 0;
+        for (auto* r : glinaItemsOf(seq))
+            for (double s : t.itemStarts)
+                if (std::abs(r->getStartInPlaybackTime() - s) < 0.005) { ++hits; break; }
+        const char* sn = (const char*)seq->getName();
+        const bool sameName = t.name.isNotEmpty() && sn != nullptr && t.name == juce::String::fromUTF8(sn);
+        if (hits == 0 && !sameName) continue;
+        // Takes recorded at once on several tracks start at the same places: the name, then the
+        // track number decide between them.
+        const bool sameNumber = t.number > 0 && seq->getOrderIndex() == t.number - 1;
+        const int score = hits * 4 + (sameName ? 2 : 0) + (sameNumber ? 1 : 0);
+        if (score > bestScore) { bestScore = score; best = seq; }
+    }
+    return best;
 }
 
 juce::ARAPlaybackRegion* PluginClip::itemAt(const std::vector<juce::ARAPlaybackRegion*>& items) const
@@ -326,10 +600,7 @@ void PluginClip::setPlayheadSec(double t)
 {
     auto* pc = playback();
     if (pc == nullptr || region_ == nullptr) return;
-    const double md = region_->getDurationInAudioModificationTime();
-    const double ratio = md > 0 ? region_->getDurationInPlaybackTime() / md : 1.0;
-    const double song = region_->getStartInPlaybackTime() + (t - region_->getStartInAudioModificationTime()) * ratio;
-    pc->requestSetPlaybackPosition(std::max(0.0, song));
+    pc->requestSetPlaybackPosition(std::max(0.0, toSong(t)));
     locatorSec_ = std::max(0.0, t);
     locatorHostSong_ = proc_.playheadSec.load();
     locatorSet_ = true;
@@ -339,12 +610,14 @@ void PluginClip::setPlayheadSec(double t)
 GlinaEditor::GlinaEditor(GlinaProcessor& p)
     : juce::AudioProcessorEditor(&p), juce::AudioProcessorEditorARAExtension(&p), proc_(p)
 {
+    openedMs_ = juce::Time::getMillisecondCounter(); // before the listener: it may fire at once
     addAndMakeVisible(editor_);
     if (auto* ev = getARAEditorView()) {
         dc_ = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<GlinaDocumentController>(
             ev->getDocumentController());
         ev->addListener(this);
         clip_ = std::make_unique<PluginClip>(dc_, p);
+        pinOwnRegion();
         pickFallbackRegion();
         editor_.setHost(clip_.get());
         startTimerHz(4);
@@ -362,10 +635,80 @@ GlinaEditor::~GlinaEditor()
     editor_.setHost(nullptr);
 }
 
+// The item this instance sits on is the one it edits. The host's selection at open time is
+// the last item the user worked on, so it must not replace that item.
+// Which item the editor opens on.
+// - Take FX: the instance renders its own take, so that take (several regions: the one under the cursor).
+// - Track FX: REAPER hands the instance no regions at all. Its track is found through REAPER (the
+//   track this FX sits on) among the ARA tracks; the item under the edit cursor opens, or the
+//   nearest one. The view is centred on the cursor either way.
+// REAPER names the project and the track a moment after the FX is created, so this waits up to 3 s.
+bool GlinaEditor::pinOwnRegion()
+{
+    if (ownPinned_ || clip_ == nullptr) return ownPinned_;
+    const bool waited = juce::Time::getMillisecondCounter() - openedMs_ >= 3000;
+    if (!proc_.hasReaperProject() && !waited) return false;
+    const double cursor = proc_.editCursorSec(); // the transport's playhead is not updated while stopped
+    const double song = std::isfinite(cursor) ? cursor : proc_.playheadSec.load();
+    auto inside = [song](juce::ARAPlaybackRegion* r) {
+        return song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime();
+    };
+    std::vector<juce::ARAPlaybackRegion*> regions;
+    if (auto* pr = proc_.getPlaybackRenderer<juce::ARAPlaybackRenderer>())
+        regions = pr->getPlaybackRegions<juce::ARAPlaybackRegion>();
+
+    juce::ARAPlaybackRegion* pick = nullptr;
+    juce::String from;
+    if (!regions.empty()) {
+        pick = regions.front();
+        for (auto* r : regions)
+            if (inside(r)) { pick = r; break; }
+        from = T("FX на тэйке, регионов ") + juce::String((int)regions.size());
+    } else {
+        auto giveUp = [&](const juce::String& why) {
+            if (!waited) return false; // REAPER may not have told us yet
+            ownPinned_ = true;         // stop trying: the editor stays where it is
+            clip_->log(T("открыт: ") + why + T(", остаётся первый трек"));
+            return false;
+        };
+        reaper::TrackInfo t;
+        if (!proc_.reaperTrack(t)) return giveUp(T("трек FX не известен (нет REAPER?)"));
+        auto* seq = clip_->sequenceOfTrack(t);
+        if (seq == nullptr)
+            return giveUp(T("трек «") + t.name + T("» №") + juce::String(t.number) + T(" не найден среди треков с Glina"));
+        const auto items = glinaItemsOf(seq);
+        double best = std::numeric_limits<double>::max();
+        for (auto* r : items) {
+            const double d = inside(r) ? 0.0
+                                       : std::min(std::abs(song - r->getStartInPlaybackTime()),
+                                                  std::abs(song - r->getEndInPlaybackTime()));
+            if (d < best) { best = d; pick = r; }
+        }
+        if (pick == nullptr) return giveUp(T("на треке «") + t.name + T("» нет айтемов с Glina"));
+        from = T("FX на треке «") + t.name + T("» №") + juce::String(t.number) + T(", айтемов ") +
+               juce::String((int)items.size()) + (best > 0 ? T(", ближайший к курсору") : T(", под курсором"));
+    }
+    clip_->setRegion(pick);
+    ownPinned_ = true;
+    centreOnOpen_ = true; // the view opens at the cursor, even when no item is there
+    openSec_ = song;
+    clip_->log(T("открыт: ") + from + T(", курсор ") + juce::String(song, 3) + T(" с"));
+    return true;
+}
+
 void GlinaEditor::onNewSelection(const juce::ARAViewSelection& sel)
 {
-    const auto& regions = sel.getPlaybackRegions<juce::ARAPlaybackRegion>();
+    // The selection the host reports right after opening can be the item worked on last. Ignore
+    // it for a moment; later selections (a click on another item) switch the editor as usual.
+    if (juce::Time::getMillisecondCounter() - openedMs_ < 1500) return;
+    // Effective regions: a track selected as a whole (no single region picked) counts too.
+    const auto regions = sel.getEffectivePlaybackRegions<juce::ARAPlaybackRegion>();
     if (!regions.empty() && clip_ != nullptr && regions.front() != clip_->region()) {
+        // Another item of the track already shown as a whole: nothing to switch, keep the view.
+        if (clip_->trackView() && regions.front()->getRegionSequence() == clip_->sequence()) {
+            clip_->setRegion(regions.front());
+            return;
+        }
         clip_->setRegion(regions.front());
         editor_.setHost(nullptr); // reset view and selection for the new clip
         editor_.setHost(clip_.get());
@@ -388,8 +731,11 @@ void GlinaEditor::timerCallback()
     if (clip_ == nullptr) return;
     const auto* before = clip_->region();
     const auto* beforeMod = clip_->modification();
+    pinOwnRegion(); // the renderer may not know its item yet when the editor opens
+    if (centreOnOpen_ && editor_.centreOnProjectSec(openSec_)) centreOnOpen_ = false;
     clip_->followTrack(); // item or take changed in the host: stay on the same track
     if (!clip_->valid()) pickFallbackRegion();
+    clip_->refreshView(); // items added, moved or edited elsewhere
     if (clip_->region() != before || clip_->modification() != beforeMod)
         editor_.rebindHost(clip_.get()); // keep zoom and scroll when the track or take changes
 }

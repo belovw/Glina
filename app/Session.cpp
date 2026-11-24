@@ -381,7 +381,8 @@ void Session::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
             // A/B: the original at the same musical position (through the time map).
             const double inPos = r != nullptr ? r->map.outToIn(t * r->sampleRate) * (p->sampleRate / r->sampleRate)
                                               : t * p->sampleRate;
-            const float s = cubicAt(mono.data(), mono.size(), inPos);
+            float s = cubicAt(mono.data(), mono.size(), inPos);
+            if (r != nullptr) s *= (float)r->map.gainAt(t * r->sampleRate, kSilenceFadeSec * r->sampleRate);
             L[i] = s;
             if (R) R[i] = s;
         } else {

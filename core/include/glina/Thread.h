@@ -33,6 +33,13 @@ struct Pin {
     double tgt = 0, ref = 0; // common timeline, seconds
 };
 
+// Adds a pin keeping the list sorted by tgt. False (nothing added) when it sits on a pin already or
+// would cross a neighbour in either time.
+bool addPin(std::vector<Pin>& pins, const Pin& p);
+// Moves one end of pin i (refEnd: the reference end, else the target end) to `sec`, clamped so the
+// neighbours keep their order. False when pin i does not exist.
+bool movePin(std::vector<Pin>& pins, size_t i, bool refEnd, double sec);
+
 struct AlignOptions {
     double bandSec = 0.5;    // how far the alignment may wander from the coarse shift
     double coarseSec = 1.0;  // search range of the coarse shift

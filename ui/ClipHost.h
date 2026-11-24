@@ -11,6 +11,7 @@
 #include "glina/Renderer.h"
 #include "glina/Thread.h"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -62,6 +63,59 @@ public:
     // Call after changing document(). `layoutChanged`: notes were split/joined
     // (the effective analysis must be rebuilt before analysis() is used again).
     virtual void documentChanged(bool layoutChanged) = 0;
+
+    // ---- undo -----------------------------------------------------------------------
+    // After an edit (documentChanged already called): `before` is the document as it was.
+    // Default: whole-document snapshots in history(). A host that records edits itself (the
+    // plug-in's track view: one step per edit, kept per take) overrides these four.
+    virtual void recordEdit(const Document& before) { history().push(before); }
+    virtual bool canUndo() { return history().canUndo(); }
+    virtual bool canRedo() { return history().canRedo(); }
+    // Undo (or redo) one step and apply it, documentChanged included. False: nothing to do.
+    virtual bool undoStep(bool redo)
+    {
+        Document& d = document();
+        const auto spans = d.edits.spans;
+        if (!(redo ? history().redo(d) : history().undo(d))) return false;
+        const bool layout = spans.size() != d.edits.spans.size() ||
+                            !std::equal(spans.begin(), spans.end(), d.edits.spans.begin(),
+                                        [](const NoteSpan& a, const NoteSpan& b) { return a.start == b.start && a.end == b.end; });
+        documentChanged(layout);
+        return true;
+    }
+    // A short note for the status line (e.g. where an undo landed); empty = none.
+    virtual juce::String noticeText() const { return {}; }
+
+    // The whole timeline the overview strip shows, in the view's seconds: each item with its name and
+    // notes, and the audio level every kLevelStep seconds. False: the editor uses the clip alone.
+    struct Summary {
+        static constexpr double kLevelStep = 0.1;
+        struct Bar { double t0 = 0, t1 = 0, midi = 0; };
+        struct Item { double t0 = 0, t1 = 0; juce::String name; std::vector<Bar> notes; };
+        double t0 = 0, t1 = 0; // the timeline: from 0 to t1
+        std::vector<Item> items;
+        std::vector<float> level; // 0..1 per kLevelStep, from the start of the timeline
+
+        // Adds an item whose analysis `a` lies at `offset` on the view's timeline.
+        void add(const juce::String& name, double itemT0, double itemT1, const Analysis& a, double offset)
+        {
+            Item it;
+            it.t0 = itemT0;
+            it.t1 = itemT1;
+            it.name = name;
+            for (const auto& n : a.notes) it.notes.push_back({offset + n.startSec, offset + n.endSec, n.centerMidi});
+            items.push_back(it);
+            t1 = std::max(t1, itemT1);
+            for (const auto& f : a.frames) {
+                const double t = offset + f.timeSec;
+                if (t < 0) continue;
+                const size_t k = (size_t)(t / kLevelStep);
+                if (k >= level.size()) level.resize(k + 1, 0.f);
+                level[k] = std::max(level[k], juce::jlimit(0.f, 1.f, (f.rmsDb + 60.f) / 50.f));
+            }
+        }
+    };
+    virtual bool summary(Summary& /*out*/) const { return false; }
 
     virtual juce::String clipName() const { return {}; }
     virtual juce::String busyText() const { return {}; }   // e.g. "Анализ…"; empty = idle
@@ -168,6 +222,10 @@ inline ClipHost::Ghost buildGhost(const Analysis& a, const EditSet& e,
     bool open = false;
     for (size_t k = 0; k < curve.size() && k < a.frames.size(); ++k) {
         const double t = map.inToOut(a.frameTime((int)k) * a.sampleRate) / a.sampleRate; // TimeMap works in samples
+        if (open && k > 0 && map.silenceBetween(a.frameTime((int)k - 1) * a.sampleRate, a.frameTime((int)k) * a.sampleRate)) {
+            g.curve.push_back({0.0, nan}); // a gap opened between notes: the line breaks
+            open = false;
+        }
         const bool ok = a.frames[k].f0 > 0 && std::isfinite(curve[k]) && curve[k] > 0 && t >= lo && t <= hi;
         if (!ok) {
             if (open) g.curve.push_back({0.0, nan});

@@ -12,7 +12,33 @@
 namespace glina::ui {
 
 namespace {
+
+// TEMP-MOVE-DIAG: appends one line to glina_move_diag.txt on the Desktop. Remove after the
+// horizontal-move bug is found.
+void tempMoveDiag(const juce::String& text)
+{
+    juce::File f = juce::File::getSpecialLocation(juce::File::userDesktopDirectory)
+                       .getChildFile("glina_move_diag.txt");
+    f.appendText(juce::Time::getCurrentTime().toString(true, true, true, true) + " " + text + "\n");
+}
+
+// The default scheme, with overrides from the settings file ("mouseOverrides", e.g. "w2=zv d6=pan").
+MouseScheme loadScheme()
+{
+    juce::PropertiesFile p(settings::options());
+    MouseScheme s = MouseScheme::presetA();
+    s.apply(p.getValue("mouseOverrides", "").toStdString());
+    return s;
+}
+
+// Modifier keys as a MouseScheme mask (Cmd counts as Ctrl).
+int schemeMask(const juce::ModifierKeys& m)
+{
+    return MouseScheme::maskOf(m.isAltDown(), m.isCtrlDown() || m.isCommandDown(), m.isShiftDown());
+}
 const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+// The key box's tonic names (German: B is A#, H is B).
+const char* kTonicNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "B", "H"};
 bool isBlack(int m) { const int pc = ((m % 12) + 12) % 12; return pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10; }
 juce::String noteName(double midi)
 {
@@ -22,12 +48,58 @@ juce::String noteName(double midi)
     if (cents != 0) s << (cents > 0 ? " +" : " ") << cents << T("¢");
     return s;
 }
+// Whether the lane of semitone m (its rows span m-0.5 .. m+0.5) holds a degree of the key.
+// Pure degrees (cents) land in the lane nearest to them; the tempered ones are exact.
 bool inScale(int m, const Key& k)
 {
-    static const int maj[7] = {0, 2, 4, 5, 7, 9, 11}, mnr[7] = {0, 2, 3, 5, 7, 8, 10};
-    const int pc = ((m - k.tonic) % 12 + 12) % 12;
-    for (int s : (k.minor ? mnr : maj)) if (s == pc) return true;
+    double cents[7];
+    scaleCents(k, cents);
+    const double rel = m - k.tonic;
+    for (double c : cents) {
+        const double diff = rel - c / 100.0;
+        if (std::abs(diff - 12.0 * std::round(diff / 12.0)) <= 0.5 + 1e-9) return true;
+    }
     return false;
+}
+
+// Custom cursors are built in software images and owned by the editor, never static: a
+// static one outlived the editor and, released while the plug-in DLL was being unloaded,
+// tore down the GPU (Direct2D) device under the Windows loader lock. The graphics driver
+// then waited for a thread that needed that lock, and REAPER hung on exit with the
+// plug-in file locked.
+//
+// Cursor for Alt+click (cut): a thin vertical bar with a gap at the cut point, outlined so
+// that it shows on both the light and the dark theme.
+juce::MouseCursor makeCutCursor()
+{
+    juce::Image img(juce::Image::ARGB, 11, 25, true, juce::SoftwareImageType());
+    juce::Graphics g(img);
+    const float x = 5.5f;
+    g.setColour(juce::Colour(0xcc000000)); // outline
+    g.drawLine(x, 0.f, x, 10.f, 3.f);
+    g.drawLine(x, 14.f, x, 25.f, 3.f);
+    g.setColour(juce::Colours::white);
+    g.drawLine(x, 0.f, x, 10.f, 1.5f);
+    g.drawLine(x, 14.f, x, 25.f, 1.5f);
+    return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
+}
+// Cursor for Alt over a note boundary (drag: move the cut; click: join): a solid bar with
+// arrowheads to both sides, outlined like the cut cursor.
+juce::MouseCursor makeCutMoveCursor()
+{
+    juce::Image img(juce::Image::ARGB, 21, 25, true, juce::SoftwareImageType());
+    juce::Graphics g(img);
+    const float x = 10.5f, y = 12.5f;
+    juce::Path arrows;
+    arrows.addTriangle(1.f, y, 6.f, y - 4.f, 6.f, y + 4.f);
+    arrows.addTriangle(20.f, y, 15.f, y - 4.f, 15.f, y + 4.f);
+    g.setColour(juce::Colour(0xcc000000));
+    g.drawLine(x, 0.f, x, 25.f, 3.f);
+    g.strokePath(arrows, juce::PathStrokeType(2.f));
+    g.setColour(juce::Colours::white);
+    g.drawLine(x, 0.f, x, 25.f, 1.5f);
+    g.fillPath(arrows);
+    return juce::MouseCursor(img, 10, 12);
 }
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
@@ -175,14 +247,16 @@ public:
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
             "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
             "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
-            "  Крайняя пятая часть ноты или верхний угол вверх/вниз — наклон нитки вокруг другого края; выделенные — как одна нота\n"
-            "  (Shift — тоньше; угол вбок — граница ноты, как край)\n"
+            "  Верхний угол края вверх/вниз — наклон: одна нота — вокруг другого края; выделенные — домиком, вершина у мыши\n"
+            "  (Shift — тоньше; вбок от угла ничего не делает)\n"
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
             "  Alt + клик по ноте — разрезать здесь;  двойной клик — к ладу\n"
             "  Рамка по пустому месту — выделение (Shift — добавить)\n"
             "  Нитка между нотами — тянуть вверх/вниз: вверх плавнее, вниз резче (Shift — тоньше, двойной клик — как спето)\n"
             "  Клик по линейке — позиция воспроизведения;  правая кнопка — меню ноты\n"
-            "  Колесо — прокрутка;  Ctrl+колесо — масштаб;  Shift+колесо — по высоте\n"
+            "  Колесо — по высоте;  Alt+колесо — по времени;  Ctrl+колесо — масштаб по высоте;  Ctrl+Alt+колесо — масштаб по времени\n"
+            "  Ctrl+Shift+перетаскивание — сдвиг окна;  Ctrl+Alt+перетаскивание — масштаб окна\n"
+            "  Свои привязки — в файле настроек Glina (ключ mouseOverrides)\n"
             "\n"
             "КЛАВИШИ\n"
             "  ↑ / ↓ — полутон (Shift — 10 центов)      Q — к ладу\n"
@@ -201,6 +275,9 @@ public:
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
         g.drawFittedText(T(text), r, juce::Justification::topLeft, 40);
+        g.setColour(col::dim);
+        g.setFont(juce::FontOptions(12.f));
+        g.drawText("Glina " GLINA_VERSION_STRING " \u00b7 " GLINA_BUILD_STRING, getLocalBounds().reduced(24, 12), juce::Justification::bottomRight, false);
     }
     void mouseDown(const juce::MouseEvent&) override { setVisible(false); }
 };
@@ -210,6 +287,10 @@ public:
 class PitchEditor::Roll final : public juce::Component {
 public:
     explicit Roll(PitchEditor& o) : ed(o) { setWantsKeyboardFocus(true); }
+
+    // Alt cursors (see makeCutCursor): owned here, released with the editor.
+    const juce::MouseCursor cutCursor = makeCutCursor();
+    const juce::MouseCursor cutMoveCursor = makeCutMoveCursor();
 
     static constexpr float kKeysW = 46, kRulerH = 20, kStripH = 6;
     juce::Rectangle<float> canvas() const
@@ -224,7 +305,7 @@ public:
     juce::Rectangle<float> noteRect(int i) const
     {
         const Note& n = ed.eff_->notes[(size_t)i];
-        const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
+        const float x0 = xOf(ed.noteStartSec(i)), x1 = xOf(ed.noteEndSec(i));
         const float s = semi();
         double centre = ed.editedCentre(i);
         // While a tilt is dragged the box stays put and only the line moves; it settles on release.
@@ -250,25 +331,70 @@ public:
 
     // Edge strips stretch; on notes wide enough on screen the outer fifths (whole
     // height, past the edge strip) tilt the line around the opposite edge. The top
-    // corner of an edge strip does both (any width): up/down tilts, sideways stretches.
-    static constexpr float kTiltMinW = 40;
-    enum class Zone { Body, Left, Right, TiltL, TiltR, CornerL, CornerR };
+    // corner of an edge strip: up/down tilts (the roof), sideways does nothing.
+    enum class Zone { Body, Left, Right, CornerL, CornerR };
     Zone zoneOf(int i, juce::Point<float> p) const
     {
         const auto r = noteRect(i);
         const float edge = std::min(7.f, r.getWidth() * 0.25f);
         const bool cons = ed.doc() != nullptr && (size_t)i < ed.doc()->edits.notes.size() &&
                           ed.doc()->edits.notes[(size_t)i].consonant;
-        const bool top = !cons && p.y < r.getY() + r.getHeight() * 0.4f;
+        const bool top = !cons && p.y < r.getY() + r.getHeight() * 0.33f;
         if (p.x < r.getX() + edge) return top ? Zone::CornerL : Zone::Left;
         if (p.x > r.getRight() - edge) return top ? Zone::CornerR : Zone::Right;
-        if (r.getWidth() >= kTiltMinW && !cons) {
-            // Past the edge strip: a fifth of the note, but never thinner than 8 px.
-            const float zone = edge + std::max(r.getWidth() / 5.f - edge, 8.f);
-            if (p.x < r.getX() + zone) return Zone::TiltL;
-            if (p.x > r.getRight() - zone) return Zone::TiltR;
-        }
         return Zone::Body;
+    }
+
+    // The separation under `p` on note `i`'s edge strip: the boundary with the neighbour on that
+    // side (its index on the left), if the neighbour is close (gap under kSepGapSec); else -1.
+    // The gap is wider than the threshold a separation can be made at, so a hard separation whose
+    // notes were pushed apart still shows and can be double-clicked back to soft.
+    static constexpr double kSepGapSec = 0.3;
+    int boundaryAt(int i, juce::Point<float> p) const
+    {
+        const Zone z = zoneOf(i, p);
+        const int b = (z == Zone::Left || z == Zone::CornerL) ? i - 1 : (z == Zone::Right || z == Zone::CornerR) ? i : -1;
+        return b >= 0 && b + 1 < (int)ed.eff_->notes.size() && separationGap(b) < kSepGapSec ? b : -1;
+    }
+    double separationGap(int b) const
+    {
+        return ed.noteStartSec(b + 1) - ed.noteEndSec(b);
+    }
+
+    // Separations between close neighbours: soft (linked) a thin line between the two notes;
+    // hard (each moves alone) a bracket at each note's edge, as in Melodyne.
+    void drawSeparations(juce::Graphics& g, const Analysis& A, const Document& d)
+    {
+        const auto c = canvas();
+        const float s = semi();
+        const int n = (int)A.notes.size();
+        const std::vector<bool> softSep = softSeparations(d.edits, A);
+        auto deleted = [&](int i) { return i < (int)d.edits.notes.size() && d.edits.notes[(size_t)i].deleted; };
+        for (int b = 0; b + 1 < n && b < (int)softSep.size(); ++b) {
+            if (separationGap(b) >= kSepGapSec) continue;
+            if (deleted(b) || deleted(b + 1)) continue; // a deleted note has no separation to show
+            const auto l = noteRect(b), r = noteRect(b + 1);
+            if (r.getX() < c.getX() - 10 || l.getRight() > c.getRight() + 10) continue;
+            const float top = std::min(l.getY(), r.getY()), bottom = std::max(l.getBottom(), r.getBottom());
+            if (softSep[(size_t)b]) {
+                const float x = 0.5f * (l.getRight() + r.getX());
+                g.setColour(col::dim.withAlpha(0.55f));
+                g.drawLine(x, top + 1, x, bottom - 1, 0.8f);
+            } else {
+                const float t = std::max(3.f, s * 0.18f); // bracket tick length
+                g.setColour(col::dim.withAlpha(0.9f));
+                juce::Path p; // "]" at the end of the left note, "[" at the start of the right one
+                p.startNewSubPath(l.getRight() - t, l.getY());
+                p.lineTo(l.getRight(), l.getY());
+                p.lineTo(l.getRight(), l.getBottom());
+                p.lineTo(l.getRight() - t, l.getBottom());
+                p.startNewSubPath(r.getX() + t, r.getY());
+                p.lineTo(r.getX(), r.getY());
+                p.lineTo(r.getX(), r.getBottom());
+                p.lineTo(r.getX() + t, r.getBottom());
+                g.strokePath(p, juce::PathStrokeType(1.2f));
+            }
+        }
     }
 
     // ---- painting ------------------------------------------------------------------
@@ -280,12 +406,16 @@ public:
         Document* d = ed.doc();
         const Analysis* A = ed.eff_;
         const Key key = (A && d) ? d->key(*A) : Key{};
-        const bool showScale = A && d && !d->chromatic;
+        // Lanes: in the key light, out of it dark (so it is clear where notes can be pulled);
+        // chromatic: every other semitone light. Without a key: the piano pattern.
+        const bool keyed = A && d && !d->chromatic;
+        const bool chroma = A && d && d->chromatic;
 
         for (int m = (int)std::floor(ed.lo_); m <= (int)std::ceil(ed.hi_); ++m) {
             const float y = yOf(m + 0.5);
-            g.setColour(isBlack(m) ? col::laneBlack : col::laneWhite);
-            if (showScale && inScale(m, key)) g.setColour(col::laneScale.withMultipliedBrightness(isBlack(m) ? 0.92f : 1.f));
+            if (keyed) g.setColour(inScale(m, key) ? col::laneScale : col::laneBlack);
+            else if (chroma) g.setColour(((m % 2) + 2) % 2 == 0 ? col::laneScale : col::laneBlack);
+            else g.setColour(isBlack(m) ? col::laneBlack : col::laneWhite);
             g.fillRect(c.getX(), y, c.getWidth(), s);
             g.setColour(isBlack(m) ? col::keyBlack : col::keyWhite);
             g.fillRect(0.f, y, kKeysW - 2, s - 1);
@@ -299,6 +429,19 @@ public:
                 g.setColour(col::grid);
                 g.drawHorizontalLine((int)(y + s), c.getX(), c.getRight());
             }
+        }
+
+        // Pure degrees sit between the lanes' centres: a tick at the exact height of each one.
+        if (keyed && key.just) {
+            double cents[7];
+            scaleCents(key, cents);
+            g.setColour(col::text.withAlpha(0.55f));
+            for (int oct = (int)std::floor(ed.lo_ / 12.0) - 1; oct <= (int)std::ceil(ed.hi_ / 12.0) + 1; ++oct)
+                for (double c7 : cents) {
+                    const double p = 12.0 * oct + key.tonic + c7 / 100.0;
+                    if (p < ed.lo_ || p > ed.hi_) continue;
+                    g.fillRect((float)c.getRight() - 14.f, yOf(p) - 0.75f, 14.f, 1.5f);
+                }
         }
 
         drawRuler(g);
@@ -322,6 +465,12 @@ public:
             drawTrackName(g);
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
+            drawSeparations(g, *A, *d);
+            if (cutMode && pressed >= 0 && (gesture == G::StretchL || gesture == G::StretchR)) {
+                const auto r = noteRect(pressed);
+                g.setColour(col::accent);
+                g.drawLine(cutX, r.getY() - semi(), cutX, r.getBottom() + semi(), 1.5f);
+            }
             drawCurves(g, *A);
             drawThreads(g, *d);
             if (!marquee.isEmpty()) {
@@ -447,6 +596,7 @@ public:
                 if (ed.host_->isRendering()) st << T(" · рендер…");
                 else if (const auto o = ed.host_->renderOrigin(); o.isNotEmpty()) st << " · " << o;
                 if (ed.host_->isBypassed()) st << T(" · ОРИГИНАЛ (A/B)");
+                if (const auto n = ed.host_->noticeText(); n.isNotEmpty()) st << " · " << n;
             }
         }
         if (st.isEmpty()) return;
@@ -466,14 +616,102 @@ public:
         return (float)std::clamp((db - (ed.levelRef_ - 36.0)) / 36.0, 0.16, 1.0);
     }
 
+    // Unvoiced sound (consonant) in front of note i: from the end of note i-1 up to note i.
+    static bool hasConsonant(const Analysis& A, int i)
+    {
+        const int from = i > 0 ? A.notes[(size_t)i - 1].endFrame : 0;
+        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        for (int k = std::max(0, from); k < to; ++k) {
+            const FrameKind kd = A.frames[(size_t)k].kind;
+            if (kd == FrameKind::Sibilant || kd == FrameKind::Breath) return true;
+        }
+        return false;
+    }
+    juce::Rectangle<float> consRect(int i) const
+    {
+        float x0 = i > 0 ? xOf(ed.noteEndSec(i - 1)) : canvas().getX();
+        // Start the zone at the first non-silent frame, so the pause before a consonant stays empty.
+        if (ed.eff_ != nullptr && i < (int)ed.eff_->notes.size()) {
+            const Analysis& A = *ed.eff_;
+            const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
+            const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+            const double hopSec = (double)A.hop / A.sampleRate;
+            for (int f = from; f < to; ++f) {
+                if (A.frames[(size_t)f].kind == FrameKind::Silence) continue;
+                x0 = std::max(x0, xOf(ed.outSec(f * hopSec)));
+                break;
+            }
+        }
+        const float x1 = xOf(ed.noteStartSec(i));
+        const float s = semi();
+        const float y = yOf(ed.editedCentre(i));
+        return {x0, y - s * 0.17f, std::max(0.f, x1 - x0), s * 0.34f};
+    }
+    // The note whose consonant zone is under a point, or -1.
+    int consonantAt(juce::Point<float> p) const
+    {
+        if (ed.eff_ == nullptr) return -1;
+        for (int i = 0; i < (int)ed.eff_->notes.size(); ++i)
+            if (hasConsonant(*ed.eff_, i) && consRect(i).contains(p)) return i;
+        return -1;
+    }
+
+    // Waveform of the unvoiced sound in a consonant zone: its level frame by frame, drawn like
+    // a note's blob. Sibilants and breaths get their own shades.
+    void drawUnvoiced(juce::Graphics& g, const Analysis& A, int i, juce::Rectangle<float> r, bool muted, bool breathDeleted) const
+    {
+        const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
+        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        if (to <= from) return;
+        const double hopSec = (double)A.hop / A.sampleRate;
+        const float yc = r.getCentreY();
+        const float half = semi() * 0.45f;
+        const int stride = std::max(1, (int)((to - from) / std::max(4.f, r.getWidth() / 2.f)));
+        for (int kind = 0; kind < 2; ++kind) { // 0 sibilant, 1 breath
+            if (kind == 1 && breathDeleted) continue;
+            const FrameKind want = kind == 0 ? FrameKind::Sibilant : FrameKind::Breath;
+            std::vector<juce::Point<float>> top, bottom;
+            for (int f = from; f < to; f += stride) {
+                const FrameKind kd = A.frames[(size_t)f].kind;
+                if (kd != want) continue;
+                const float x = xOf(ed.outSec(f * hopSec));
+                const float a = half * levelOf(A, f, 0.0);
+                top.push_back({x, yc - a});
+                bottom.push_back({x, yc + a});
+            }
+            if (top.size() < 2) continue;
+            juce::Path p;
+            p.startNewSubPath(top.front());
+            for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k]);
+            for (size_t k = bottom.size(); k-- > 0;) p.lineTo(bottom[k]);
+            p.closeSubPath();
+            const float alpha = muted ? 0.18f : (kind == 0 ? 0.55f : 0.35f);
+            g.setColour((kind == 0 ? col::offTune : col::dim).withAlpha(alpha));
+            g.fillPath(p);
+        }
+    }
+
     void drawNotes(juce::Graphics& g, const Analysis& A, const Document& d)
     {
+        for (int i = 0; i < (int)A.notes.size() && i < (int)d.edits.notes.size(); ++i) {
+            if (!hasConsonant(A, i)) continue;
+            const auto r = consRect(i);
+            if (r.getWidth() < 2.f) continue;
+            const bool m = d.edits.notes[(size_t)i].consMuted;
+            const bool sel = ed.consSelection_.count(i) > 0;
+            g.setColour(col::dim.withAlpha(m ? 0.10f : sel ? 0.45f : 0.28f));
+            g.fillRoundedRectangle(r, 3.f);
+            g.setColour(sel ? col::lift : col::dim.withAlpha(m ? 0.4f : 0.6f));
+            g.drawRoundedRectangle(r, 3.f, sel ? 1.4f : 0.8f);
+            drawUnvoiced(g, A, i, r, m, d.edits.notes[(size_t)i].breathDeleted);
+        }
         const auto c = canvas();
         const float s = semi();
         const double hopSec = (double)A.hop / A.sampleRate;
         for (int i = 0; i < (int)A.notes.size(); ++i) {
             const Note& n = A.notes[(size_t)i];
             const NoteEdit& e = d.edits.notes[(size_t)i];
+            if (e.deleted) continue; // deleted: hidden, its audio is only there to be pulled back
             const auto box = noteRect(i);
             if (box.getRight() < c.getX() || box.getX() > c.getRight()) continue;
             const double centre = ed.editedCentre(i);
@@ -503,11 +741,12 @@ public:
             for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k].x, yc - top[k].y);
             for (size_t k = top.size() - 1; k >= 1; --k) p.lineTo(top[k].x, yc + top[k].y);
             p.closeSubPath();
-            g.setColour(fill.withAlpha(sel ? 0.62f : 0.36f));
+            // Muted: a faint ghost of the note, kept in place.
+            g.setColour(fill.withAlpha(e.muted ? 0.14f : sel ? 0.62f : 0.36f));
             g.fillPath(p);
             // Thin, quiet outline: the fill carries the colour. Selected: the note's own colour,
             // lighter, a little thicker.
-            g.setColour(sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
+            g.setColour(e.muted ? fill.withAlpha(0.45f) : sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
             g.strokePath(p, juce::PathStrokeType(sel ? 1.2f : 0.6f));
 
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
@@ -531,12 +770,25 @@ public:
         const int nf = (int)A.frames.size();
         const int k0 = std::clamp((int)(ed.inSec(secOf(c.getX())) / hopSec) - 2, 0, nf);
         const int k1 = std::clamp((int)(ed.inSec(secOf(c.getRight())) / hopSec) + 3, 0, nf);
-        auto draw = [&](auto valueAt, juce::Colour colr, float w) {
+        // Frames inside a muted note: their line is drawn paler.
+        std::vector<char> muted(A.frames.size(), 0);
+        if (const Document* d = ed.doc())
+            for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
+                if (d->edits.notes[i].muted)
+                    for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 1;
+        // Deleted notes: their line is not drawn at all (value 2).
+        if (const Document* d = ed.doc())
+            for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
+                if (d->edits.notes[i].deleted)
+                    for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 2;
+        auto draw = [&](auto valueAt, juce::Colour colr, float w, bool wantMuted) {
             juce::Path p;
             bool pen = false;
             for (int k = k0; k < k1; ++k) {
+                // A gap opened between notes is silent: the line breaks there.
+                if (k > 0 && ed.timeMap_.silenceBetween((k - 1) * (double)A.hop, k * (double)A.hop)) pen = false;
                 const double m = valueAt(k);
-                if (m <= 0) { pen = false; continue; }
+                if (m <= 0 || muted[(size_t)k] == 2 || (muted[(size_t)k] == 1) != wantMuted) { pen = false; continue; }
                 const juce::Point<float> pt(xOf(ed.outSec(k * hopSec)), yOf(m));
                 if (!pen) p.startNewSubPath(pt); else p.lineTo(pt);
                 pen = true;
@@ -544,13 +796,15 @@ public:
             g.setColour(colr);
             g.strokePath(p, juce::PathStrokeType(w));
         };
-        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f);
+        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f, false);
+        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig.withAlpha(0.3f), 1.f, true);
         if (ed.curve_.size() == A.frames.size()) {
-            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f);
+            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f, false);
+            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit.withAlpha(0.3f), 1.4f, true);
             // Pencil-drawn stretches on top, in their own colour.
             if (const Document* d = ed.doc(); d != nullptr && !d->edits.draw.empty()) {
                 const std::vector<float> dense = drawnDense(d->edits, nf);
-                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f);
+                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f, false);
             }
         }
     }
@@ -564,8 +818,7 @@ public:
             const juce::Colour vc = col::voice((int)j);
             for (size_t i = 0; i < hp.size(); ++i) {
                 if (std::isnan(hp[i])) continue;
-                const Note& n = A.notes[i];
-                const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
+                const float x0 = xOf(ed.noteStartSec((int)i)), x1 = xOf(ed.noteEndSec((int)i));
                 const juce::Rectangle<float> r(x0, yOf(hp[i]) - s * 0.17f, std::max(2.f, x1 - x0), s * 0.34f);
                 g.setColour(vc.withAlpha(0.22f));
                 g.fillRoundedRectangle(r, 3.f);
@@ -587,7 +840,7 @@ public:
             int e = k + 1;
             while (e < (int)A.frames.size() && A.frames[(size_t)e].kind == kind) ++e;
             if (kind == FrameKind::Sibilant || kind == FrameKind::Breath) {
-                const float x0 = xOf(ed.outSec((k - 0.5) * hopSec)), x1 = xOf(ed.outSec((e - 0.5) * hopSec));
+                const float x0 = xOf(ed.outSec((k - 0.5) * hopSec)), x1 = xOf(ed.outSecBefore((e - 0.5) * hopSec));
                 if (x1 >= c.getX() && x0 <= c.getRight()) {
                     g.setColour(kind == FrameKind::Sibilant ? col::sibilant : col::breath);
                     g.fillRect(x0, y + 1, std::max(1.f, x1 - x0), kStripH - 2);
@@ -606,9 +859,12 @@ public:
     {
         const Document* d = ed.doc();
         if (ed.eff_ == nullptr || d == nullptr || i < 1 || i >= (int)ed.eff_->notes.size()) return false;
+        // A transition into or out of a deleted note is not shown (nor its handle).
+        if (i < (int)d->edits.notes.size() && (d->edits.notes[(size_t)i].deleted || d->edits.notes[(size_t)i - 1].deleted)) return false;
         const Note& L = ed.eff_->notes[(size_t)i - 1];
         const Note& R = ed.eff_->notes[(size_t)i];
         if (R.startFrame - L.endFrame > 1) return false; // a gap: no glide to shape
+        if (ed.noteStartSec(i) - ed.noteEndSec(i - 1) > kMinSilenceSec * 0.5) return false; // pulled apart
         if ((size_t)i >= d->edits.notes.size() || d->edits.notes[(size_t)i].consonant ||
             d->edits.notes[(size_t)i - 1].consonant) return false;
         const auto bL = noteRect(i - 1), bR = noteRect(i);
@@ -704,6 +960,24 @@ public:
         g.strokePath(p, juce::PathStrokeType(1.2f));
         g.setColour(link);
         g.fillPath(dots);
+
+        // Pins: a square at each end (target on this track, reference on the reference).
+        if (L.pinsOn) {
+            const auto& pins = ed.doc()->pins;
+            for (size_t i = 0; i < pins.size(); ++i)
+                for (int k = 0; k < 2; ++k) {
+                    const auto q = pinPoint(pins[i], k == 1);
+                    if (q.x < -1e8f) continue;
+                    const auto sq = juce::Rectangle<float>(7.f, 7.f).withCentre(q);
+                    g.setColour(k == 1 ? link : col::accent);
+                    g.fillRect(sq);
+                    if (ed.hoverPin_ == (int)i) { g.setColour(col::text); g.drawRect(sq.expanded(2.f), 1.5f); }
+                }
+        }
+        if (gesture == G::PinNew) {
+            g.setColour(link);
+            g.drawLine(juce::Line<float>(pinAnchor_, lastMouse), 1.5f);
+        }
 
         // Wrong notes F would move: "+2" / "−5" above the note.
         g.setFont(juce::FontOptions(11.f, juce::Font::bold));
@@ -824,6 +1098,10 @@ public:
     void mouseMove(const juce::MouseEvent& e) override
     {
         lastMouse = e.position;
+        bool refEnd = false;
+        const int pin = pinAt(e.position, refEnd);
+        if (pin != ed.hoverPin_) { ed.hoverPin_ = pin; repaint(); }
+        if (pin >= 0) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
         if (ed.pencil_ && canvas().contains(e.position)) { setMouseCursor(juce::MouseCursor::CrosshairCursor); return; }
         const int th = hitThread(e.position);
         if (th != hoverThread) { hoverThread = th; repaint(); }
@@ -831,14 +1109,18 @@ public:
         const int i = hitNote(e.position);
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
         const Zone z = zoneOf(i, e.position);
+        if (e.mods.isAltDown()) { // Alt: the cut tool. Body: click cuts. Edge: drag moves the cut, click joins.
+            setMouseCursor(z == Zone::Body ? cutCursor : cutMoveCursor);
+            return;
+        }
         setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
-                       : (z == Zone::TiltL || z == Zone::CornerL) ? juce::MouseCursor::TopLeftCornerResizeCursor
-                       : (z == Zone::TiltR || z == Zone::CornerR) ? juce::MouseCursor::TopRightCornerResizeCursor
-                                                                  : juce::MouseCursor::LeftRightResizeCursor);
+                       : (z == Zone::CornerL || z == Zone::CornerR) ? juce::MouseCursor::UpDownResizeCursor
+                                                                    : juce::MouseCursor::LeftRightResizeCursor);
     }
 
     void mouseExit(const juce::MouseEvent&) override
     {
+        ed.hoverPin_ = -1;
         if (hoverThread >= 0) { hoverThread = -1; repaint(); }
     }
 
@@ -852,6 +1134,41 @@ public:
         if (e.position.y < kRulerH && e.position.x > kKeysW) {
             gesture = G::Ruler;
             if (ed.host_->canControlTransport()) ed.host_->setPlayheadSec(std::max(0.0, secOf(e.position.x)));
+            return;
+        }
+        const DragAct da = ed.scheme_.drag[(size_t)schemeMask(e.mods)];
+        if (da != DragAct::None && !e.mods.isPopupMenu() && canvas().contains(e.position)) {
+            gesture = da == DragAct::Pan ? G::ViewPan : G::ViewZoom;
+            viewFrom_ = e.position;
+            startScroll_ = ed.scroll_;
+            startLo_ = ed.lo_;
+            startHi_ = ed.hi_;
+            startPps_ = ed.pps_;
+            return;
+        }
+        // A click on a consonant zone selects it; M then mutes the selected zones.
+        if (!e.mods.isAnyModifierKeyDown() && !e.mods.isPopupMenu()) {
+            const int cons = consonantAt(e.position);
+            if (cons >= 0) {
+                ed.consSelection_ = {cons};
+                repaint();
+                return;
+            }
+        }
+        if (!ed.consSelection_.empty()) { ed.consSelection_.clear(); repaint(); }
+        bool refEnd = false;
+        const int pin = pinAt(e.position, refEnd);
+        if (pin >= 0 && !e.mods.isPopupMenu()) {
+            if (e.getNumberOfClicks() >= 2) { ed.removePin(pin); return; } // double click removes it
+            gesture = G::PinEnd;
+            pinIdx_ = (size_t)pin;
+            pinRefEnd_ = refEnd;
+            before = *ed.doc();
+            return;
+        }
+        if (e.mods.isAltDown() && !e.mods.isPopupMenu() && onOurThread(e.position)) {
+            gesture = G::PinNew; // a drag from this track's thread makes a pin (a click does nothing)
+            pinAnchor_ = e.position;
             return;
         }
         const int th = hitThread(e.position);
@@ -905,10 +1222,16 @@ public:
         for (int k : ed.selection_) start[k] = ed.doc()->edits.notes[(size_t)k];
         start[i] = ed.doc()->edits.notes[(size_t)i];
         const Zone z = zoneOf(i, e.position);
-        tiltRight = z == Zone::TiltR || z == Zone::CornerR;
+        tiltRight = z == Zone::CornerR;
         gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR
-                : (z == Zone::TiltL || z == Zone::TiltR) ? G::PendingTilt
                 : (z == Zone::CornerL || z == Zone::CornerR) ? G::PendingCorner : G::Pending;
+        // Alt on an edge: the cut tool (drag moves the cut, a click joins). An edge drag
+        // started without Alt switches to it when Alt is pressed on the way.
+        cutAtPress = e.mods.isAltDown() && z != Zone::Body;
+        if (cutAtPress) gesture = (z == Zone::Left || z == Zone::CornerL) ? G::StretchL : G::StretchR;
+        cutMode = cutAtPress;
+        movedAny = false;
+        cutX = e.position.x;
         ed.refresh();
     }
 
@@ -917,6 +1240,42 @@ public:
         lastMouse = e.position;
         Document* d = ed.doc();
         if (d == nullptr || ed.eff_ == nullptr) return;
+        if (gesture == G::ViewPan || gesture == G::ViewZoom) {
+            const juce::Point<float> o = e.position - viewFrom_;
+            const double h = canvas().getHeight();
+            const double span = startHi_ - startLo_;
+            const double cx = canvas().getX(), cy = canvas().getY();
+            if (gesture == G::ViewPan) {
+                ed.scroll_ = std::max(std::min(0.0, startScroll_), startScroll_ - o.x / startPps_);
+                const double dm = o.y * span / h; // the content follows the pointer
+                ed.lo_ = startLo_ + dm;
+                ed.hi_ = startHi_ + dm;
+            } else {
+                // Time zoom keeps the time under the press point; pitch zoom keeps its pitch.
+                const double pps = juce::jlimit(2.0, 4000.0, startPps_ * std::pow(1.25, o.x / 40.0));
+                const double timeAt = startScroll_ + (viewFrom_.x - cx) / startPps_;
+                ed.pps_ = pps;
+                ed.scroll_ = std::max(std::min(0.0, startScroll_), timeAt - (viewFrom_.x - cx) / pps);
+                const double nspan = juce::jlimit(6.0, 60.0, span * std::pow(0.85, o.y / 40.0));
+                const double pitchAt = startHi_ - (viewFrom_.y - cy) * span / h;
+                const double frac = (startHi_ - pitchAt) / span;
+                ed.hi_ = pitchAt + frac * nspan;
+                ed.lo_ = ed.hi_ - nspan;
+            }
+            repaint();
+            ed.roll_->repaint();
+            return;
+        }
+        if (gesture == G::PinEnd) {
+            d->pins = before.pins;
+            if (glina::movePin(d->pins, pinIdx_, pinRefEnd_, secOf(e.position.x))) {
+                changed = true;
+                ed.refreshLinks();
+                repaint();
+            }
+            return;
+        }
+        if (gesture == G::PinNew) { repaint(); return; }
         const juce::Point<float> off = e.getOffsetFromDragStart().toFloat();
         switch (gesture) {
             case G::Ruler:
@@ -933,14 +1292,13 @@ public:
             case G::Pending:
                 if (off.getDistanceFromOrigin() < 4) return;
                 gesture = std::abs(off.y) >= std::abs(off.x) ? G::Pitch : G::Move;
+                tempMoveDiag(juce::String("gesture ") + (gesture == G::Move ? "Move" : "Pitch") +
+                             juce::String::formatted(" pressed=%d off=(%.1f,%.1f) pps=%.4f", pressed,
+                                                     (double)off.x, (double)off.y, ed.pps_)); // TEMP-MOVE-DIAG
                 break;
-            case G::PendingTilt: // corner area: up/down tilts, sideways moves the note like the body
+            case G::PendingCorner: // the top corner of an edge: up/down only, the roof
                 if (off.getDistanceFromOrigin() < 4) return;
-                gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : G::Move;
-                break;
-            case G::PendingCorner: // the corner itself: up/down tilts, sideways stretches like the edge
-                if (off.getDistanceFromOrigin() < 4) return;
-                gesture = std::abs(off.y) >= std::abs(off.x) ? G::Tilt : (tiltRight ? G::StretchR : G::StretchL);
+                gesture = G::Tilt;
                 break;
             case G::Draw:
             case G::Erase: {
@@ -959,6 +1317,18 @@ public:
             case G::Smooth:
                 break;
         }
+        if (std::abs(off.x) >= 2) movedAny = true;
+        if (gesture == G::StretchL || gesture == G::StretchR) {
+            cutMode = e.mods.isAltDown();
+            if (cutMode) { // moving the cut: nothing is stretched; the new cut shows as a line until release
+                d->edits = before.edits;
+                changed = false;
+                cutX = e.position.x;
+                ed.refreshCurves(false);
+                repaint();
+                return;
+            }
+        }
         const double dt = off.x / ed.pps_;
         if (gesture == G::Pitch) {
             double delta = -off.y / semi();
@@ -969,14 +1339,14 @@ public:
             }
             for (auto& [k, s0] : start) d->edits.notes[(size_t)k].pitchOffset = s0.pitchOffset + delta;
         } else if (gesture == G::Tilt) {
-            // Free in cents (Shift: finer). Selected notes tilt as one note: one line over the
-            // group, the group's far edge stays, its near edge follows the mouse; each note gets
-            // its piece of the line. A new drag continues from the current tilt.
+            // Free in cents (Shift: finer). Selected notes tilt as one roof: the group's two ends
+            // stay, the apex is the dragged note's edge and follows the mouse up and down; each note
+            // gets its piece of the line. A new drag continues from the current tilt.
             const double delta = -off.y / semi() * (e.mods.isShiftDown() ? 0.25 : 1.0);
             d->edits = before.edits;
             std::set<int> notes;
             for (auto& kv : start) notes.insert(kv.first);
-            addTilt(d->edits, *ed.eff_, notes, tiltRight, delta);
+            addTilt(d->edits, *ed.eff_, notes, tiltRight, delta, pressed);
         } else if (gesture == G::Smooth) {
             // Vertical: up = smoother (more), down = sharper (less). 0.5 % per pixel (Shift: 0.15 %),
             // relative to where the drag started.
@@ -989,15 +1359,20 @@ public:
             d->edits = before.edits;
             std::set<int> moved = ed.selection_;
             moved.insert(pressed);
-            moveNotes(d->edits, *ed.eff_, moved, dt);
+            const double applied = moveNotes(d->edits, *ed.eff_, moved, dt);
+            tempMoveDiag(juce::String::formatted("Move nsel=%d dt=%.6f applied=%.6f", (int)moved.size(), dt,
+                                                 applied)); // TEMP-MOVE-DIAG
+            if (applied != dt) // TEMP-MOVE-DIAG
+                tempMoveDiag(juce::String("  limited by: ") + moveLimitReason()); // TEMP-MOVE-DIAG
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
-            moveBoundary(d->edits, *ed.eff_, gesture == G::StretchR ? pressed : pressed - 1, dt, ed.selection_,
-                         gesture == G::StretchL);
+            const int boundary = gesture == G::StretchR ? pressed : pressed - 1;
+            moveBoundary(d->edits, *ed.eff_, boundary, dt, ed.selection_,
+                         gesture == G::StretchL, true); // the mouse may lay a note over the next
         }
         changed = true;
-        ed.refreshCurves();
+        ed.refreshCurves(false);
         repaint();
     }
 
@@ -1006,12 +1381,35 @@ public:
         const G g0 = gesture;
         gesture = G::None;
         marquee = {};
+        if (g0 == G::ViewPan || g0 == G::ViewZoom) return;
+        if (g0 == G::PinEnd) {
+            if (changed) ed.commit(before);
+            else ed.refresh();
+            changed = false;
+            return;
+        }
+        if (g0 == G::PinNew) {
+            if (pinAnchor_.getDistanceFrom(e.position) > 4.f)
+                ed.addLinkPin(secOf(pinAnchor_.x), secOf(e.position.x));
+            return;
+        }
         if (g0 == G::Draw || g0 == G::Erase) {
             if (changed) ed.commit(before);
             changed = false;
             return;
         }
-        if ((g0 == G::Pending || g0 == G::PendingTilt) && pressed >= 0 && e.mods.isAltDown() && !changed) {
+        if ((g0 == G::StretchL || g0 == G::StretchR) && cutMode && pressed >= 0) {
+            const bool startEdge = g0 == G::StretchL;
+            const int note = pressed;
+            cutMode = false;
+            pressed = -1;
+            changed = false;
+            if (movedAny) ed.moveCutAt(note, startEdge, secOf(e.position.x));
+            else if (cutAtPress) ed.joinAt(startEdge ? note - 1 : note); // Alt+click on a cut: join
+            else ed.refresh();
+            return;
+        }
+        if (g0 == G::Pending && pressed >= 0 && e.mods.isAltDown() && !changed) {
             ed.splitAt(pressed, secOf(e.position.x));
         } else if (changed) {
             ed.commit(before);
@@ -1026,7 +1424,9 @@ public:
     {
         const int i = hitNote(e.position);
         const int gi = i < 0 ? hitGhost(e.position) : -1;
-        if (i >= 0) {
+        if (const int b = i >= 0 ? boundaryAt(i, e.position) : -1; b >= 0) {
+            ed.toggleSeparationAt(b); // double-click a separation: soft <-> hard
+        } else if (i >= 0) {
             ed.selection_ = {i};
             ed.snapToScale();
         } else if (gi >= 0) {
@@ -1039,24 +1439,33 @@ public:
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
         const float dy = w.deltaY, dx = w.deltaX;
-        if (e.mods.isCommandDown() || e.mods.isCtrlDown()) {
-            if (e.mods.isShiftDown()) { // vertical zoom
-                const double anchor = ed.hi_ - (e.position.y - canvas().getY()) / semi();
-                const double span = juce::jlimit(6.0, 60.0, (ed.hi_ - ed.lo_) * std::pow(0.85, dy * 4));
-                const double frac = (ed.hi_ - anchor) / (ed.hi_ - ed.lo_);
-                ed.hi_ = anchor + frac * span;
-                ed.lo_ = ed.hi_ - span;
-            } else {
-                const double anchor = secOf(e.position.x);
-                ed.pps_ = juce::jlimit(2.0, 4000.0, ed.pps_ * std::pow(1.25, dy * 4));
-                ed.scroll_ = std::max(std::min(0.0, ed.scroll_), anchor - (e.position.x - canvas().getX()) / ed.pps_);
-            }
-        } else if (e.mods.isShiftDown()) {
+        const double span = ed.hi_ - ed.lo_;
+        switch (ed.scheme_.wheel[(size_t)schemeMask(e.mods)]) {
+        case WheelAct::None:
+            return;
+        case WheelAct::ScrollV: // pitch
             ed.lo_ += dy * 4;
             ed.hi_ += dy * 4;
-        } else {
+            break;
+        case WheelAct::ScrollH: { // time
             const float d = std::abs(dx) > std::abs(dy) ? -dx : dy;
             ed.scroll_ = std::max(std::min(0.0, ed.scroll_), ed.scroll_ - d * 300.0 / ed.pps_); // after a track switch the view may start before this clip
+            break;
+        }
+        case WheelAct::ZoomH: { // time, around the pointer
+            const double anchor = secOf(e.position.x);
+            ed.pps_ = juce::jlimit(2.0, 4000.0, ed.pps_ * std::pow(1.25, dy * 4));
+            ed.scroll_ = std::max(std::min(0.0, ed.scroll_), anchor - (e.position.x - canvas().getX()) / ed.pps_);
+            break;
+        }
+        case WheelAct::ZoomV: { // pitch range, around the pointer
+            const double anchor = ed.hi_ - (e.position.y - canvas().getY()) / semi();
+            const double nspan = juce::jlimit(6.0, 60.0, span * std::pow(0.85, dy * 4));
+            const double frac = (ed.hi_ - anchor) / span;
+            ed.hi_ = anchor + frac * nspan;
+            ed.lo_ = ed.hi_ - nspan;
+            break;
+        }
         }
         repaint();
     }
@@ -1151,10 +1560,14 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, PendingTilt, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase };
+    enum class G { None, Pending, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase, PinEnd, PinNew, ViewPan, ViewZoom };
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
+    bool cutMode = false;    // an edge drag with Alt: moves the cut (the source boundary), not the time
+    bool cutAtPress = false; // Alt was down when the edge was pressed (a click then joins)
+    bool movedAny = false;   // the mouse moved during this press
+    float cutX = 0;          // where the moved cut would go (screen x)
     int pressed = -1;
     bool changed = false;
     Document before;
@@ -1163,6 +1576,37 @@ public:
     std::set<int> selBefore;
     juce::Rectangle<float> marquee;
     juce::Point<float> lastMouse;
+    size_t pinIdx_ = 0;             // PinEnd: the pin being moved
+    bool pinRefEnd_ = false;        // PinEnd: its reference end (else its target end)
+    juce::Point<float> viewFrom_;   // ViewPan / ViewZoom: where the drag started
+    double startScroll_ = 0, startLo_ = 0, startHi_ = 0, startPps_ = 1; // the view at that moment
+    juce::Point<float> pinAnchor_;  // PinNew: where the drag started, on this track's thread
+
+    // The pin end under p (index, reference end?); -1 when none.
+    int pinAt(juce::Point<float> p, bool& refEnd) const
+    {
+        if (!ed.links_.pinsOn || ed.doc() == nullptr) return -1;
+        const auto& pins = ed.doc()->pins;
+        for (size_t i = 0; i < pins.size(); ++i)
+            for (int k = 0; k < 2; ++k)
+                if (p.getDistanceFrom(pinPoint(pins[i], k == 1)) <= 6.f) { refEnd = k == 1; return (int)i; }
+        return -1;
+    }
+    // Where a pin end sits: on this track's thread (target) or the reference's (reference).
+    // Far off the roll when that thread has no pitch there.
+    juce::Point<float> pinPoint(const Pin& pin, bool refEnd) const
+    {
+        const float sh = ed.ghostShift_ ? (float)ghostShift(0) : 0.f;
+        const float m = refEnd ? ed.linkRefMidi(pin.ref) + sh : ed.linkTgtMidi(pin.tgt);
+        if (m <= 0.f) return {-1e9f, -1e9f};
+        return refEnd ? juce::Point<float>(xOf(pin.ref), yOf(m)) : juce::Point<float>(xOf(pin.tgt), yOf(m));
+    }
+    // Whether p lies on this track's thread (a pitch near it).
+    bool onOurThread(juce::Point<float> p) const
+    {
+        const float m = ed.linkTgtMidi(secOf(p.x));
+        return ed.showLinks_ && ed.links_.ok && m > 0.f && std::abs(yOf(m) - p.y) <= 8.f;
+    }
 };
 
 // =====================================================================================
@@ -1442,6 +1886,12 @@ public:
         EditSlider formant, gain, pan, delay, detune;
         juce::TextButton all, sel, remove;
     };
+    // The lead (original) row: on/off, level and pan only; no interval or humanising.
+    struct LeadRow {
+        juce::ToggleButton on;
+        juce::Label note;
+        EditSlider gain, pan;
+    };
 
     explicit Harmonies(PitchEditor& o) : ed(o)
     {
@@ -1453,6 +1903,23 @@ public:
                        "Цветные полоски на нотах — партии голосов."),
                      juce::dontSendNotification);
         addAndMakeVisible(hint);
+        lead.on.setButtonText(juce::String(0));
+        lead.on.setColour(juce::ToggleButton::tickColourId, col::dim);
+        quiet(lead.on);
+        lead.on.onClick = [this] {
+            const bool v = lead.on.getToggleState();
+            ed.edit([v](Document& d) { d.leadEnabled = v; });
+        };
+        addAndMakeVisible(lead.on);
+        lead.note.setText(T("оригинал"), juce::dontSendNotification);
+        lead.note.setColour(juce::Label::textColourId, col::dim);
+        addAndMakeVisible(lead.note);
+        wireSlider(lead.gain, "Гр.", -40, 12, 0.5, "");
+        lead.gain.apply = [](Document& d, double v) { d.leadGainDb = v; };
+        lead.gain.slider.setTooltip(T("Громкость оригинала, дБ"));
+        wireSlider(lead.pan, "Пан.", -100, 100, 1, "");
+        lead.pan.apply = [](Document& d, double v) { d.leadPan = v / 100.0; };
+        lead.pan.slider.setTooltip(T("Панорама оригинала: −100 лево, +100 право"));
         add.setButtonText(T("+ Голос"));
         quiet(add);
         add.onClick = [this] {
@@ -1475,13 +1942,19 @@ public:
     int preferredHeight() const
     {
         const Document* d = ed.doc();
-        return kHeader + kRow * (d != nullptr ? (int)d->voices.size() : 0) + 6;
+        return kHeader + kRow * (1 + (d != nullptr ? (int)d->voices.size() : 0)) + 6;
     }
 
     void setupSlider(Row& row, EditSlider& s, int j, const char* name, double lo, double hi, double step,
                      const char* suffix, std::function<void(HarmonyVoice&, double)> fn)
     {
         s.apply = [j, fn](Document& d, double v) { if (j < (int)d.voices.size()) fn(d.voices[(size_t)j], v); };
+        wireSlider(s, name, lo, hi, step, suffix);
+        juce::ignoreUnused(row);
+    }
+
+    void wireSlider(EditSlider& s, const char* name, double lo, double hi, double step, const char* suffix)
+    {
         s.label.setText(T(name), juce::dontSendNotification);
         s.label.setColour(juce::Label::textColourId, col::dim);
         s.label.setJustificationType(juce::Justification::centredRight);
@@ -1507,7 +1980,6 @@ public:
         };
         addAndMakeVisible(s.label);
         addAndMakeVisible(s.slider);
-        juce::ignoreUnused(row);
     }
 
     void buildRows(int count)
@@ -1585,6 +2057,17 @@ public:
         const int n = d != nullptr ? (int)d->voices.size() : 0;
         if (n != (int)rows.size()) buildRows(n);
         add.setEnabled(d != nullptr && n < kMaxVoices);
+        if (d != nullptr) {
+            lead.on.setToggleState(d->leadEnabled, juce::dontSendNotification);
+            auto setLead = [](EditSlider& s, double x) {
+                if (s.dragging) return;
+                s.updating = true;
+                s.slider.setValue(x, juce::dontSendNotification);
+                s.updating = false;
+            };
+            setLead(lead.gain, d->leadGainDb);
+            setLead(lead.pan, d->leadPan * 100);
+        }
         for (int j = 0; j < n; ++j) {
             const HarmonyVoice& v = d->voices[(size_t)j];
             Row& r = *rows[(size_t)j];
@@ -1612,9 +2095,11 @@ public:
         g.fillAll(col::panel);
         g.setColour(col::panelLine);
         g.drawHorizontalLine(0, 0.f, (float)getWidth());
+        g.setColour(col::dim);
+        g.fillRect(0, kHeader + 6, 3, kRow - 10);
         for (int j = 0; j < (int)rows.size(); ++j) {
             g.setColour(col::voice(j));
-            g.fillRect(0, kHeader + j * kRow + 6, 3, kRow - 10);
+            g.fillRect(0, kHeader + (j + 1) * kRow + 6, 3, kRow - 10);
         }
     }
 
@@ -1626,6 +2111,17 @@ public:
         add.setBounds(head.removeFromLeft(90));
         head.removeFromLeft(10);
         hint.setBounds(head);
+        {
+            auto line = r.removeFromTop(kRow).reduced(0, 3);
+            lead.on.setBounds(line.removeFromLeft(44));
+            lead.note.setBounds(line.removeFromLeft(140));
+            line.removeFromLeft(6);
+            const int sw = juce::jlimit(70, 150, (line.getWidth() - 260) / 5 - 50);
+            for (auto* s : {&lead.gain, &lead.pan}) {
+                s->label.setBounds(line.removeFromLeft(54));
+                s->slider.setBounds(line.removeFromLeft(sw + 50));
+            }
+        }
         for (auto& rp : rows) {
             Row& row = *rp;
             auto line = r.removeFromTop(kRow).reduced(0, 3);
@@ -1633,7 +2129,7 @@ public:
             row.interval.setBounds(line.removeFromLeft(140));
             line.removeFromLeft(6);
             const int sw = juce::jlimit(70, 150, (line.getWidth() - 260) / 5 - 50);
-            for (auto* s : {&row.formant, &row.gain, &row.pan, &row.delay, &row.detune}) {
+            for (auto* s : {&row.gain, &row.pan, &row.delay, &row.formant, &row.detune}) {
                 s->label.setBounds(line.removeFromLeft(54));
                 s->slider.setBounds(line.removeFromLeft(sw + 50));
             }
@@ -1647,6 +2143,7 @@ public:
     PitchEditor& ed;
     juce::Label title, hint;
     juce::TextButton add;
+    LeadRow lead;
     std::vector<std::unique_ptr<Row>> rows;
 };
 
@@ -1814,19 +2311,194 @@ private:
     juce::String sig;
 };
 
+// The overview strip under the roll (32 px): the whole track with the item names on top, the audio
+// level and the notes below. The box is the shown part: drag its middle to move the view, drag an
+// edge handle to change the zoom (the other edge stays), click the strip to centre the view there.
+class PitchEditor::Navigator final : public juce::Component {
+public:
+    explicit Navigator(PitchEditor& o) : ed(o) {}
+
+    static constexpr int kH = 32;
+    static constexpr float kLabelH = 12.f;
+    static constexpr int kLo = 48, kHi = 80; // note range drawn (MIDI)
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(col::panel);
+        const auto s = span();
+        const auto a = area();
+        if (s.t1 <= s.t0 || a.isEmpty()) return;
+        const float top = a.getY() + kLabelH, bodyH = a.getBottom() - top;
+
+        g.setColour(col::dim.withAlpha(0.5f));
+        for (size_t k = 0; k < s.level.size(); ++k) {
+            const double t = (double)k * ClipHost::Summary::kLevelStep;
+            if (t > s.t1 || s.level[k] <= 0.f) continue;
+            const float x0 = xOf(t, s, a), x1 = xOf(t + ClipHost::Summary::kLevelStep, s, a);
+            const float h = std::max(1.f, s.level[k] * bodyH * 0.9f);
+            g.fillRect(x0, top + (bodyH - h) * 0.5f, std::max(1.f, x1 - x0), h);
+        }
+
+        g.setColour(col::accent.withAlpha(0.8f));
+        for (const auto& it : s.items)
+            for (const auto& n : it.notes) {
+                const float x0 = xOf(n.t0, s, a), x1 = xOf(n.t1, s, a);
+                const float y = top + bodyH * (1.f - (float)(n.midi - kLo) / (float)(kHi - kLo));
+                g.fillRect(x0, y - 1.f, std::max(1.5f, x1 - x0), 2.f);
+            }
+
+        g.setFont(11.f);
+        for (const auto& it : s.items) {
+            const float x = xOf(it.t0, s, a);
+            g.setColour(col::grid);
+            g.drawVerticalLine((int)x, a.getY(), a.getBottom());
+            g.setColour(col::dim);
+            g.drawText(it.name, juce::Rectangle<float>(x + 4.f, a.getY(), std::max(12.f, xOf(it.t1, s, a) - x - 6.f), kLabelH),
+                       juce::Justification::centredLeft, true);
+        }
+
+        const auto win = windowRect(s, a);
+        g.setColour(col::accent.withAlpha(0.16f));
+        g.fillRect(win);
+        g.setColour(col::accent);
+        g.drawRect(win, 1.f);
+        for (float x : {win.getX(), win.getRight()}) {
+            g.fillRoundedRectangle(x - 4.f, win.getCentreY() - 7.f, 8.f, 14.f, 3.f);
+            g.setColour(col::bg);
+            g.fillRect(x - 1.5f, win.getCentreY() - 3.f, 1.f, 6.f);
+            g.fillRect(x + 0.5f, win.getCentreY() - 3.f, 1.f, 6.f);
+            g.setColour(col::accent);
+        }
+
+        if (ed.host_ != nullptr) {
+            const double ph = ed.host_->playheadSec();
+            if (ph >= s.t0 && ph <= s.t1) {
+                g.setColour(col::playhead);
+                g.fillRect(xOf(ph, s, a), a.getY(), 1.5f, a.getHeight());
+            }
+        }
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const auto s = span();
+        const auto a = area();
+        if (s.t1 <= s.t0 || a.isEmpty()) return;
+        const auto win = windowRect(s, a);
+        const bool edge = std::abs(e.position.x - win.getX()) <= 6.f || std::abs(e.position.x - win.getRight()) <= 6.f;
+        setMouseCursor(edge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const auto s = span();
+        const auto a = area();
+        if (s.t1 <= s.t0 || a.isEmpty()) return;
+        const auto win = windowRect(s, a);
+        mode_ = Mode::Click;
+        if (std::abs(e.position.x - win.getX()) <= 6.f) mode_ = Mode::Left;
+        else if (std::abs(e.position.x - win.getRight()) <= 6.f) mode_ = Mode::Right;
+        else if (win.contains(e.position)) mode_ = Mode::Pan;
+        dragX_ = e.position.x;
+        dragScroll_ = ed.scroll_;
+        dragSpan_ = visibleSec();
+        if (mode_ == Mode::Click) moveTo(tOf(e.position.x, s, a) - visibleSec() * 0.5, s);
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        const auto s = span();
+        const auto a = area();
+        switch (mode_) {
+        case Mode::Pan:
+            moveTo(dragScroll_ + (e.position.x - dragX_) * (s.t1 - s.t0) / a.getWidth(), s);
+            break;
+        case Mode::Left:
+            zoomTo(tOf(e.position.x, s, a), dragScroll_ + dragSpan_, s);
+            break;
+        case Mode::Right:
+            zoomTo(dragScroll_, tOf(e.position.x, s, a), s);
+            break;
+        default:
+            break;
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent&) override { mode_ = Mode::None; }
+
+private:
+    enum class Mode { None, Click, Pan, Left, Right };
+
+    PitchEditor& ed;
+    Mode mode_ = Mode::None;
+    float dragX_ = 0;
+    double dragScroll_ = 0, dragSpan_ = 0;
+
+    juce::Rectangle<float> area() const { return getLocalBounds().toFloat().reduced(0.f, 1.f); }
+
+    // The timeline to show: the host's whole track, else this clip alone.
+    ClipHost::Summary span() const
+    {
+        ClipHost::Summary s;
+        if (ed.host_ != nullptr && ed.host_->summary(s)) return s;
+        if (ed.eff_ != nullptr) s.add(ed.host_ != nullptr ? ed.host_->clipName() : juce::String(), 0.0,
+                                      ed.eff_->frameTime((int)ed.eff_->frames.size()), *ed.eff_, 0.0);
+        return s;
+    }
+
+    double visibleSec() const { return ed.roll_->canvas().getWidth() / ed.pps_; }
+
+    juce::Rectangle<float> windowRect(const ClipHost::Summary& s, juce::Rectangle<float> a) const
+    {
+        const float x0 = xOf(ed.scroll_, s, a), x1 = xOf(ed.scroll_ + visibleSec(), s, a);
+        return {x0, a.getY(), std::max(6.f, x1 - x0), a.getHeight()};
+    }
+
+    // Keeps the view inside the timeline, then repaints the roll and this strip.
+    void moveTo(double sec, const ClipHost::Summary& s)
+    {
+        const double hi = std::max(s.t0, s.t1 - visibleSec());
+        ed.scroll_ = juce::jlimit(s.t0, hi, sec);
+        ed.roll_->repaint();
+        repaint();
+    }
+
+    // Shows [left, right] (seconds), clamped to half a second and to the timeline.
+    void zoomTo(double left, double right, const ClipHost::Summary& s)
+    {
+        const double span = juce::jlimit(0.5, std::max(0.5, s.t1 - s.t0), right - left);
+        ed.pps_ = juce::jlimit(2.0, 4000.0, ed.roll_->canvas().getWidth() / span);
+        ed.scroll_ = juce::jlimit(s.t0, std::max(s.t0, s.t1 - span), std::min(left, right - span));
+        ed.roll_->repaint();
+        repaint();
+    }
+
+    static float xOf(double t, const ClipHost::Summary& s, juce::Rectangle<float> a)
+    {
+        return a.getX() + (float)((t - s.t0) / (s.t1 - s.t0)) * a.getWidth();
+    }
+    static double tOf(float x, const ClipHost::Summary& s, juce::Rectangle<float> a)
+    {
+        return s.t0 + (double)((x - a.getX()) / a.getWidth()) * (s.t1 - s.t0);
+    }
+};
+
 PitchEditor::PitchEditor()
 {
     col::loadTheme(); // the plug-in has no app start-up: read the setting here
+    scheme_ = loadScheme();
     lnf_.applyTheme();
     setLookAndFeel(&lnf_);
     themeWatch_ = std::make_unique<col::ThemeWatcher>([this] { themeChanged(); });
     setWantsKeyboardFocus(true);
     roll_ = std::make_unique<Roll>(*this);
+    navigator_ = std::make_unique<Navigator>(*this);
     inspector_ = std::make_unique<Inspector>(*this);
     harmonies_ = std::make_unique<Harmonies>(*this);
     tracks_ = std::make_unique<Tracks>(*this);
     help_ = std::make_unique<Help>();
     addAndMakeVisible(*roll_);
+    addAndMakeVisible(*navigator_);
     // The inspector scrolls when the window is too low for all its controls.
     inspView_.setViewedComponent(inspector_.get(), false);
     inspView_.setScrollBarsShown(true, false);
@@ -1907,14 +2579,48 @@ PitchEditor::PitchEditor()
     keyBox_.onChange = [this] {
         const int id = keyBox_.getSelectedId();
         if (id == 0 || doc() == nullptr) return;
-        edit([id](Document& d) {
-            d.chromatic = id == 50;
-            if (id == 1) d.keyTonic = -1;
-            else if (id >= 10 && id < 22) { d.keyTonic = id - 10; d.keyMinor = false; }
-            else if (id >= 30 && id < 42) { d.keyTonic = id - 30; d.keyMinor = true; }
-        });
+        edit([id](Document& d) { d.keyTonic = id == 1 ? -1 : id - 10; }); // tonic only; the mode is separate
     };
     addAndMakeVisible(keyBox_);
+
+    quiet(modeBox_);
+    modeBox_.onChange = [this] {
+        const int id = modeBox_.getSelectedId();
+        if (id == 0 || doc() == nullptr) return;
+        const bool detMinor = eff_ != nullptr && eff_->key.minor;
+        // 1 Auto, 2 Chromatic (semitones, no key), 3..6 tempered major/minor modes, 7..8 pure major/minor
+        edit([id, detMinor](Document& d) {
+            d.chromatic = id == 2;
+            if (id == 1) { d.keyMode = -1; d.keyMinor = detMinor; }
+            else if (id >= 3) {
+                d.keyMode = id - 3;
+                d.keyMinor = d.keyMode == 1 || d.keyMode == 2 || d.keyMode == 3 || d.keyMode == 5;
+            }
+        });
+    };
+    addAndMakeVisible(modeBox_);
+
+    snapLbl_.setText(T("Подтянуть"), juce::dontSendNotification);
+    snapLbl_.setColour(juce::Label::textColourId, col::dim);
+    snapLbl_.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(snapLbl_);
+    snapSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
+    snapSlider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 44, 20);
+    snapSlider_.setRange(0, 100, 1);
+    snapSlider_.setValue(100, juce::dontSendNotification);
+    snapSlider_.setTextValueSuffix("%");
+    snapSlider_.setTooltip(T("Насколько «К ладу» подтягивает ноты к ступеням: 100 % — точно на ступень, 0 — не трогать"));
+    snapSlider_.setMouseClickGrabsKeyboardFocus(false);
+    // The share is part of the document (undo, per track): applied when the drag ends or a value is typed.
+    auto applySnap = [this] {
+        if (doc() == nullptr) return;
+        const double v = snapSlider_.getValue() / 100.0;
+        if (std::abs(doc()->snapAmount - v) < 1e-9) return;
+        edit([v](Document& d) { d.snapAmount = v; });
+    };
+    snapSlider_.onDragEnd = applySnap;
+    snapSlider_.onValueChange = [this, applySnap] { if (!snapSlider_.isMouseButtonDown()) applySnap(); };
+    addAndMakeVisible(snapSlider_);
 
     auto corr = [this](juce::Slider& s, juce::Label& l, const char* name, double def, const char* tip) {
         s.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -1984,6 +2690,26 @@ double PitchEditor::outSec(double in) const
     return timeMap_.inToOut(in * eff_->sampleRate) / eff_->sampleRate;
 }
 
+double PitchEditor::outSecBefore(double in) const
+{
+    if (eff_ == nullptr || timeMap_.isIdentity()) return in;
+    return timeMap_.inToOutBefore(in * eff_->sampleRate) / eff_->sampleRate;
+}
+
+double PitchEditor::noteStartSec(int i) const
+{
+    if (eff_ == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
+    if (timeMap_.isIdentity() || timeMap_.noteCount() != eff_->notes.size()) return outSec(eff_->notes[(size_t)i].startSec);
+    return timeMap_.noteStartOut((size_t)i) / eff_->sampleRate;
+}
+
+double PitchEditor::noteEndSec(int i) const
+{
+    if (eff_ == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
+    if (timeMap_.isIdentity() || timeMap_.noteCount() != eff_->notes.size()) return outSec(eff_->notes[(size_t)i].endSec);
+    return timeMap_.noteEndOut((size_t)i) / eff_->sampleRate;
+}
+
 double PitchEditor::inSec(double out) const
 {
     if (eff_ == nullptr || timeMap_.isIdentity()) return out;
@@ -1997,13 +2723,14 @@ double PitchEditor::editedCentre(int i) const
     return editedCenter(*eff_, d->edits, i); // centre + offset + tilt: the box sits on the tilted line's mean
 }
 
-void PitchEditor::refreshCurves()
+void PitchEditor::refreshCurves(bool harmonies)
 {
     Document* d = doc();
     if (eff_ == nullptr || d == nullptr) { curve_.clear(); harm_.clear(); timeMap_ = {}; return; }
     conform(*d, *eff_);
     curve_ = editedPitchCurve(*eff_, d->edits);
     timeMap_ = TimeMap::build(*eff_, d->edits);
+    if (!harmonies) return;
     harm_.clear();
     const Key key = d->key(*eff_);
     for (const auto& v : d->voices)
@@ -2032,19 +2759,24 @@ void PitchEditor::refresh()
     refreshCurves();
 
     if (Document* d = doc()) {
-        int id = 1;
-        if (d->chromatic) id = 50;
-        else if (d->keyTonic >= 0) id = (d->keyMinor ? 30 : 10) + d->keyTonic;
-        keyBox_.clear(juce::dontSendNotification);
         const Key det = eff_ != nullptr ? eff_->key : Key{};
+        keyBox_.clear(juce::dontSendNotification);
         keyBox_.addItem(T("Авто: ") + (eff_ != nullptr ? keyLabel(det.tonic, det.minor) : T("…")), 1);
-        keyBox_.addSectionHeading(T("Мажор"));
-        for (int t = 0; t < 12; ++t) keyBox_.addItem(keyLabel(t, false), 10 + t);
-        keyBox_.addSectionHeading(T("Минор"));
-        for (int t = 0; t < 12; ++t) keyBox_.addItem(keyLabel(t, true), 30 + t);
-        keyBox_.addSeparator();
-        keyBox_.addItem(T("Хроматика (полутоны)"), 50);
-        keyBox_.setSelectedId(id, juce::dontSendNotification);
+        for (int t = 0; t < 12; ++t) keyBox_.addItem(kTonicNames[t], 10 + t);
+        keyBox_.setSelectedId(d->keyTonic >= 0 ? 10 + d->keyTonic : 1, juce::dontSendNotification);
+
+        modeBox_.clear(juce::dontSendNotification);
+        modeBox_.addItem(T("Авто"), 1);
+        modeBox_.addItem(T("Хроматический"), 2);
+        modeBox_.addItem(T("Мажорный"), 3);
+        modeBox_.addItem(T("Минор натуральный"), 4);
+        modeBox_.addItem(T("Минор мелодический"), 5);
+        modeBox_.addItem(T("Минор гармонический"), 6);
+        modeBox_.addItem(T("Натуральный мажор"), 7);
+        modeBox_.addItem(T("Натуральный минор"), 8);
+        modeBox_.setSelectedId(d->chromatic ? 2 : d->keyMode >= 0 ? d->keyMode + 3 : 1, juce::dontSendNotification);
+
+        if (!snapSlider_.isMouseButtonDown()) snapSlider_.setValue(d->snapAmount * 100.0, juce::dontSendNotification);
     }
 
     const int hh = harmonies_->preferredHeight();
@@ -2071,8 +2803,8 @@ std::vector<int> PitchEditor::targets() const
 void PitchEditor::commit(const Document& before, bool layoutChanged)
 {
     if (host_ == nullptr) return;
-    host_->history().push(before);
     host_->documentChanged(layoutChanged);
+    host_->recordEdit(before);
     refresh();
 }
 
@@ -2089,28 +2821,14 @@ void PitchEditor::edit(Fn&& fn, bool layoutChanged)
 
 void PitchEditor::undo()
 {
-    Document* d = doc();
-    if (d == nullptr) return;
-    const auto spans = d->edits.spans;
-    if (!host_->history().undo(*d)) return;
-    const bool layout = spans.size() != d->edits.spans.size() ||
-                        !std::equal(spans.begin(), spans.end(), d->edits.spans.begin(),
-                                    [](const NoteSpan& a, const NoteSpan& b) { return a.start == b.start && a.end == b.end; });
-    host_->documentChanged(layout);
-    refresh();
+    if (doc() == nullptr) return;
+    if (host_->undoStep(false)) refresh();
 }
 
 void PitchEditor::redo()
 {
-    Document* d = doc();
-    if (d == nullptr) return;
-    const auto spans = d->edits.spans;
-    if (!host_->history().redo(*d)) return;
-    const bool layout = spans.size() != d->edits.spans.size() ||
-                        !std::equal(spans.begin(), spans.end(), d->edits.spans.begin(),
-                                    [](const NoteSpan& a, const NoteSpan& b) { return a.start == b.start && a.end == b.end; });
-    host_->documentChanged(layout);
-    refresh();
+    if (doc() == nullptr) return;
+    if (host_->undoStep(true)) refresh();
 }
 
 void PitchEditor::fitView()
@@ -2123,7 +2841,7 @@ void PitchEditor::fitView()
     lo_ = std::floor(mn) - 4;
     hi_ = std::ceil(mx) + 4;
     if (hi_ - lo_ < 14) { const double c = 0.5 * (lo_ + hi_); lo_ = c - 7; hi_ = c + 7; }
-    const double first = outSec(eff_->notes.front().startSec), last = outSec(eff_->notes.back().endSec);
+    const double first = noteStartSec(0), last = noteEndSec((int)eff_->notes.size() - 1);
     const double span = std::max(1.0, last - first + 1.0);
     pps_ = std::max(2.0, roll_->canvas().getWidth() / span);
     scroll_ = std::max(0.0, first - 0.5);
@@ -2145,7 +2863,8 @@ void PitchEditor::snapToScale()
         for (int i : targets()) {
             NoteEdit& e = d.edits.notes[(size_t)i];
             const double c = eff_->notes[(size_t)i].centerMidi + tiltMean(*eff_, i, e); // tilt is part of the note
-            e.pitchOffset = d.target(c + e.pitchOffset, *eff_) - c;
+            const double cur = c + e.pitchOffset;
+            e.pitchOffset += (d.target(cur, *eff_) - cur) * d.snapAmount; // the share set in «Подтянуть»
         }
     });
 }
@@ -2164,15 +2883,55 @@ void PitchEditor::applyCorrection()
     });
 }
 
+// Ctrl+Delete with consonant zones selected: deletes only their breath.
+void PitchEditor::deleteBreathSelection()
+{
+    if (consSelection_.empty() || eff_ == nullptr) return;
+    const std::set<int> zones = consSelection_;
+    edit([this, zones](Document& d) { glina::deleteBreaths(d.edits, *eff_, zones); });
+}
+
+// Alt+Delete: removes the selected notes, leaving silence; their edges can be dragged back.
+void PitchEditor::deleteSelection()
+{
+    if (selection_.empty() || eff_ == nullptr) return;
+    const std::set<int> sel = selection_;
+    selection_.clear(); // deleted notes are hidden: they do not stay selected
+    edit([this, sel](Document& d) { glina::deleteNotes(d.edits, *eff_, sel); });
+}
+
+// M: mutes the selected notes; if all are muted already, unmutes them.
+void PitchEditor::toggleMuteSelection()
+{
+    if (!consSelection_.empty()) {
+        bool anyLoud = false;
+        if (Document* d = doc()) for (int i : consSelection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].consMuted) anyLoud = true;
+        const bool cm = anyLoud;
+        const std::set<int> zones = consSelection_;
+        edit([zones, cm](Document& d) {
+            for (int i : zones) if (i < (int)d.edits.notes.size()) d.edits.notes[(size_t)i].consMuted = cm;
+        });
+        return;
+    }
+    if (selection_.empty() || eff_ == nullptr) return;
+    bool anyLoud = false;
+    if (Document* d = doc()) for (int i : selection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].muted) anyLoud = true;
+    const bool m = anyLoud;
+    const int last = *selection_.rbegin();
+    edit([this, m, last](Document& d) {
+        for (int i : selection_) if (i < (int)d.edits.notes.size()) {
+            d.edits.notes[(size_t)i].muted = m;
+            d.edits.notes[(size_t)i].consMuted = m; // the consonant in front of it goes too
+        }
+        // The consonant after the last note is the one in front of the next note.
+        if (last + 1 < (int)d.edits.notes.size()) d.edits.notes[(size_t)last + 1].consMuted = m;
+    });
+}
+
 void PitchEditor::resetNotes()
 {
     if (selection_.empty() || eff_ == nullptr) return;
-    edit([&](Document& d) {
-        for (int i : selection_) {
-            d.edits.notes[(size_t)i] = NoteEdit{};
-            eraseDrawn(d.edits, eff_->notes[(size_t)i].startFrame, eff_->notes[(size_t)i].endFrame);
-        }
-    });
+    edit([&](Document& d) { glina::resetNoteEdits(d.edits, *eff_, selection_); });
 }
 
 void PitchEditor::erasePencilInSelection()
@@ -2297,7 +3056,10 @@ void PitchEditor::refreshLinks()
     if (!host_->thread(gv.id, ref) || ref.size() < 4) return;
     const double len = TimeMap::build(*eff_, doc()->edits).inToOut((double)eff_->numSamples) / eff_->sampleRate;
     links_.tgt = threadOf(*eff_, doc()->edits, nullptr, 0.0, len);
-    links_.warp = alignThreads(links_.tgt, ref, {}, {}, &links_.info);
+    // The document's pins apply only to the reference they were made with.
+    links_.pinsOn = doc()->pinRef == gv.id.toStdString();
+    const std::vector<Pin> none;
+    links_.warp = alignThreads(links_.tgt, ref, {}, links_.pinsOn ? doc()->pins : none, &links_.info);
     links_.ref = std::move(ref);
     links_.name = gv.name;
     links_.ok = !links_.warp.empty();
@@ -2314,14 +3076,37 @@ void PitchEditor::applyLinkFixes()
     edit([&](Document& d) { applyPitchFix(d.edits, fixes); });
 }
 
-float PitchEditor::linkRefMidi(double t) const
+static float midiNear(const std::vector<ThreadFrame>& r, double t)
 {
-    const auto& r = links_.ref;
     if (r.empty()) return 0.f;
     const auto it = std::lower_bound(r.begin(), r.end(), t, [](const ThreadFrame& f, double x) { return f.t < x; });
     if (it == r.end()) return r.back().t - t < 0.015 ? r.back().midi : 0.f;
     if (it != r.begin() && t - std::prev(it)->t < it->t - t) return std::prev(it)->midi;
     return it->midi;
+}
+
+float PitchEditor::linkRefMidi(double t) const { return midiNear(links_.ref, t); }
+float PitchEditor::linkTgtMidi(double t) const { return midiNear(links_.tgt, t); }
+
+// A pin: this clip's time -> the reference's time, both on the roll's axis (seconds).
+void PitchEditor::addLinkPin(double tgtSec, double refSec)
+{
+    Document* d = doc();
+    if (d == nullptr || !links_.ok || ghosts_.empty()) return;
+    const std::string id = ghosts_.front().id.toStdString();
+    std::vector<Pin> pins = d->pins;
+    if (d->pinRef != id) pins.clear(); // pins of another reference are dropped
+    if (!glina::addPin(pins, Pin{tgtSec, refSec})) {
+        if (host_ != nullptr) host_->log(T("булавка не поставлена: она встала бы поперёк соседней"));
+        return;
+    }
+    edit([&](Document& doc) { doc.pins = pins; doc.pinRef = id; });
+}
+
+void PitchEditor::removePin(int i)
+{
+    hoverPin_ = -1;
+    edit([&](Document& d) { if (i >= 0 && (size_t)i < d.pins.size()) d.pins.erase(d.pins.begin() + i); });
 }
 
 void PitchEditor::toggleLinks()
@@ -2398,6 +3183,34 @@ void PitchEditor::toggleConsonant()
     }, true);
 }
 
+void PitchEditor::moveCutAt(int note, bool startEdge, double outSecond)
+{
+    if (eff_ == nullptr || note < 0 || note >= (int)eff_->notes.size()) { refresh(); return; }
+    const Analysis& a = *eff_;
+    const size_t before = doc() != nullptr ? doc()->edits.notes.size() : 0;
+    size_t after = before;
+    edit([&](Document& d) { moveCut(d, a, note, startEdge, outSecond); after = d.edits.notes.size(); }, true);
+    // A cut run through deleted notes takes them away: the dragged note stays selected under its new index.
+    if (after < before) {
+        selection_ = {startEdge ? note - (int)(before - after) : note};
+        refresh();
+    }
+}
+
+void PitchEditor::joinAt(int left)
+{
+    if (eff_ == nullptr || left < 0 || left + 1 >= (int)eff_->notes.size()) { refresh(); return; }
+    selection_ = {left};
+    joinSelected();
+}
+
+void PitchEditor::toggleSeparationAt(int i)
+{
+    if (eff_ == nullptr || i < 0 || i + 1 >= (int)eff_->notes.size()) return;
+    const Analysis& a = *eff_;
+    edit([&](Document& d) { toggleSeparation(d.edits, a, i); });
+}
+
 void PitchEditor::cycleGrid()
 {
     static const int order[] = {4, 8, 16};
@@ -2406,6 +3219,16 @@ void PitchEditor::cycleGrid()
     gridDenom_ = order[k];
     gridBtn_.setButtonText(T("1/") + juce::String(gridDenom_));
     roll_->repaint();
+}
+
+bool PitchEditor::centreOnProjectSec(double projectSec)
+{
+    if (host_ == nullptr || roll_->getWidth() <= 0) return false;
+    const double visible = roll_->canvas().getWidth() / pps_;
+    scroll_ = std::max(0.0, host_->fromProjectSec(projectSec) - visible * 0.5);
+    fitted_ = true; // the view is placed on purpose: a later fit to the first note would undo it
+    roll_->repaint();
+    return true;
 }
 
 void PitchEditor::showLocator()
@@ -2513,7 +3336,7 @@ void PitchEditor::joinSelected()
     }
     if (!any) return;
     selection_ = {sel.front()};
-    host_->history().push(before);
+    host_->recordEdit(before);
     refresh();
 }
 
@@ -2533,7 +3356,7 @@ void PitchEditor::selectStep(int dir, bool extend)
     if (!extend) selection_.clear();
     selection_.insert(i);
     // Keep the note visible.
-    const double t0 = outSec(eff_->notes[(size_t)i].startSec), t1 = outSec(eff_->notes[(size_t)i].endSec);
+    const double t0 = noteStartSec(i), t1 = noteEndSec(i);
     const double visible = roll_->canvas().getWidth() / pps_;
     if (t0 < scroll_ || t1 > scroll_ + visible) scroll_ = std::max(0.0, t0 - 0.2 * visible);
     refresh();
@@ -2589,9 +3412,9 @@ void PitchEditor::updateToolbar()
     pencilBtn_.setEnabled(ready);
     pencilBtn_.setColour(juce::TextButton::buttonColourId, pencil_ ? col::drawn.darker(col::light ? 0.f : 0.45f) : col::button);
     playBtn_.setButtonText(host_ != nullptr && host_->isPlaying() ? T("■") : T("▶"));
-    undoBtn_.setEnabled(ready && host_->history().canUndo());
-    redoBtn_.setEnabled(ready && host_->history().canRedo());
-    for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &corrPitch_, &corrDrift_, &fitBtn_})
+    undoBtn_.setEnabled(ready && host_->canUndo());
+    redoBtn_.setEnabled(ready && host_->canRedo());
+    for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &modeBox_, &snapSlider_, &corrPitch_, &corrDrift_, &fitBtn_})
         c->setEnabled(ready);
     splitBtn_.setEnabled(ready && selection_.size() == 1);
     abBtn_.setEnabled(host_ != nullptr);
@@ -2630,14 +3453,15 @@ void PitchEditor::resized()
     struct Slot { juce::Component* c; int w, gap, minW; };
     std::vector<Slot> slots = {
         {&playBtn_, 34, 8, 34},      {&undoBtn_, 26, 4, 26},      {&redoBtn_, 26, 12, 26},
-        {&keyLbl_, 30, 2, 30},       {&keyBox_, 150, 12, 96},
+        {&keyLbl_, 30, 2, 30},       {&keyBox_, 110, 4, 80},      {&modeBox_, 150, 12, 110},
+        {&snapLbl_, 62, 2, 62},      {&snapSlider_, 118, 12, 100},
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
         {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&themeBtn_, 26, 4, 26},     {&helpBtn_, 28, 4, 28}};
-    auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_; };
+    auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_ || s->c == &snapLbl_; };
     std::vector<Slot*> vis;
     for (auto& s : slots) if (s.c->isVisible()) vis.push_back(&s);
 
@@ -2691,6 +3515,7 @@ void PitchEditor::resized()
     if (showTracks_) tracks_->setBounds(r.removeFromBottom(tracks_->preferredHeight()));
     inspView_.setBounds(r.removeFromRight(236));
     layoutInspector();
+    navigator_->setBounds(r.removeFromBottom(Navigator::kH));
     roll_->setBounds(r);
     help_->setBounds(r);
     if (!fitted_) fitView();
@@ -2719,6 +3544,11 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         togglePlay();
         return true;
     }
+    // Ctrl+Delete: delete the selected notes (silent, pulled back by an edge).
+    if (cmd && code == juce::KeyPress::deleteKey) {
+        if (!consSelection_.empty()) deleteBreathSelection(); else deleteSelection();
+        return true;
+    }
     if (cmd) return false;
 
     if (code == juce::KeyPress::upKey || code == juce::KeyPress::downKey) {
@@ -2729,7 +3559,12 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         selectStep(code == juce::KeyPress::rightKey ? 1 : -1, mods.isShiftDown());
         return true;
     }
-    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) { resetNotes(); return true; }
+    if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) {
+        if (hoverPin_ >= 0) { removePin(hoverPin_); return true; }
+        resetNotes();
+        return true;
+    }
+    if ((ch == 'm' || ch == 'M') && !cmd && !mods.isAltDown()) { toggleMuteSelection(); return true; }
     if (code == juce::KeyPress::homeKey) {
         scroll_ = 0;
         roll_->repaint();
@@ -2767,6 +3602,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
 void PitchEditor::timerCallback()
 {
     if (host_ == nullptr) return;
+    navigator_->repaint(); // the shown part and the playhead move with the view and the transport
     if (++trackPoll_ >= 30) { trackPoll_ = 0; pollTracks(); } // items added/removed in the DAW
     const bool busy = host_->analysis() == nullptr || host_->isRendering() || host_->busyText().isNotEmpty();
     const bool playing = host_->isPlaying();
