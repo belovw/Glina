@@ -110,6 +110,9 @@ struct NoteEdit {
     // Deleted (Alt+Delete): silent and not drawn, its audio kept. Dragging an edge that touches
     // it brings it back (restoreDeleted). Set together with muted and consMuted.
     bool deleted = false;
+    // The breath (Breath frames) in the unvoiced sound before this note is deleted: silent and
+    // hidden, its consonants kept. Dragging this note's left edge brings it back.
+    bool breathDeleted = false;
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier
     double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide

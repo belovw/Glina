@@ -46,7 +46,10 @@ Bounds boundsOf(const Analysis& a, const std::vector<NoteTimes>& base)
 struct Limits {
     double clipLen = 0, floorSec = 0;
     Bounds bounds;
+    std::vector<char> ignore; // deleted notes: they do not limit the order of the others
 };
+
+static bool ignored(const Limits& L, size_t i) { return i < L.ignore.size() && L.ignore[i]; }
 
 // A change below this (seconds) is rounding, not a change.
 constexpr double kChangeEps = 1e-9;
@@ -79,11 +82,12 @@ void eachChange(const std::vector<NoteTimes>& a, const std::vector<NoteTimes>& b
     // Note k starts after note j (j < k) ends. Only pairs with a moved edge.
     for (size_t k = 0; k < n; ++k)
         if (startMoved[k])
-            for (size_t j = 0; j < k; ++j) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+            for (size_t j = 0; j < k; ++j)
+                if (!ignored(L, j) && !ignored(L, k)) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
     for (size_t j = 0; j < n; ++j)
         if (endMoved[j])
             for (size_t k = j + 1; k < n; ++k)
-                if (!startMoved[k]) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+                if (!startMoved[k] && !ignored(L, j) && !ignored(L, k)) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
 }
 
 std::string g_lastLimit; // TEMP-MOVE-DIAG
@@ -208,6 +212,14 @@ bool soft(const EditSet& e, const std::vector<NoteTimes>& t, int i)
 }
 } // namespace
 
+Limits limitsOf(const Analysis& a, const std::vector<NoteTimes>& base, const EditSet& e)
+{
+    Limits L = limitsOf(a, base);
+    L.ignore.assign(base.size(), 0);
+    for (size_t k = 0; k < base.size() && k < e.notes.size(); ++k) L.ignore[k] = e.notes[k].deleted;
+    return L;
+}
+
 bool softSeparation(const EditSet& e, const Analysis& a, int i)
 {
     return soft(e, noteTimes(a, e), i);
@@ -279,7 +291,7 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    const double applied = limitDt(dt, limitsOf(a, base), make);
+    const double applied = limitDt(dt, limitsOf(a, base, e), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
@@ -339,7 +351,7 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
         }
         return t;
     };
-    const double applied = limitDt(dt, limitsOf(a, base), make);
+    const double applied = limitDt(dt, limitsOf(a, base, e), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
@@ -350,7 +362,7 @@ void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes)
     if (n == 0 || notes.empty()) return;
     if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    const Limits L = limitsOf(a, base);
+    const Limits L = limitsOf(a, base, e);
 
     // Timing: each run of consecutive notes goes back to where it was recorded, as one block;
     // a neighbour touching the run follows its edge, as in a move. If that would overlap or
@@ -485,7 +497,6 @@ void deleteNotes(EditSet& e, const Analysis& a, const std::set<int>& notes)
         if (i < 0 || i >= (int)a.notes.size()) continue;
         NoteEdit& n = e.notes[(size_t)i];
         n.deleted = true;
-        n.muted = true;
         n.consMuted = true;
     }
 }
@@ -494,11 +505,18 @@ void restoreDeleted(EditSet& e, int left)
 {
     for (int i : {left, left + 1}) {
         if (i < 0 || i >= (int)e.notes.size() || !e.notes[(size_t)i].deleted) continue;
-        NoteEdit& n = e.notes[(size_t)i];
-        n.deleted = false;
-        n.muted = false;
-        n.consMuted = false;
+        e.notes[(size_t)i].deleted = false;
+        e.notes[(size_t)i].consMuted = false;
     }
+    // The breath before note left + 1 (the unvoiced sound at this boundary) comes back too.
+    if (left + 1 >= 0 && left + 1 < (int)e.notes.size()) e.notes[(size_t)left + 1].breathDeleted = false;
+}
+
+void deleteBreaths(EditSet& e, const Analysis& a, const std::set<int>& notes)
+{
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    for (int i : notes)
+        if (i >= 0 && i < (int)a.notes.size()) e.notes[(size_t)i].breathDeleted = true;
 }
 
 void setTrackVibrato(EditSet& e, const AutoVibrato& v, bool resetNotes)

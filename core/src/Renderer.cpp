@@ -446,6 +446,11 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
     const double outLen = map.inToOut((double)n);
     const size_t outN = (size_t)std::max(0.0, std::ceil(outLen));
     std::vector<double> acc(outN + 4096, 0.0);
+    // Frames of deleted notes: their own grains are left out (a neighbour stretched over them still sounds).
+    std::vector<char> deletedFrame(a.frames.size(), 0);
+    for (size_t i = 0; i < e.notes.size() && i < a.notes.size(); ++i)
+        if (e.notes[i].deleted)
+            for (int f = std::max(0, a.notes[i].startFrame); f < std::min(a.notes[i].endFrame, (int)deletedFrame.size()); ++f) deletedFrame[(size_t)f] = 1;
 
     uint32_t rng = 0x9E3779B9u;
     size_t i = 0;
@@ -473,6 +478,10 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         const double maxHalf = 0.03 * a.sampleRate;
         halfL = std::min(halfL, maxHalf);
         halfR = std::min(halfR, maxHalf);
+        {
+            const size_t fr = (size_t)std::max(0.0, mk.pos / a.hop);
+            if (fr < deletedFrame.size() && deletedFrame[fr]) { ts += halfR; continue; }
+        }
 
         const double frame = mk.pos / a.hop;
         const bool voiced = mk.voiced;
@@ -510,6 +519,22 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         const long b = std::max(0L, (long)std::floor(s0 - fade));
         const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
         for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+    }
+    // Deleted breaths: the Breath frames in the unvoiced sound before a note, each run silent.
+    for (size_t i = 0; i < e.notes.size() && i < map.noteCount() && i < a.notes.size(); ++i) {
+        if (!e.notes[i].breathDeleted) continue;
+        const size_t from = i > 0 ? (size_t)std::max(0, a.notes[i - 1].endFrame) : 0;
+        const size_t to = std::min((size_t)std::max(0, a.notes[i].startFrame), a.frames.size());
+        for (size_t f = from; f < to;) {
+            if (a.frames[f].kind != FrameKind::Breath) { ++f; continue; }
+            size_t g = f;
+            while (g < to && a.frames[g].kind == FrameKind::Breath) ++g;
+            const double s0 = map.inToOut((double)f * a.hop), s1 = map.inToOut((double)g * a.hop);
+            const long b = std::max(0L, (long)std::floor(s0 - fade));
+            const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+            if (s1 > s0) for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+            f = g;
+        }
     }
     // Muted notes: silent over their whole output span (grains of the neighbours that reach
     // into it are removed too), so the mute is complete.

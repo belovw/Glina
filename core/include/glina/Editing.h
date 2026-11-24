@@ -63,7 +63,10 @@ void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes);
 // Delete notes (Alt+Delete): each becomes silent and hidden, its audio kept. Neighbours and
 // the consonants between them stay where they are; nothing is joined.
 void deleteNotes(EditSet& e, const Analysis& a, const std::set<int>& notes);
-// Dragging the boundary between note `left` and `left + 1` brings back a deleted note on either side.
+// Delete the breath in the unvoiced sound before each of `notes` (their consonants stay).
+void deleteBreaths(EditSet& e, const Analysis& a, const std::set<int>& notes);
+// Alt + dragging the boundary between note `left` and `left + 1` brings back a deleted note on either side,
+// and the breath deleted before note left + 1.
 void restoreDeleted(EditSet& e, int left);
 
 // TEMP-MOVE-DIAG: names the first check the current layout fails ("valid" if none). Remove later.

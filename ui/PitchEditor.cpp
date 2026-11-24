@@ -369,8 +369,10 @@ public:
         const float s = semi();
         const int n = (int)A.notes.size();
         const std::vector<bool> softSep = softSeparations(d.edits, A);
+        auto deleted = [&](int i) { return i < (int)d.edits.notes.size() && d.edits.notes[(size_t)i].deleted; };
         for (int b = 0; b + 1 < n && b < (int)softSep.size(); ++b) {
             if (separationGap(b) >= kSepGapSec) continue;
+            if (deleted(b) || deleted(b + 1)) continue; // a deleted note has no separation to show
             const auto l = noteRect(b), r = noteRect(b + 1);
             if (r.getX() < c.getX() - 10 || l.getRight() > c.getRight() + 10) continue;
             const float top = std::min(l.getY(), r.getY()), bottom = std::max(l.getBottom(), r.getBottom());
@@ -656,7 +658,7 @@ public:
 
     // Waveform of the unvoiced sound in a consonant zone: its level frame by frame, drawn like
     // a note's blob. Sibilants and breaths get their own shades.
-    void drawUnvoiced(juce::Graphics& g, const Analysis& A, int i, juce::Rectangle<float> r, bool muted) const
+    void drawUnvoiced(juce::Graphics& g, const Analysis& A, int i, juce::Rectangle<float> r, bool muted, bool breathDeleted) const
     {
         const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
         const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
@@ -666,6 +668,7 @@ public:
         const float half = semi() * 0.45f;
         const int stride = std::max(1, (int)((to - from) / std::max(4.f, r.getWidth() / 2.f)));
         for (int kind = 0; kind < 2; ++kind) { // 0 sibilant, 1 breath
+            if (kind == 1 && breathDeleted) continue;
             const FrameKind want = kind == 0 ? FrameKind::Sibilant : FrameKind::Breath;
             std::vector<juce::Point<float>> top, bottom;
             for (int f = from; f < to; f += stride) {
@@ -700,7 +703,7 @@ public:
             g.fillRoundedRectangle(r, 3.f);
             g.setColour(sel ? col::lift : col::dim.withAlpha(m ? 0.4f : 0.6f));
             g.drawRoundedRectangle(r, 3.f, sel ? 1.4f : 0.8f);
-            drawUnvoiced(g, A, i, r, m);
+            drawUnvoiced(g, A, i, r, m, d.edits.notes[(size_t)i].breathDeleted);
         }
         const auto c = canvas();
         const float s = semi();
@@ -1363,7 +1366,7 @@ public:
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
             const int boundary = gesture == G::StretchR ? pressed : pressed - 1;
-            if (dt != 0) restoreDeleted(d->edits, boundary); // pulling an edge brings a deleted note back
+            if (dt != 0 && e.mods.isAltDown()) restoreDeleted(d->edits, boundary); // Alt: brings a deleted note back
             moveBoundary(d->edits, *ed.eff_, boundary, dt, ed.selection_,
                          gesture == G::StretchL);
         }
@@ -2879,6 +2882,14 @@ void PitchEditor::applyCorrection()
     });
 }
 
+// Ctrl+Delete with consonant zones selected: deletes only their breath.
+void PitchEditor::deleteBreathSelection()
+{
+    if (consSelection_.empty() || eff_ == nullptr) return;
+    const std::set<int> zones = consSelection_;
+    edit([this, zones](Document& d) { glina::deleteBreaths(d.edits, *eff_, zones); });
+}
+
 // Alt+Delete: removes the selected notes, leaving silence; their edges can be dragged back.
 void PitchEditor::deleteSelection()
 {
@@ -3525,7 +3536,10 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         return true;
     }
     // Ctrl+Delete: delete the selected notes (silent, pulled back by an edge).
-    if (cmd && code == juce::KeyPress::deleteKey) { deleteSelection(); return true; }
+    if (cmd && code == juce::KeyPress::deleteKey) {
+        if (!consSelection_.empty()) deleteBreathSelection(); else deleteSelection();
+        return true;
+    }
     if (cmd) return false;
 
     if (code == juce::KeyPress::upKey || code == juce::KeyPress::downKey) {
