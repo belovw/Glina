@@ -37,8 +37,10 @@ double minNoteLength(const NoteTimes& t);
 // `dt` is clamped so no note becomes shorter than ~30 ms. Returns the dt applied.
 // Where the notes do not touch (a gap), only the note whose edge is dragged moves:
 // `startEdge` = the start of note left+1 (else the end of note `left`).
+// overlap: past a hard separation (a gap, deleted notes) the edge may go over the next live
+// note, which is neither moved nor squeezed (the notes overlap, see TimeMap).
 double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& selection,
-                    bool startEdge = false);
+                    bool startEdge = false, bool overlap = false);
 
 // Move notes (each contiguous run of `notes`) by `dt` seconds together with
 // the consonant before them; the neighbouring notes absorb the change.

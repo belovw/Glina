@@ -1369,7 +1369,7 @@ public:
             d->edits = before.edits;
             const int boundary = gesture == G::StretchR ? pressed : pressed - 1;
             moveBoundary(d->edits, *ed.eff_, boundary, dt, ed.selection_,
-                         gesture == G::StretchL);
+                         gesture == G::StretchL, true); // the mouse may lay a note over the next
         }
         changed = true;
         ed.refreshCurves(false);

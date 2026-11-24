@@ -47,6 +47,9 @@ struct Limits {
     double clipLen = 0, floorSec = 0;
     Bounds bounds;
     std::vector<char> ignore; // deleted notes: they do not limit the order of the others
+    // A pair of notes that may overlap (an edge dragged past a hard separation): the later one
+    // may start before the earlier one ends, but not before it starts, nor end before it ends.
+    int ovL = -1, ovR = -1;
 };
 
 static bool ignored(const Limits& L, size_t i) { return i < L.ignore.size() && L.ignore[i]; }
@@ -80,14 +83,22 @@ void eachChange(const std::vector<NoteTimes>& a, const std::vector<NoteTimes>& b
         cond(hi - a[i].outEnd, hi - b[i].outEnd, i, "item end");
     }
     // Note k starts after note j (j < k) ends. Only pairs with a moved edge.
+    auto order = [&](size_t j, size_t k) {
+        if (ignored(L, j) || ignored(L, k)) return;
+        if ((int)j == L.ovL && (int)k == L.ovR) {
+            cond(a[k].outStart - a[j].outStart, b[k].outStart - b[j].outStart, k, "overlap start");
+            cond(a[k].outEnd - a[j].outEnd, b[k].outEnd - b[j].outEnd, k, "overlap end");
+            return;
+        }
+        cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+    };
     for (size_t k = 0; k < n; ++k)
         if (startMoved[k])
-            for (size_t j = 0; j < k; ++j)
-                if (!ignored(L, j) && !ignored(L, k)) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+            for (size_t j = 0; j < k; ++j) order(j, k);
     for (size_t j = 0; j < n; ++j)
         if (endMoved[j])
             for (size_t k = j + 1; k < n; ++k)
-                if (!startMoved[k] && !ignored(L, j) && !ignored(L, k)) cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+                if (!startMoved[k]) order(j, k);
 }
 
 std::string g_lastLimit; // TEMP-MOVE-DIAG
@@ -271,7 +282,8 @@ void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>&
     for (size_t i = 0; i < t.size() && i < e.notes.size(); ++i) setNoteTimes(e.notes[i], t[i]);
 }
 
-double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge)
+double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge,
+                    bool overlap)
 {
     const int n = (int)a.notes.size();
     if (n == 0 || left < -1 || left > n - 1 || dt == 0) return 0;
@@ -299,50 +311,22 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    // Across deleted notes the dragged edge runs over them up to the next live note; from
-    // there on it carries that note's edge along, as across a soft separation (that note
-    // shrinks, its far end stays).
+    // Past a hard separation (a gap, or deleted notes) the dragged edge may go over the next
+    // live note: the notes overlap, that note is neither moved nor squeezed.
     auto deletedAt = [&](int i) { return i >= 0 && i < (int)e.notes.size() && e.notes[(size_t)i].deleted; };
-    int live = -1; // the live note across the deleted ones, on the side the edge moves to
-    double contact = 0;
-    if (!startEdge && dt > 0 && deletedAt(left + 1) && !rightSelected) {
-        live = left + 1;
-        while (live < n && deletedAt(live)) ++live;
-        if (live >= n) live = -1;
-        else contact = base[(size_t)live].outStart - base[(size_t)left].outEnd;
-    } else if (startEdge && dt < 0 && deletedAt(left) && !(left >= 0 && sel.count(left))) {
-        live = left;
-        while (live >= 0 && deletedAt(live)) --live;
-        if (live >= 0) contact = base[(size_t)left + 1].outStart - base[(size_t)live].outEnd;
-    }
-    if (live >= 0 && contact >= 0 && std::abs(dt) > contact) {
-        const double toward = dt > 0 ? contact : -contact;
-        const double first = limitDt(toward, limitsOf(a, base, e), make);
-        if (std::abs(first - toward) > kChangeEps) { // stopped before it reached the live note
-            applyNoteTimes(e, a, make(first));
-            return first;
+    Limits lim = limitsOf(a, base, e);
+    if (overlap && !touching) {
+        if (!startEdge && left >= 0 && !rightSelected) {
+            int r = left + 1;
+            while (r < n && deletedAt(r)) ++r;
+            if (r < n) { lim.ovL = left; lim.ovR = r; }
+        } else if (startEdge && left + 1 < n && !(left >= 0 && sel.count(left))) {
+            int l = left;
+            while (l >= 0 && deletedAt(l)) --l;
+            if (l >= 0) { lim.ovL = l; lim.ovR = left + 1; }
         }
-        const std::vector<NoteTimes> mid = make(toward);
-        // The live note (with the selected notes next to it) is a block whose far end stays.
-        int b = live, c = live;
-        if (dt > 0) { while (c + 1 < n && sel.count(c + 1) && sel.count(live)) ++c; }
-        else { while (b - 1 >= 0 && sel.count(b - 1) && sel.count(live)) --b; }
-        auto make2 = [&](double d) {
-            std::vector<NoteTimes> t = mid;
-            if (dt > 0) {
-                layBlock(t, mid, e, L0, left, mid[(size_t)L0].outStart, mid[(size_t)left].outEnd + d);
-                layBlock(t, mid, e, b, c, mid[(size_t)b].outStart + d, mid[(size_t)c].outEnd);
-            } else {
-                layBlock(t, mid, e, left + 1, R1, mid[(size_t)left + 1].outStart + d, mid[(size_t)R1].outEnd);
-                layBlock(t, mid, e, b, c, mid[(size_t)b].outStart, mid[(size_t)c].outEnd + d);
-            }
-            return t;
-        };
-        const double second = limitDt(dt - toward, limitsOf(a, mid, e), make2);
-        applyNoteTimes(e, a, make2(second));
-        return toward + second;
     }
-    const double applied = limitDt(dt, limitsOf(a, base, e), make);
+    const double applied = limitDt(dt, lim, make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
