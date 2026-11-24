@@ -70,7 +70,7 @@ void eachChange(const std::vector<NoteTimes>& a, const std::vector<NoteTimes>& b
         startMoved[i] = std::abs(b[i].outStart - a[i].outStart) > kChangeEps;
         endMoved[i] = std::abs(b[i].outEnd - a[i].outEnd) > kChangeEps;
         if (!startMoved[i] && !endMoved[i]) continue;
-        cond(a[i].outEnd - a[i].outStart - minDur(a[i]), b[i].outEnd - b[i].outStart - minDur(b[i]), i, "length");
+        if (!ignored(L, i)) cond(a[i].outEnd - a[i].outStart - minDur(a[i]), b[i].outEnd - b[i].outStart - minDur(b[i]), i, "length");
         cond(a[i].outStart - L.floorSec, b[i].outStart - L.floorSec, i, "clip start");
         cond(L.clipLen - a[i].outEnd, L.clipLen - b[i].outEnd, i, "clip end");
         const bool hasB = i < L.bounds.size();
@@ -206,6 +206,8 @@ namespace {
 bool soft(const EditSet& e, const std::vector<NoteTimes>& t, int i)
 {
     if (i < 0 || i + 1 >= (int)t.size()) return false;
+    // A deleted note is not linked to its neighbours: its boundaries are hard, so it does not move with them.
+    if ((size_t)i + 1 < e.notes.size() && (e.notes[(size_t)i].deleted || e.notes[(size_t)i + 1].deleted)) return false;
     const NoteEdit::Sep s = (size_t)i + 1 < e.notes.size() ? e.notes[(size_t)i + 1].sepBefore : NoteEdit::Sep::Auto;
     if (s != NoteEdit::Sep::Auto) return s == NoteEdit::Sep::Soft;
     return std::abs(t[(size_t)i + 1].outStart - t[(size_t)i].outEnd) < 0.005;
