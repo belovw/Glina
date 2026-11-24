@@ -47,6 +47,38 @@ double nearestTarget(double midi, const Key& key, bool useKey)
     return best;
 }
 
+double scaleInterval(double midi, const Key& key, bool useKey, int steps)
+{
+    double cents[7];
+    scaleCents(key, cents);
+    int sc[7];
+    scaleSteps(key, sc);
+    const int tonic = ((key.tonic % 12) + 12) % 12;
+    if (steps == 0) {
+        const double r = std::round(midi);
+        if (!useKey) return r;
+        const int pc = (((int)r - tonic) % 12 + 12) % 12;
+        for (int s = 0; s < 7; ++s)
+            if (sc[s] == pc) return r - pc + cents[s] / 100.0; // the degree's own pitch (pure in natural tuning)
+        return r; // outside the scale: its own semitone
+    }
+    // The nearest degree: an octave of the tonic `base` and a degree `deg` above it.
+    int bestBase = 0, bestDeg = 0;
+    double bestDist = 1e9;
+    const int lo = (int)std::floor(midi) - 13;
+    for (int m = lo; m <= lo + 26; ++m) {
+        if (((m - tonic) % 12 + 12) % 12 != 0) continue;
+        for (int s = 0; s < 7; ++s) {
+            const double d = std::abs(midi - (m + cents[s] / 100.0));
+            if (d < bestDist - 1e-9) { bestDist = d; bestBase = m; bestDeg = s; }
+        }
+    }
+    const int idx = bestDeg + steps;
+    const int oct = idx >= 0 ? idx / 7 : -((-idx + 6) / 7);
+    const int deg = idx - 7 * oct;
+    return bestBase + 12 * oct + cents[deg] / 100.0;
+}
+
 EditSet makeAutoTune(const Analysis& a, const TuneParams& p)
 {
     EditSet e;

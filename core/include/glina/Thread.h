@@ -99,4 +99,40 @@ std::vector<NoteFix> planPitchFix(const Analysis& tgtA, const EditSet& tgtE, con
 // Adds the planned semitones to the notes' pitch offsets.
 void applyPitchFix(EditSet& e, const std::vector<NoteFix>& fixes);
 
+// ---- interval: pull notes onto the reference (a non-singer under a clean reference) -----
+// Every note asked for is pulled, edited or not, whatever the reference is (unison or another
+// part); nothing is left alone for being close. Pitch: the note's centre goes to a clean pitch
+// `steps` degrees of the key's scale from what the reference sings over the note's middle
+// (0 = unison: the reference's own note, see scaleInterval()), in the note's own octave, by the
+// share `pitchAmount`. Consonants keep their pitch. Time: each edge of the note moves toward
+// where the alignment puts it on the reference, by the share `timeAmount`; edges closer than
+// `timeTolSec` stay. A note under which the reference does not sing keeps its pitch.
+struct IntervalOptions {
+    int steps = 0;             // scale degrees: 0 unison, ±2 third, ±3 fourth, ±4 fifth, ±5 sixth
+    double pitchAmount = 1.0;  // share of the way to the target pitch («Высота»)
+    double timeAmount = 0.92;  // share of the way to the reference in time (0 = time untouched)
+    double timeTolSec = 0;     // edges closer than this to their place stay put
+    bool useKey = true;        // false (chromatic mode): unison goes to the nearest semitone
+};
+struct IntervalFix {
+    int note = -1;
+    bool pitched = false;      // the reference sings over the note: it gets a pitch target
+    double refMidi = 0;        // the reference over the note's middle (median, as sung, its own octave)
+    double target = 0;         // where the note's centre goes (pitched only)
+    double pitchDelta = 0;     // semitones to add to the note's pitch offset (share applied)
+    double outStart = 0, outEnd = 0; // the note's new output placement (share applied)
+    bool timed = false;        // the placement changes
+};
+// How to align for an interval: unison (steps 0) is known to be the same part, however far off the
+// customer sings; any other interval is another part (only the shape of the line counts).
+AlignOptions intervalAlignOptions(int steps);
+// `notes`: the notes to pull (empty = every note). `key`: the clip's key (Document::key).
+// `ref`, `warp`: as for planPitchFix. One entry per note asked for, in note order.
+std::vector<IntervalFix> planIntervalFix(const Analysis& tgtA, const EditSet& tgtE, const Key& key,
+                                         const std::vector<ThreadFrame>& ref, const Warp& warp,
+                                         const std::vector<int>& notes, const IntervalOptions& opt = {});
+// Applies the planned pitch and time (time through placeNotes: order and lengths stay valid).
+// False when the time could not be placed (the pitch is applied anyway).
+bool applyIntervalFix(EditSet& e, const Analysis& a, const std::vector<IntervalFix>& fixes);
+
 } // namespace glina

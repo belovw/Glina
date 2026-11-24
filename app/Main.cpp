@@ -306,6 +306,7 @@ public:
             if (args[i] == "--selftest") { selftest_ = true; continue; }
             if (args[i] == "--links") { links_ = true; continue; }
             if (args[i] == "--fix") { fix_ = true; continue; }
+            if (args[i] == "--interval" && i + 1 < args.size()) { interval_ = args[++i].getIntValue(); continue; } // box id: 2 unison, 3 third up...
             if (args[i] == "--light") continue;
             if (args[i] == "--toggle-theme") { ++toggleTheme_; continue; } // switch live, as the button does (check)
             if (args[i] == "--reference" && i + 1 < args.size()) { refFile_ = juce::File::getCurrentWorkingDirectory().getChildFile(args[++i]); continue; }
@@ -370,6 +371,7 @@ private:
                 linksShown_ = true;
                 m.editor().setGhostShiftForTest(true); // links read better when the ghost is lifted
                 m.editor().keyPressed(juce::KeyPress('n', {}, 'n'));
+                if (interval_ > 0) m.editor().setIntervalForTest(interval_);
                 return;
             }
             if (fix_ && !fixDone_) { fixDone_ = true; m.editor().keyPressed(juce::KeyPress('f', {}, 'f')); return; }
@@ -739,6 +741,7 @@ private:
     std::unique_ptr<Window> window_;
     std::unique_ptr<juce::Timer> poll_;
     juce::File shotFile_;
+    int interval_ = 0; // --interval: the links' interval box id
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;
     bool tracksShown_ = false;

@@ -526,6 +526,25 @@ bool PluginClip::thread(const juce::String& id, std::vector<ThreadFrame>& out) c
     return false;
 }
 
+bool PluginClip::trackKey(const juce::String& id, Key& out) const
+{
+    if (region_ == nullptr) return false;
+    for (auto* seq : glinaSequences()) {
+        if (idOf(seq) != id) continue;
+        auto items = glinaItemsOf(seq);
+        std::stable_sort(items.begin(), items.end(),
+                         [](auto* a, auto* b) { return a->getStartInPlaybackTime() < b->getStartInPlaybackTime(); });
+        for (auto* r : items) {
+            auto* m = dynamic_cast<GlinaAudioModification*>(r->getAudioModification());
+            if (m == nullptr || !m->getGlinaSource()->data->analysisReady || m->effective == nullptr) continue;
+            out = m->doc.key(*m->effective);
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool PluginClip::ghost(const juce::String& id, Ghost& out) const
 {
     if (region_ == nullptr) return false;

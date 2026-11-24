@@ -1,12 +1,14 @@
 #include "glina/Thread.h"
 #include "glina/Editing.h"
 #include "glina/Renderer.h"
+#include "glina/Tuning.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <set>
 
 namespace glina {
 
@@ -476,6 +478,129 @@ void applyPitchFix(EditSet& e, const std::vector<NoteFix>& fixes)
 {
     for (const NoteFix& f : fixes)
         if (f.semis != 0 && !f.edited && f.note >= 0 && f.note < (int)e.notes.size()) e.notes[(size_t)f.note].pitchOffset += f.semis;
+}
+
+namespace {
+// Reference pitch at a time: the nearest frame within 15 ms (0 = none or unvoiced).
+float refPitchAt(const std::vector<ThreadFrame>& ref, double t)
+{
+    const auto it = std::lower_bound(ref.begin(), ref.end(), t, [](const ThreadFrame& f, double x) { return f.t < x; });
+    const ThreadFrame* best = nullptr;
+    if (it != ref.end()) best = &*it;
+    if (it != ref.begin() && (best == nullptr || t - std::prev(it)->t < best->t - t)) best = &*std::prev(it);
+    return (best != nullptr && std::abs(best->t - t) <= 0.015) ? best->midi : 0.f;
+}
+constexpr double kTouchSec = 0.005; // notes closer than this touch (as in the time edits)
+} // namespace
+
+AlignOptions intervalAlignOptions(int steps)
+{
+    AlignOptions o;
+    o.unison = steps == 0;
+    o.autoPart = false;
+    return o;
+}
+
+std::vector<IntervalFix> planIntervalFix(const Analysis& a, const EditSet& e, const Key& key,
+                                         const std::vector<ThreadFrame>& ref, const Warp& warp,
+                                         const std::vector<int>& notesIn, const IntervalOptions& opt)
+{
+    std::vector<IntervalFix> out;
+    const int n = (int)a.notes.size();
+    if (warp.empty() || ref.empty() || n == 0) return out;
+    std::vector<int> notes;
+    if (notesIn.empty()) for (int i = 0; i < n; ++i) notes.push_back(i);
+    else
+        for (int i : std::set<int>(notesIn.begin(), notesIn.end()))
+            if (i >= 0 && i < n) notes.push_back(i);
+    const TimeMap map = TimeMap::build(a, e);
+    const std::vector<NoteTimes> times = noteTimes(a, e);
+    const double sr = a.sampleRate;
+    const int nf = (int)a.frames.size();
+    const NoteEdit none{};
+    const double pitchAmt = std::clamp(opt.pitchAmount, 0.0, 1.0);
+    const double timeAmt = std::clamp(opt.timeAmount, 0.0, 1.0);
+    for (int i : notes) {
+        IntervalFix f;
+        f.note = i;
+        const Note& nt = a.notes[(size_t)i];
+        const NoteEdit& ed = i < (int)e.notes.size() ? e.notes[(size_t)i] : none;
+
+        // Pitch: the reference over the note's middle (glides at the ends belong to the transitions).
+        if (!ed.consonant) {
+            const int len = nt.endFrame - nt.startFrame;
+            const int k0 = len >= 5 ? nt.startFrame + len / 5 : nt.startFrame;
+            const int k1 = len >= 5 ? nt.endFrame - len / 5 : nt.endFrame;
+            int voiced = 0;
+            for (int k = std::max(0, k0); k < std::min(k1, nf); ++k) if (a.frames[(size_t)k].f0 > 0) ++voiced;
+            std::vector<float> d;
+            for (int k = std::max(0, k0); k < std::min(k1, nf); ++k) {
+                if (voiced >= 3 && a.frames[(size_t)k].f0 <= 0) continue; // the note's voiced part when it has one
+                const double t = map.inToOut(k * (double)a.hop) / sr;
+                const float r = refPitchAt(ref, warp.map(t));
+                if (r > 0) d.push_back(r);
+            }
+            if (d.size() >= 3) {
+                std::nth_element(d.begin(), d.begin() + (long)d.size() / 2, d.end());
+                f.refMidi = d[d.size() / 2];
+                const double cur = editedCenter(a, e, i);
+                double tg = scaleInterval(f.refMidi, key, opt.useKey, opt.steps);
+                tg += 12.0 * std::round((cur - tg) / 12.0); // the singer's own octave
+                f.pitched = true;
+                f.target = tg;
+                f.pitchDelta = (tg - cur) * pitchAmt;
+                if (std::abs(f.pitchDelta) < 1e-9) f.pitchDelta = 0;
+            }
+        }
+
+        // Time: each edge toward where the reference has it.
+        const NoteTimes& b = times[(size_t)i];
+        f.outStart = b.outStart;
+        f.outEnd = b.outEnd;
+        if (timeAmt > 0) {
+            auto pull = [&](double x) {
+                const double dx = warp.map(x) - x;
+                return std::abs(dx) < opt.timeTolSec ? x : x + timeAmt * dx;
+            };
+            f.outStart = pull(b.outStart);
+            f.outEnd = ed.consonant ? f.outStart + (b.outEnd - b.outStart) : pull(b.outEnd);
+            f.timed = std::abs(f.outStart - b.outStart) > 1e-6 || std::abs(f.outEnd - b.outEnd) > 1e-6;
+        }
+        out.push_back(f);
+    }
+    return out;
+}
+
+bool applyIntervalFix(EditSet& e, const Analysis& a, const std::vector<IntervalFix>& fixes)
+{
+    const int n = (int)a.notes.size();
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    // Time first (the placement was planned on the layout as it is), then pitch: neither changes the other.
+    const std::vector<NoteTimes> base = noteTimes(a, e);
+    std::vector<NoteTimes> t = base;
+    std::vector<char> moved((size_t)n, 0);
+    bool anyTime = false;
+    for (const IntervalFix& f : fixes) {
+        if (f.note < 0 || f.note >= n || !f.timed) continue;
+        t[(size_t)f.note].outStart = f.outStart;
+        t[(size_t)f.note].outEnd = f.outEnd;
+        moved[(size_t)f.note] = 1;
+        anyTime = true;
+    }
+    bool ok = true;
+    if (anyTime) {
+        // A note left alone follows a moved neighbour it touches, so no gap or overlap opens there.
+        auto touch = [&](int i) { return i >= 0 && i + 1 < n && std::abs(base[(size_t)i + 1].outStart - base[(size_t)i].outEnd) < kTouchSec; };
+        for (int i = 0; i < n; ++i) {
+            if (moved[(size_t)i]) continue;
+            if (i > 0 && moved[(size_t)i - 1] && touch(i - 1)) t[(size_t)i].outStart = t[(size_t)i - 1].outEnd;
+            if (i + 1 < n && moved[(size_t)i + 1] && touch(i)) t[(size_t)i].outEnd = t[(size_t)i + 1].outStart;
+        }
+        ok = placeNotes(e, a, t);
+    }
+    for (const IntervalFix& f : fixes)
+        if (f.pitched && f.note >= 0 && f.note < n && f.pitchDelta != 0) e.notes[(size_t)f.note].pitchOffset += f.pitchDelta;
+    return ok;
 }
 
 } // namespace glina

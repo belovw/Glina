@@ -1130,6 +1130,142 @@ static void testThreadFix()
 }
 
 
+// Interval: a non-singer pulled onto a clean reference (unison or a scale interval), in pitch and time.
+static void testIntervalFix()
+{
+    std::printf("[interval] pull onto the reference: scale steps, unison, edited notes, selection, time\n");
+    // Steps counted in the scale.
+    Key cmaj;                                         // C major, tempered
+    Key amin; amin.tonic = 9; amin.minor = true;       // A natural minor
+    Key pure; pure.just = true;                        // C major, pure intervals
+    CHECK(scaleInterval(60.0, cmaj, true, 2) == 64.0, "third above C is E");
+    CHECK(scaleInterval(64.2, cmaj, true, 2) == 67.0, "third above E is G (minor third)");
+    CHECK(scaleInterval(62.0, cmaj, true, -2) == 59.0, "third below D is B");
+    CHECK(scaleInterval(60.0, cmaj, true, -2) == 57.0, "third below C is A");
+    CHECK(scaleInterval(60.0, cmaj, true, 5) == 69.0, "sixth above C is A");
+    CHECK(scaleInterval(60.0, cmaj, true, -5) == 52.0, "sixth below C is E");
+    CHECK(scaleInterval(71.0, cmaj, true, 4) == 77.0, "fifth above B in C major is F");
+    CHECK(scaleInterval(65.0, cmaj, true, 3) == 71.0, "fourth above F is B");
+    CHECK(scaleInterval(66.3, cmaj, true, 2) == 71.0, "F# (outside) goes to G first, a third above is B");
+    CHECK(scaleInterval(57.1, amin, true, 2) == 60.0, "third above A in A minor is C");
+    CHECK(scaleInterval(60.4, cmaj, true, 0) == 60.0, "unison: C");
+    CHECK(scaleInterval(61.2, cmaj, true, 0) == 61.0, "unison: C# outside the scale stays C#");
+    CHECK(std::abs(scaleInterval(64.1, pure, true, 0) - 63.86314) < 1e-4, "unison in natural tuning: pure third");
+    CHECK(std::abs(scaleInterval(60.0, pure, true, 2) - 63.86314) < 1e-4, "pure third above C");
+    CHECK(scaleInterval(60.6, cmaj, false, 0) == 61.0, "chromatic unison: nearest semitone");
+
+    const double sr = 48000;
+    auto thread = [](const Analysis& a, const EditSet& e) { return threadOf(a, e, nullptr, 0.0, (double)a.numSamples / a.sampleRate); };
+    const std::vector<test::SynthNote> refMel = test::demoMelody(); // A minor, clean within ~40 cents
+    const test::SynthResult rs = test::synthesize(refMel, sr);
+    const Analysis ra = analyze(rs.audio.data(), rs.audio.size(), sr);
+    EditSet re;
+    re.notes.resize(ra.notes.size());
+    const auto refT = thread(ra, re);
+
+    // The customer: 8 % slower, every note off by 45..110 cents.
+    const test::SynthResult* lastTruth = nullptr;
+    auto customer = [&](int degrees, uint32_t seed, int rot = 0) {
+        std::vector<test::SynthNote> m = refMel;
+        const double off[] = {+60, -90, +110, -60, +45, -80, +70, -70, +100};
+        for (size_t k = 0; k < m.size(); ++k) {
+            m[k].midi = scaleInterval(refMel[k].midi, amin, true, degrees);
+            m[k].detuneCents = off[(k + (size_t)rot) % 9];
+            m[k].dur *= 1.08;
+        }
+        static std::vector<test::SynthResult> truth; // the customer's true note starts, by seed
+        truth.push_back(test::synthesize(m, sr, 30, 5.2, seed));
+        lastTruth = &truth.back();
+        return std::make_unique<Analysis>(analyze(truth.back().audio.data(), truth.back().audio.size(), sr));
+    };
+
+    auto run = [&](const Analysis& a, EditSet& e, int steps, const std::vector<int>& sel, double pitchAmt, double timeAmt,
+                   const char* name) {
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(a, e), refT, intervalAlignOptions(steps), {}, &inf);
+        IntervalOptions o;
+        o.steps = steps;
+        o.pitchAmount = pitchAmt;
+        o.timeAmount = timeAmt;
+        const auto f = planIntervalFix(a, e, amin, refT, w, sel, o);
+        const bool ok = applyIntervalFix(e, a, f);
+        std::printf("  %-34s %zu notes planned, time placed: %s%s\n", name, f.size(), ok ? "yes" : "NO",
+                    inf.part ? " (another part)" : "");
+        CHECK(ok, "%s: time not placed", name);
+        return f;
+    };
+
+    { // unison, everything: pitch onto the reference's notes, starts onto the reference's starts
+        const auto a = customer(0, 501);
+        EditSet e;
+        e.notes.resize(a->notes.size());
+        e.notes[3].pitchOffset = 0.3; // an edited note is pulled too
+        CHECK(a->notes.size() == ra.notes.size(), "customer: %zu notes, reference %zu", a->notes.size(), ra.notes.size());
+        const test::SynthResult truth = *lastTruth;
+        // Where the customer's true note starts sound after the edits, against the reference's true starts.
+        auto worstStart = [&](const EditSet& ed) {
+            const TimeMap tm = TimeMap::build(*a, ed);
+            double w = 0;
+            for (size_t i = 0; i < truth.noteStart.size() && i < rs.noteStart.size(); ++i)
+                w = std::max(w, std::abs(tm.inToOut(truth.noteStart[i] * sr) / sr - rs.noteStart[i]));
+            return w;
+        };
+        const double before = worstStart(e);
+        const auto f = run(*a, e, 0, {}, 1.0, 1.0, "unison, all notes, 100 %");
+        double worstC = 0;
+        for (size_t i = 0; i < a->notes.size() && i < refMel.size(); ++i)
+            worstC = std::max(worstC, std::abs(editedCenter(*a, e, (int)i) - refMel[i].midi) * 100);
+        const double worstT = worstStart(e);
+        std::printf("    pitch: worst %.1f cents from the clean note; true starts: worst %.0f ms (before %.0f ms)\n", worstC,
+                    worstT * 1000, before * 1000);
+        CHECK(worstC < 1.0, "unison: a note %.1f cents from the reference's clean note", worstC);
+        CHECK(worstT < 0.05 && worstT < before * 0.3, "unison: a note start %.0f ms from the reference's", worstT * 1000);
+    }
+    { // a third above, everything (taken as another part by the alignment: pulled anyway)
+        const auto a = customer(2, 502, 1);
+        EditSet e;
+        e.notes.resize(a->notes.size());
+        run(*a, e, 2, {}, 1.0, 0.0, "a third above, pitch only");
+        double worst = 0;
+        for (size_t i = 0; i < a->notes.size() && i < refMel.size(); ++i)
+            worst = std::max(worst, std::abs(editedCenter(*a, e, (int)i) - scaleInterval(refMel[i].midi, amin, true, 2)) * 100);
+        std::printf("    worst %.1f cents from the third above the reference\n", worst);
+        CHECK(worst < 1.0, "third above: a note %.1f cents off", worst);
+        const auto t = noteTimes(*a, e);
+        bool still = true;
+        for (const auto& x : t) still = still && x.outStart == x.inStart && x.outEnd == x.inEnd;
+        CHECK(still, "time share 0 moved notes in time");
+    }
+    { // selection, half the way
+        const auto a = customer(0, 503);
+        EditSet e;
+        e.notes.resize(a->notes.size());
+        const std::vector<double> c0 = [&] { std::vector<double> v; for (size_t i = 0; i < a->notes.size(); ++i) v.push_back(editedCenter(*a, e, (int)i)); return v; }();
+        run(*a, e, 0, {2, 5}, 0.5, 0.0, "notes 2 and 5, 50 %");
+        bool othersKept = true;
+        for (size_t i = 0; i < a->notes.size(); ++i) if (i != 2 && i != 5) othersKept = othersKept && e.notes[i].pitchOffset == 0;
+        CHECK(othersKept, "a note outside the selection was changed");
+        for (int i : {2, 5}) {
+            const double want = 0.5 * (refMel[(size_t)i].midi - c0[(size_t)i]);
+            CHECK(std::abs(e.notes[(size_t)i].pitchOffset - want) < 0.01, "note %d: half way %.3f, want %.3f", i,
+                  e.notes[(size_t)i].pitchOffset, want);
+        }
+    }
+    { // a time tolerance larger than any difference: no time change
+        const auto a = customer(0, 504);
+        EditSet e;
+        e.notes.resize(a->notes.size());
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(*a, e), refT, {}, {}, &inf);
+        IntervalOptions o;
+        o.timeAmount = 1.0;
+        o.timeTolSec = 10.0;
+        bool timed = false;
+        for (const auto& x : planIntervalFix(*a, e, amin, refT, w, {}, o)) timed = timed || x.timed;
+        CHECK(!timed, "edges within the tolerance were moved");
+    }
+}
+
 // Track view: two items of one track (the second off the frame grid, trimmed) as one clip.
 // Pins between a clip and its reference: kept sorted, never crossing a neighbour, saved with the document.
 static void testPins()
@@ -1320,6 +1456,7 @@ int main()
     testSilenceAndNoise();
     testThreadAlign();
     testThreadFix();
+    testIntervalFix();
     testTrackView();
     testPins();
     for (double sr : {44100.0, 48000.0}) {

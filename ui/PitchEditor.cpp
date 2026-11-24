@@ -240,7 +240,8 @@ public:
             "  G — линии сетки 1/4 → 1/8 → 1/16    L — показать локатор\n"
             "  T — треки: ноты других треков поверх этого, переключение редактирования\n"
             "  N — связи с первым показанным треком: где их нитки совпадают по времени (звук не меняется)\n"
-            "  F — при связях: неверные ноты (на полутон и больше от того трека) сдвинуть целыми полутонами\n"
+            "  F — при связях: неверные ноты (на полутон и больше от того трека) сдвинуть целыми полутонами;\n"
+            "      с интервалом (прима, терция…) — подтянуть ноты к тому треку по высоте и времени. Выделенные или все\n"
             "  0 — показать всё    + / − — масштаб    H — гармонии    F1 — справка\n"
             "\n"
             "Без выделения «Применить», Q, D и V действуют на все ноты.";
@@ -498,7 +499,13 @@ public:
                         if (ed.links_.info.octave != 0)
                             st << T(", октава ") << (ed.links_.info.octave > 0 ? "+" : "") << ed.links_.info.octave;
                         if (ed.links_.info.part) st << T(", другая партия");
-                        if (ed.links_.toFix > 0) st << T(" · неверных нот: ") << ed.links_.toFix << T(" (F — исправить)");
+                        if (ed.intervalSteps() != kNoInterval) {
+                            juce::String from;
+                            const Key ik = ed.intervalKey(&from);
+                            st << T(" · ") << ed.intervalName();
+                            if (ed.intervalSteps() != 0) st << T(" (") << ed.keyLabel(ik.tonic, ik.minor) << T(", ") << from << T(")");
+                            st << T(": F — подтянуть ") << (ed.selection_.empty() ? T("все ноты") : T("выделенные"));
+                        } else if (ed.links_.toFix > 0) st << T(" · неверных нот: ") << ed.links_.toFix << T(" (F — исправить)");
                     }
                 }
                 if (ed.host_->isRendering()) st << T(" · рендер…");
@@ -781,18 +788,28 @@ public:
             g.drawLine(juce::Line<float>(pinAnchor_, lastMouse), 1.5f);
         }
 
-        // Wrong notes F would move: "+2" / "−5" above the note.
+        // Wrong notes F would move: "+2" / "−5" above the note. With an interval: how far F pulls
+        // each note that moves by half a semitone or more ("+1,4").
         g.setFont(juce::FontOptions(11.f, juce::Font::bold));
-        for (const auto& f : L.fixes) {
-            if (f.semis == 0 || f.note < 0 || f.note >= (int)ed.eff_->notes.size()) continue;
-            const auto r = noteRect(f.note);
-            if (r.getRight() < c.getX() || r.getX() > c.getRight()) continue;
-            const juce::String txt = (f.semis > 0 ? "+" : juce::String::fromUTF8("\xe2\x88\x92")) + juce::String(std::abs(f.semis)) + T(" пт");
-            const auto box = juce::Rectangle<float>(r.getX(), r.getY() - 17.f, 40.f, 15.f);
+        const juce::String minus = juce::String::fromUTF8("\xe2\x88\x92");
+        auto mark = [&](int note, const juce::String& txt) {
+            if (note < 0 || note >= (int)ed.eff_->notes.size()) return;
+            const auto r = noteRect(note);
+            if (r.getRight() < c.getX() || r.getX() > c.getRight()) return;
+            const auto box = juce::Rectangle<float>(r.getX(), r.getY() - 17.f, 44.f, 15.f);
             g.setColour(link.withAlpha(0.9f));
             g.fillRoundedRectangle(box, 3.f);
             g.setColour(col::bg);
             g.drawText(txt, box, juce::Justification::centred);
+        };
+        if (ed.intervalSteps() != kNoInterval) {
+            for (const auto& f : L.pulls) {
+                if (!f.pitched || std::abs(f.pitchDelta) < 0.5) continue;
+                mark(f.note, (f.pitchDelta > 0 ? "+" : minus) + juce::String(std::abs(f.pitchDelta), 1).replace(".", ",") + T(" пт"));
+            }
+        } else {
+            for (const auto& f : L.fixes)
+                if (f.semis != 0) mark(f.note, (f.semis > 0 ? "+" : minus) + juce::String(std::abs(f.semis)) + T(" пт"));
         }
     }
 
@@ -1230,7 +1247,10 @@ public:
         m.addItem(5, T("Дрейф убрать / вернуть\tD"), true);
         m.addItem(6, T("Вибрато 100 / 50 / 0 %\tV"), true);
         m.addItem(9, T("Автовибрато вкл / выкл\tShift+V"), true);
-        m.addItem(30, T("Исправить неверные ноты по связям\tF"), ed.links_.ok && ed.links_.toFix > 0);
+        if (ed.intervalSteps() != kNoInterval)
+            m.addItem(30, T("Подтянуть к связям: ") + ed.intervalName() + T("\tF"), ed.links_.ok);
+        else
+            m.addItem(30, T("Исправить неверные ноты по связям\tF"), ed.links_.ok && ed.links_.toFix > 0);
         m.addItem(7, T("Стереть карандаш в выделенных"), any && ed.doc() != nullptr && !ed.doc()->edits.draw.empty());
         bool allCons = any && ed.doc() != nullptr;
         if (allCons)
@@ -2331,6 +2351,30 @@ PitchEditor::PitchEditor()
     corr(corrPitch_, corrPitchLbl_, "Высота", 100, "Насколько подтянуть центр ноты к ладу");
     corr(corrDrift_, corrDriftLbl_, "Дрейф", 40, "Сколько дрейфа (плавания) внутри ноты убрать; вибрато не трогается");
 
+    // Links (N): the interval F pulls the notes with, and how far in time.
+    quiet(intervalBox_);
+    {
+        int id = 1;
+        intervalBox_.addItem(T("Интервал: выкл."), id++);
+        intervalBox_.addItem(T("Прима"), id++);
+        for (const char* n : {"Терция", "Кварта", "Квинта", "Секста"}) {
+            intervalBox_.addItem(T(n) + T(" ↑"), id++);
+            intervalBox_.addItem(T(n) + T(" ↓"), id++);
+        }
+    }
+    intervalBox_.setSelectedId(1, juce::dontSendNotification);
+    intervalBox_.setTooltip(T("F по связям. Выкл.: только неверные ноты, целыми полутонами. Интервал: подтянуть ноты к тому треку "
+                              "(по ладу: терция от до — ми, от ми — соль) по высоте («Высота») и по времени («Время»), "
+                              "выделенные или все, правленые тоже"));
+    intervalBox_.onChange = [this] {
+        refreshLinks();
+        roll_->repaint();
+    };
+    addChildComponent(intervalBox_);
+    corr(timeSlider_, timeLbl_, "Время", 92, "Насколько подтянуть ноты по времени к тому треку при F с интервалом");
+    timeSlider_.setVisible(false);
+    timeLbl_.setVisible(false);
+
     startTimerHz(30);
     setSize(1200, 640);
     updateToolbar();
@@ -2679,6 +2723,47 @@ void PitchEditor::refreshGhosts()
     refreshLinks();
 }
 
+int PitchEditor::intervalSteps() const
+{
+    // 1 off, 2 unison, then third / fourth / fifth / sixth, each up and down.
+    const int id = intervalBox_.getSelectedId();
+    if (id <= 1) return kNoInterval;
+    if (id == 2) return 0;
+    const int k = id - 3;          // 0 third up, 1 third down, 2 fourth up ...
+    const int degrees = 2 + k / 2; // third = 2 degrees, fourth 3, fifth 4, sixth 5
+    return k % 2 == 0 ? degrees : -degrees;
+}
+
+juce::String PitchEditor::intervalName() const
+{
+    return intervalSteps() == kNoInterval ? juce::String() : intervalBox_.getText().toLowerCase();
+}
+
+IntervalOptions PitchEditor::intervalOptions() const
+{
+    IntervalOptions o;
+    o.steps = intervalSteps() == kNoInterval ? 0 : intervalSteps();
+    o.pitchAmount = corrPitch_.getValue() / 100.0; // «Высота», as for «Исправить»
+    o.timeAmount = timeSlider_.getValue() / 100.0;
+    o.timeTolSec = 0;                                // with an interval the time is always pulled
+    o.useKey = doc() == nullptr || !doc()->chromatic;
+    return o;
+}
+
+Key PitchEditor::intervalKey(juce::String* from) const
+{
+    const Document* d = doc();
+    if (d == nullptr || eff_ == nullptr) return {};
+    if (d->keyTonic >= 0 || d->keyMode >= 0) { if (from) *from = T("лад этого трека"); return d->key(*eff_); }
+    Key k;
+    if (host_ != nullptr && !ghosts_.empty() && host_->trackKey(ghosts_.front().id, k)) {
+        if (from) *from = T("лад референса");
+        return k;
+    }
+    if (from) *from = T("лад этого трека");
+    return d->key(*eff_);
+}
+
 void PitchEditor::refreshLinks()
 {
     links_ = Links{};
@@ -2691,21 +2776,53 @@ void PitchEditor::refreshLinks()
     // The document's pins apply only to the reference they were made with.
     links_.pinsOn = doc()->pinRef == gv.id.toStdString();
     const std::vector<Pin> none;
-    links_.warp = alignThreads(links_.tgt, ref, {}, links_.pinsOn ? doc()->pins : none, &links_.info);
+    const int steps = intervalSteps();
+    // With an interval the relation is known: unison is the same part however far off the notes are,
+    // any other interval is another part.
+    const AlignOptions ao = steps == kNoInterval ? AlignOptions{} : intervalAlignOptions(steps);
+    links_.warp = alignThreads(links_.tgt, ref, ao, links_.pinsOn ? doc()->pins : none, &links_.info);
     links_.ref = std::move(ref);
     links_.name = gv.name;
     links_.ok = !links_.warp.empty();
-    if (links_.ok) {
+    if (!links_.ok) return;
+    if (steps == kNoInterval) {
         links_.fixes = planPitchFix(*eff_, doc()->edits, links_.ref, links_.warp, links_.info);
         for (const auto& f : links_.fixes) if (f.semis != 0) ++links_.toFix;
+    } else {
+        links_.pulls = planIntervalFix(*eff_, doc()->edits, intervalKey(), links_.ref, links_.warp, {}, intervalOptions());
+        for (const auto& f : links_.pulls) if (std::abs(f.pitchDelta) >= 0.005 || f.timed) ++links_.toPull;
     }
 }
 
 void PitchEditor::applyLinkFixes()
 {
-    if (!links_.ok || links_.toFix == 0) return;
-    const std::vector<NoteFix> fixes = links_.fixes;
-    edit([&](Document& d) { applyPitchFix(d.edits, fixes); });
+    if (!links_.ok || eff_ == nullptr || doc() == nullptr) return;
+    const std::vector<int> notes = targets(); // the selection, or every note
+    if (intervalSteps() == kNoInterval) {
+        std::vector<NoteFix> fixes;
+        for (const auto& f : links_.fixes)
+            if (f.semis != 0 && (selection_.empty() || selection_.count(f.note) > 0)) fixes.push_back(f);
+        if (fixes.empty()) return;
+        edit([&](Document& d) { applyPitchFix(d.edits, fixes); });
+        return;
+    }
+    const Analysis& a = *eff_;
+    const std::vector<IntervalFix> plan =
+        planIntervalFix(a, doc()->edits, intervalKey(), links_.ref, links_.warp, notes, intervalOptions());
+    if (plan.empty()) return;
+    const bool pinsOn = links_.pinsOn;
+    bool placed = true;
+    edit([&](Document& d) {
+        const TimeMap before = TimeMap::build(a, d.edits);
+        placed = applyIntervalFix(d.edits, a, plan);
+        // Pins stay on the sound they were put on: their end on this track follows the time edit.
+        if (pinsOn && !d.pins.empty()) {
+            const TimeMap after = TimeMap::build(a, d.edits);
+            const double sr = a.sampleRate;
+            for (auto& p : d.pins) p.tgt = after.inToOut(before.outToIn(p.tgt * sr)) / sr;
+        }
+    });
+    if (!placed && host_ != nullptr) host_->log(T("по времени ноты не подтянуты: не удалось расставить их без наложений"));
 }
 
 static float midiNear(const std::vector<ThreadFrame>& r, double t)
@@ -2744,6 +2861,9 @@ void PitchEditor::removePin(int i)
 void PitchEditor::toggleLinks()
 {
     showLinks_ = !showLinks_;
+    for (juce::Component* c : std::initializer_list<juce::Component*>{&intervalBox_, &timeLbl_, &timeSlider_})
+        c->setVisible(showLinks_);
+    resized();
     refreshLinks();
     roll_->repaint();
 }
@@ -3018,7 +3138,8 @@ void PitchEditor::updateToolbar()
     playBtn_.setButtonText(host_ != nullptr && host_->isPlaying() ? T("■") : T("▶"));
     undoBtn_.setEnabled(ready && host_->canUndo());
     redoBtn_.setEnabled(ready && host_->canRedo());
-    for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &modeBox_, &snapSlider_, &corrPitch_, &corrDrift_, &fitBtn_})
+    for (auto* c : std::initializer_list<juce::Component*>{&applyBtn_, &joinBtn_, &keyBox_, &modeBox_, &snapSlider_, &corrPitch_, &corrDrift_,
+                                                           &fitBtn_, &intervalBox_, &timeSlider_})
         c->setEnabled(ready);
     splitBtn_.setEnabled(ready && selection_.size() == 1);
     abBtn_.setEnabled(host_ != nullptr);
@@ -3061,11 +3182,15 @@ void PitchEditor::resized()
         {&snapLbl_, 62, 2, 62},      {&snapSlider_, 118, 12, 100},
         {&corrPitchLbl_, 50, 2, 50}, {&corrPitch_, 118, 4, 100},
         {&corrDriftLbl_, 46, 2, 46}, {&corrDrift_, 118, 4, 100},
-        {&applyBtn_, 86, 12, 86},    {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
+        {&applyBtn_, 86, 12, 86},
+        {&intervalBox_, 132, 4, 110}, {&timeLbl_, 44, 2, 44},    {&timeSlider_, 118, 12, 100},
+        {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
         {&renderBtn_, 66, 4, 66},    {&themeBtn_, 26, 4, 26},     {&helpBtn_, 28, 4, 28}};
-    auto isCaption = [this](const Slot* s) { return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_ || s->c == &snapLbl_; };
+    auto isCaption = [this](const Slot* s) {
+        return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_ || s->c == &snapLbl_ || s->c == &timeLbl_;
+    };
     std::vector<Slot*> vis;
     for (auto& s : slots) if (s.c->isVisible()) vis.push_back(&s);
 

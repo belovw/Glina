@@ -25,6 +25,15 @@ void scaleCents(const Key& key, double cents[7]);
 // Nearest allowed MIDI note for `midi` (scale of `key`, or chromatic).
 double nearestTarget(double midi, const Key& key, bool useKey);
 
+// A clean pitch `steps` degrees of the key's scale above `midi` (below when negative), the
+// interval counted in the scale (C major: a third above C is E, above E is G).
+// steps != 0: `midi` is first taken to its nearest degree (a note outside the scale, e.g. in a
+// passing chord, goes to the closest step), then moved by `steps` degrees.
+// steps == 0 (unison): the nearest semitone to `midi`; when that semitone is a degree of the
+// scale, its exact pitch in the key (pure intervals in natural tuning). A note outside the
+// scale stays its own semitone. useKey = false (chromatic): unison is the nearest semitone.
+double scaleInterval(double midi, const Key& key, bool useKey, int steps);
+
 EditSet makeAutoTune(const Analysis& a, const TuneParams& p);
 
 // Shifts every note by the same interval (transpose).

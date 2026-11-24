@@ -19,6 +19,11 @@ struct NoteTimes {
 std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e);
 void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t);
 
+// Places the notes at the wanted output times `t` (one per note, from noteTimes()), made valid
+// first: notes keep their order and a minimal length, consonants keep their own length, nothing
+// leaves the clip or (track view) its item. False, and nothing changed, if no valid layout is found.
+bool placeNotes(EditSet& e, const Analysis& a, std::vector<NoteTimes> t);
+
 // Move the boundary after note `left` (between `left` and `left + 1`) by `dt`
 // seconds. `left` = -1 is the start of the first note, `left` = n-1 the end of
 // the last. Selected notes touching the boundary act as one block on each side:

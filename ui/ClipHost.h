@@ -171,6 +171,8 @@ public:
     // The thread of another track (edited pitch line, kind, level; every 10 ms) on THIS
     // clip's output timeline, for aligning the two (transfer by the thread).
     virtual bool thread(const juce::String& /*id*/, std::vector<ThreadFrame>& /*out*/) const { return false; }
+    // The key of another track (its first item's: the lad chosen there, or the detected one).
+    virtual bool trackKey(const juce::String& /*id*/, Key& /*out*/) const { return false; }
     // Standalone: load a reference recording to show as a ghost.
     virtual bool canOpenReference() const { return false; }
     virtual void openReference() {}

@@ -127,6 +127,43 @@ void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>&
     }
 }
 
+bool placeNotes(EditSet& e, const Analysis& a, std::vector<NoteTimes> t)
+{
+    const std::vector<NoteTimes> base = noteTimes(a, e);
+    if (t.size() != base.size()) return false;
+    if (base.empty()) return true;
+    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.back().outEnd);
+    const double floorSec = floorOf(base);
+    const Bounds bounds = boundsOf(a, base);
+    auto consonant = [&](size_t i) { return i < e.notes.size() && e.notes[i].consonant; };
+    auto dur = [&](size_t i) { return base[i].outEnd - base[i].outStart; }; // a consonant keeps it
+    const double slack = 2e-6;                                              // inside valid()'s tolerance
+    // Forward: order, minimal length, the start limits.
+    double prev = floorSec;
+    for (size_t i = 0; i < t.size(); ++i) {
+        NoteTimes& n = t[i];
+        n.outStart = std::max({n.outStart, prev, bounds[i].first});
+        if (consonant(i)) n.outEnd = n.outStart + dur(i);
+        else n.outEnd = std::max(n.outEnd, n.outStart + minDur(n) + slack);
+        prev = n.outEnd;
+    }
+    // Backward: the end limits (the clip, the item); a note pushed back pushes the ones before it.
+    double next = clipLen;
+    for (size_t k = t.size(); k-- > 0;) {
+        NoteTimes& n = t[k];
+        const double limit = std::min(next, bounds[k].second);
+        if (n.outEnd > limit) {
+            n.outEnd = limit;
+            const double len = consonant(k) ? dur(k) : minDur(n) + slack;
+            n.outStart = std::min(n.outStart, n.outEnd - len);
+        }
+        next = n.outStart;
+    }
+    if (!valid(t, clipLen, floorSec, bounds)) return false;
+    applyNoteTimes(e, a, t);
+    return true;
+}
+
 double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge)
 {
     const int n = (int)a.notes.size();

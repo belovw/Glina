@@ -251,6 +251,13 @@ bool Session::thread(const juce::String& id, std::vector<ThreadFrame>& out) cons
     return !out.empty();
 }
 
+bool Session::trackKey(const juce::String& id, Key& out) const
+{
+    if (id != "reference" || ref_ == nullptr) return false;
+    out = ref_->key;
+    return true;
+}
+
 // ---- analysis / rendering ------------------------------------------------------------
 void Session::startAnalysis()
 {

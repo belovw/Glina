@@ -41,6 +41,7 @@ public:
     int hitThreadForTest(juce::Point<float> p) const;
     void zoomForTest(double pixelsPerSecond, double scrollSec);
     void setGhostShiftForTest(bool on);
+    void setIntervalForTest(int boxId) { intervalBox_.setSelectedId(boxId); } // links: 1 off, 2 unison, 3 third up ...
     void pressThemeButtonForTest() { themeBtn_.triggerClick(); }
     void dragForTest(juce::Point<float> from, juce::Point<float> to);
 
@@ -149,6 +150,17 @@ private:
     IconButton undoBtn_, redoBtn_;
     juce::ComboBox keyBox_, modeBox_;
     juce::Slider corrPitch_, corrDrift_, snapSlider_;
+    // With links (N): the interval F pulls the notes onto the reference with, and the time share.
+    juce::ComboBox intervalBox_;
+    juce::Label timeLbl_;
+    juce::Slider timeSlider_;
+    static constexpr int kNoInterval = 99;
+    int intervalSteps() const;           // scale degrees (0 unison, ±2 third ...), kNoInterval = off
+    juce::String intervalName() const;
+    IntervalOptions intervalOptions() const;
+    // The key intervals are counted in: this clip's lad when it is set by hand, else the
+    // reference's (a customer singing badly misleads the key detection), else the detected one.
+    Key intervalKey(juce::String* from = nullptr) const;
     juce::Label snapLbl_;
     juce::Label keyLbl_, corrLbl_, corrPitchLbl_, corrDriftLbl_, status_;
     bool showHarmonies_ = true;
@@ -171,9 +183,13 @@ private:
         AlignInfo info;
         std::vector<NoteFix> fixes;        // wrong notes found through the links (step 2)
         int toFix = 0;                     // notes F would move
+        std::vector<IntervalFix> pulls;    // with an interval: where F would pull every note
+        int toPull = 0;                    // notes F would change (pitch or time)
     };
     Links links_;
-    void applyLinkFixes(); // F: move the wrong notes by whole semitones (one undo step)
+    // F (one undo step), on the selected notes or all: without an interval, move the wrong notes
+    // by whole semitones; with one, pull the notes onto the reference (pitch and time).
+    void applyLinkFixes();
     std::set<juce::String> shownTracks_;                         // ids of tracks drawn as ghosts
     struct GhostView {
         juce::String id;     // the track (ClipHost::TrackRef id)
