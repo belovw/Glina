@@ -81,6 +81,7 @@ private:
     void applyCorrection();
     void resetNotes();
     void toggleMuteSelection();
+    void deleteSelection();
     void toggleDrift();
     void cycleVibrato();
     void toggleAutoVibrato(); // Shift+V: auto vibrato on (last depth, ±30 ¢ the first time) / off

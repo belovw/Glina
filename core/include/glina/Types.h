@@ -107,6 +107,9 @@ struct NoteEdit {
     double gainDb = 0;
     bool muted = false;        // silent, but kept in place (shown as a ghost); harmonies follow
     bool consMuted = false;    // the unvoiced sound (consonant) before this note is silent
+    // Deleted (Alt+Delete): silent and not drawn, its audio kept. Dragging an edge that touches
+    // it brings it back (restoreDeleted). Set together with muted and consMuted.
+    bool deleted = false;
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier
     double transition = 0.5;   // pitch move INTO this note: 0 = instant step, 0.5 = natural, 1 = long glide

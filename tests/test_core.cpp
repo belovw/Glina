@@ -295,6 +295,35 @@ static void testDocumentIO(const Analysis& a)
 }
 
 // Mute: a muted note goes silent and keeps its place; the others are unchanged.
+static void testDelete(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[delete] a deleted note is silent; pulling its edge brings it back\n");
+    if (a.notes.size() < 3) { std::printf("  skipped: too few notes\n"); return; }
+    EditSet plain;
+    plain.notes.resize(a.notes.size());
+    const size_t k = 1;
+    EditSet del = plain;
+    deleteNotes(del, a, {(int)k});
+    CHECK(del.notes[k].deleted && del.notes[k].muted && del.notes[k].consMuted, "delete did not set the flags");
+    const auto y0 = render(s.audio.data(), s.audio.size(), a, plain);
+    const auto y1 = render(s.audio.data(), s.audio.size(), a, del);
+    auto rms = [&](const std::vector<float>& y) {
+        const size_t from = (size_t)(a.notes[k].startSec * sr), to = (size_t)(a.notes[k].endSec * sr);
+        double acc = 0;
+        for (size_t t = from; t < to && t < y.size(); ++t) acc += (double)y[t] * y[t];
+        return std::sqrt(acc / std::max<size_t>(1, to - from));
+    };
+    const double before = rms(y0), after = rms(y1);
+    CHECK(before > 1e-3, "note %zu silent even without delete", k);
+    CHECK(after < before * 1e-3, "deleted note still sounds: %.6f vs %.6f", after, before);
+    EditSet back = del;
+    restoreDeleted(back, (int)k - 1);
+    CHECK(!back.notes[k].deleted && !back.notes[k].muted && !back.notes[k].consMuted, "restore left flags set");
+    const auto y2 = render(s.audio.data(), s.audio.size(), a, back);
+    const double again = rms(y2);
+    CHECK(std::abs(again - before) < 0.02 * before, "restored note differs: %.6f vs %.6f", again, before);
+}
+
 static void testMute(const test::SynthResult& s, const Analysis& a, double sr)
 {
     std::printf("[mute] a muted note is silent, the rest keep sounding\n");
@@ -1831,6 +1860,7 @@ int main()
         testMoveCut(a);
         testSilentGaps(s, a, sr);
         testMute(s, a, sr);
+        testDelete(s, a, sr);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

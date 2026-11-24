@@ -60,6 +60,12 @@ void toggleSeparation(EditSet& e, const Analysis& a, int i);
 // would overlap or squeeze a neighbour, the run keeps its current timing.
 void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes);
 
+// Delete notes (Alt+Delete): each becomes silent and hidden, its audio kept. Neighbours and
+// the consonants between them stay where they are; nothing is joined.
+void deleteNotes(EditSet& e, const Analysis& a, const std::set<int>& notes);
+// Dragging the boundary between note `left` and `left + 1` brings back a deleted note on either side.
+void restoreDeleted(EditSet& e, int left);
+
 // TEMP-MOVE-DIAG: names the first check the current layout fails ("valid" if none). Remove later.
 std::string whyLayoutInvalid(const EditSet& e, const Analysis& a);
 // TEMP-MOVE-DIAG: the condition that limited the last move or edge drag (empty if none). Remove later.

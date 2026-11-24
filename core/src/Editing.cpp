@@ -478,6 +478,29 @@ const AutoVibrato& vibratoOf(const EditSet& e, int i)
     return e.autoVibrato;
 }
 
+void deleteNotes(EditSet& e, const Analysis& a, const std::set<int>& notes)
+{
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    for (int i : notes) {
+        if (i < 0 || i >= (int)a.notes.size()) continue;
+        NoteEdit& n = e.notes[(size_t)i];
+        n.deleted = true;
+        n.muted = true;
+        n.consMuted = true;
+    }
+}
+
+void restoreDeleted(EditSet& e, int left)
+{
+    for (int i : {left, left + 1}) {
+        if (i < 0 || i >= (int)e.notes.size() || !e.notes[(size_t)i].deleted) continue;
+        NoteEdit& n = e.notes[(size_t)i];
+        n.deleted = false;
+        n.muted = false;
+        n.consMuted = false;
+    }
+}
+
 void setTrackVibrato(EditSet& e, const AutoVibrato& v, bool resetNotes)
 {
     e.autoVibrato = v;

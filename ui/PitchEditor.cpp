@@ -708,6 +708,7 @@ public:
         for (int i = 0; i < (int)A.notes.size(); ++i) {
             const Note& n = A.notes[(size_t)i];
             const NoteEdit& e = d.edits.notes[(size_t)i];
+            if (e.deleted) continue; // deleted: hidden, its audio is only there to be pulled back
             const auto box = noteRect(i);
             if (box.getRight() < c.getX() || box.getX() > c.getRight()) continue;
             const double centre = ed.editedCentre(i);
@@ -772,6 +773,11 @@ public:
             for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
                 if (d->edits.notes[i].muted)
                     for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 1;
+        // Deleted notes: their line is not drawn at all (value 2).
+        if (const Document* d = ed.doc())
+            for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
+                if (d->edits.notes[i].deleted)
+                    for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 2;
         auto draw = [&](auto valueAt, juce::Colour colr, float w, bool wantMuted) {
             juce::Path p;
             bool pen = false;
@@ -779,7 +785,7 @@ public:
                 // A gap opened between notes is silent: the line breaks there.
                 if (k > 0 && ed.timeMap_.silenceBetween((k - 1) * (double)A.hop, k * (double)A.hop)) pen = false;
                 const double m = valueAt(k);
-                if (m <= 0 || (muted[(size_t)k] != 0) != wantMuted) { pen = false; continue; }
+                if (m <= 0 || muted[(size_t)k] == 2 || (muted[(size_t)k] == 1) != wantMuted) { pen = false; continue; }
                 const juce::Point<float> pt(xOf(ed.outSec(k * hopSec)), yOf(m));
                 if (!pen) p.startNewSubPath(pt); else p.lineTo(pt);
                 pen = true;
@@ -1356,7 +1362,9 @@ public:
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
-            moveBoundary(d->edits, *ed.eff_, gesture == G::StretchR ? pressed : pressed - 1, dt, ed.selection_,
+            const int boundary = gesture == G::StretchR ? pressed : pressed - 1;
+            if (dt != 0) restoreDeleted(d->edits, boundary); // pulling an edge brings a deleted note back
+            moveBoundary(d->edits, *ed.eff_, boundary, dt, ed.selection_,
                          gesture == G::StretchL);
         }
         changed = true;
@@ -2871,6 +2879,14 @@ void PitchEditor::applyCorrection()
     });
 }
 
+// Alt+Delete: removes the selected notes, leaving silence; their edges can be dragged back.
+void PitchEditor::deleteSelection()
+{
+    if (selection_.empty() || eff_ == nullptr) return;
+    const std::set<int> sel = selection_;
+    edit([this, sel](Document& d) { glina::deleteNotes(d.edits, *eff_, sel); });
+}
+
 // M: mutes the selected notes; if all are muted already, unmutes them.
 void PitchEditor::toggleMuteSelection()
 {
@@ -3520,6 +3536,7 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) {
         if (hoverPin_ >= 0) { removePin(hoverPin_); return true; }
+        if (mods.isAltDown()) { deleteSelection(); return true; }
         resetNotes();
         return true;
     }
