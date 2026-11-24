@@ -232,6 +232,12 @@ bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, 
     return noNewFaults(before, after, limitsOf(a, before));
 }
 
+bool noNewLayoutFaults(const Analysis& a, const EditSet& e, const std::vector<NoteTimes>& before,
+                       const std::vector<NoteTimes>& after)
+{
+    return noNewFaults(before, after, limitsOf(a, before, e));
+}
+
 std::vector<bool> softSeparations(const EditSet& e, const Analysis& a)
 {
     const std::vector<NoteTimes> t = noteTimes(a, e);
@@ -293,6 +299,49 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
+    // Across deleted notes the dragged edge runs over them up to the next live note; from
+    // there on it carries that note's edge along, as across a soft separation (that note
+    // shrinks, its far end stays).
+    auto deletedAt = [&](int i) { return i >= 0 && i < (int)e.notes.size() && e.notes[(size_t)i].deleted; };
+    int live = -1; // the live note across the deleted ones, on the side the edge moves to
+    double contact = 0;
+    if (!startEdge && dt > 0 && deletedAt(left + 1) && !rightSelected) {
+        live = left + 1;
+        while (live < n && deletedAt(live)) ++live;
+        if (live >= n) live = -1;
+        else contact = base[(size_t)live].outStart - base[(size_t)left].outEnd;
+    } else if (startEdge && dt < 0 && deletedAt(left) && !(left >= 0 && sel.count(left))) {
+        live = left;
+        while (live >= 0 && deletedAt(live)) --live;
+        if (live >= 0) contact = base[(size_t)left + 1].outStart - base[(size_t)live].outEnd;
+    }
+    if (live >= 0 && contact >= 0 && std::abs(dt) > contact) {
+        const double toward = dt > 0 ? contact : -contact;
+        const double first = limitDt(toward, limitsOf(a, base, e), make);
+        if (std::abs(first - toward) > kChangeEps) { // stopped before it reached the live note
+            applyNoteTimes(e, a, make(first));
+            return first;
+        }
+        const std::vector<NoteTimes> mid = make(toward);
+        // The live note (with the selected notes next to it) is a block whose far end stays.
+        int b = live, c = live;
+        if (dt > 0) { while (c + 1 < n && sel.count(c + 1) && sel.count(live)) ++c; }
+        else { while (b - 1 >= 0 && sel.count(b - 1) && sel.count(live)) --b; }
+        auto make2 = [&](double d) {
+            std::vector<NoteTimes> t = mid;
+            if (dt > 0) {
+                layBlock(t, mid, e, L0, left, mid[(size_t)L0].outStart, mid[(size_t)left].outEnd + d);
+                layBlock(t, mid, e, b, c, mid[(size_t)b].outStart + d, mid[(size_t)c].outEnd);
+            } else {
+                layBlock(t, mid, e, left + 1, R1, mid[(size_t)left + 1].outStart + d, mid[(size_t)R1].outEnd);
+                layBlock(t, mid, e, b, c, mid[(size_t)b].outStart, mid[(size_t)c].outEnd + d);
+            }
+            return t;
+        };
+        const double second = limitDt(dt - toward, limitsOf(a, mid, e), make2);
+        applyNoteTimes(e, a, make2(second));
+        return toward + second;
+    }
     const double applied = limitDt(dt, limitsOf(a, base, e), make);
     applyNoteTimes(e, a, make(applied));
     return applied;

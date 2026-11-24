@@ -47,6 +47,9 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
 // True if going from layout `before` to `after` (same notes) breaks none of the conditions above
 // that held and makes no broken one worse.
 bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after);
+// The same, with deleted notes of `e` left out of the order checks (they give way).
+bool noNewLayoutFaults(const Analysis& a, const EditSet& e, const std::vector<NoteTimes>& before,
+                       const std::vector<NoteTimes>& after);
 
 // True if the separation between note `i` and `i + 1` is soft (see NoteEdit::sepBefore).
 bool softSeparation(const EditSet& e, const Analysis& a, int i);

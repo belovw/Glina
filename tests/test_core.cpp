@@ -1095,6 +1095,79 @@ static void testSeparations(const Analysis& a)
     }
 }
 
+static void testDeletedNeighbours(const Analysis& a)
+{
+    std::printf("[deleted] neighbours of deleted notes stretch over them, the cut runs through them\n");
+    const int n = (int)a.notes.size();
+    const auto spans = spansOf(a);
+    int p = -1; // notes p .. p+3, each long enough
+    for (int i = 0; i + 4 < n && p < 0; ++i) {
+        bool ok = true;
+        for (int k = i; k <= i + 3; ++k) ok = ok && spans[(size_t)k].end - spans[(size_t)k].start > 20;
+        if (ok) p = i;
+    }
+    if (p < 0) { std::printf("  skipped: no four long notes\n"); return; }
+    const double sr = a.sampleRate;
+    EditSet base;
+    base.notes.resize((size_t)n);
+    deleteNotes(base, a, {p + 1, p + 2});
+    const auto t0 = noteTimes(a, base);
+    // 1. The note before stretched past the live note after them: that one shrinks, its end stays.
+    {
+        EditSet e = base;
+        const double past = 0.3 * (t0[(size_t)p + 3].outEnd - t0[(size_t)p + 3].outStart);
+        const double dt = t0[(size_t)p + 3].outStart + past - t0[(size_t)p].outEnd;
+        const double applied = moveBoundary(e, a, p, dt, {p}, false);
+        const auto t1 = noteTimes(a, e);
+        std::printf("  stretch over: wanted %.4f s, applied %.4f s\n", dt, applied);
+        CHECK(std::abs(applied - dt) < 1e-6, "the stretch stopped at the live note (%.4f of %.4f)", applied, dt);
+        CHECK(std::abs(t1[(size_t)p + 3].outStart - t1[(size_t)p].outEnd) < 1e-6, "the live note starts where the stretched one ends");
+        CHECK(std::abs(t1[(size_t)p + 3].outEnd - t0[(size_t)p + 3].outEnd) < 1e-9, "the live note's end stays");
+        for (int k = p + 4; k < n; ++k)
+            CHECK(std::abs(t1[(size_t)k].outStart - t0[(size_t)k].outStart) < 1e-9, "note %d moved", k);
+    }
+    // 2. The live note after them pulled to the left by its start: it does not stretch to the right,
+    //    and the sound (time map) has it where the layout has it.
+    {
+        EditSet e = base;
+        const double dt = -0.8 * (t0[(size_t)p + 3].outStart - t0[(size_t)p].outEnd);
+        const double applied = moveBoundary(e, a, p + 2, dt, {p + 3}, true);
+        const auto t1 = noteTimes(a, e);
+        CHECK(std::abs(applied - dt) < 1e-6, "the start stopped early (%.4f of %.4f)", applied, dt);
+        CHECK(std::abs(t1[(size_t)p + 3].outEnd - t0[(size_t)p + 3].outEnd) < 1e-9, "its end moved");
+        const TimeMap m = TimeMap::build(a, e);
+        for (int k : {p, p + 3, p + 4})
+            CHECK(std::abs(m.noteStartOut((size_t)k) / sr - t1[(size_t)k].outStart) < 2e-3,
+                  "note %d sounds at %.4f s, the layout has %.4f s", k, m.noteStartOut((size_t)k) / sr, t1[(size_t)k].outStart);
+        CHECK(std::abs(m.noteEndOut((size_t)p + 3) / sr - t1[(size_t)p + 3].outEnd) < 2e-3, "its end sounds elsewhere");
+    }
+    // 3. The cut after note p moved (Alt) far to the right: it runs through both deleted notes up to
+    //    the live one; they are gone and their audio is part of note p.
+    {
+        Document d;
+        d.edits = base;
+        conform(d, a);
+        CHECK(moveCut(d, a, p, false, t0[(size_t)p + 3].outEnd), "the cut did not move");
+        CHECK((int)d.edits.notes.size() == n - 2, "the deleted notes are not gone (%zu notes)", d.edits.notes.size());
+        CHECK(d.edits.spans[(size_t)p].end == spans[(size_t)p + 3].start, "the cut stops at %d, the live note starts at %d",
+              d.edits.spans[(size_t)p].end, spans[(size_t)p + 3].start);
+        CHECK(!d.edits.notes[(size_t)p].deleted && !d.edits.notes[(size_t)p + 1].deleted, "a live note became deleted");
+    }
+    // ... and moved only into the first deleted note: the rest of it stays, deleted.
+    {
+        Document d;
+        d.edits = base;
+        conform(d, a);
+        const int mid = (spans[(size_t)p + 1].start + spans[(size_t)p + 1].end) / 2;
+        const double at = t0[(size_t)p].outEnd + (mid - spans[(size_t)p].end) * (double)a.hop / sr;
+        CHECK(moveCut(d, a, p, false, at), "the cut did not move");
+        CHECK((int)d.edits.notes.size() == n, "a note is gone");
+        CHECK(std::abs(d.edits.spans[(size_t)p].end - mid) <= 1, "the cut is at %d, not %d", d.edits.spans[(size_t)p].end, mid);
+        CHECK(d.edits.spans[(size_t)p + 1].start == d.edits.spans[(size_t)p].end && d.edits.notes[(size_t)p + 1].deleted,
+              "the rest of the deleted note is not kept deleted");
+    }
+}
+
 static void testMoveCut(const Analysis& a)
 {
     std::printf("[cut] moving a cut re-assigns audio between notes; the sound stays in time\n");
@@ -1876,6 +1949,7 @@ int main()
         testTimeFaults(a);
         testSeparations(a);
         testMoveCut(a);
+        testDeletedNeighbours(a);
         testSilentGaps(s, a, sr);
         testMute(s, a, sr);
         testDelete(s, a, sr);

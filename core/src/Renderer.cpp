@@ -2,6 +2,7 @@
 #include "glina/Editing.h"
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 
@@ -84,6 +85,19 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
     m.in_.push_back(0);
     m.out_.push_back(0);
     m.noteOut_.reserve(a.notes.size());
+    // A deleted note gives way on both sides: it ends no later than where the next live note
+    // (with the pause, its consonant or breath, before it) is placed, so it holds no one back.
+    std::vector<double> cap(a.notes.size(), std::numeric_limits<double>::infinity());
+    {
+        double next = std::numeric_limits<double>::infinity();
+        for (size_t i = a.notes.size(); i-- > 0;) {
+            const NoteEdit& ed = i < e.notes.size() ? e.notes[i] : kNoEdit;
+            if (ed.deleted) { cap[i] = next; continue; }
+            const double startIn = a.notes[i].startSec * sr;
+            const double prevEnd = i > 0 ? a.notes[i - 1].endSec * sr : startIn;
+            next = startIn + ed.timeOffsetSec * sr - std::max(0.0, startIn - prevEnd);
+        }
+    }
     double lastIn = 0, lastOut = 0;
     bool lastDeleted = false;
     for (size_t i = 0; i < a.notes.size(); ++i) {
@@ -99,6 +113,7 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         const double squeeze = ed.deleted || lastDeleted ? 1e-3 : 0.1;
         double ao = ai + ed.timeOffsetSec * sr;
         ao = std::max(ao, lastOut + squeeze * (ai - lastIn));
+        if (ed.deleted) ao = std::max(lastOut + squeeze * (ai - lastIn), std::min(ao, cap[i]));
         // Further from the audio before it than in the recording: the pause (breath, consonant)
         // keeps its length just before the note and the rest is silence. Stretched, the pause
         // (or, between notes that touched, the one sample of their joint) would buzz.
@@ -118,7 +133,8 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         double bo = ao + (bi - ai) * std::max(0.05, stretch);
         bo = std::max(bo, ao + 0.1 * (bi - ai));
         if (ed.deleted) // ends where its own layout ends, however far a neighbour pushed its start
-            bo = std::max(startIn + ed.timeOffsetSec * sr + (a.notes[i].endSec * sr - startIn) * std::max(0.05, stretch),
+            bo = std::max(std::min(startIn + ed.timeOffsetSec * sr + (a.notes[i].endSec * sr - startIn) * std::max(0.05, stretch),
+                                   cap[i]),
                           ao + 1e-3 * (bi - ai));
         m.in_.push_back(ai); m.out_.push_back(ao);
         // Only the steady middle of a note is stretched: the attack and the

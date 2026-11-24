@@ -123,6 +123,72 @@ bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double 
         return m.inStart + (out - m.outStart) * (m.inEnd - m.inStart) / std::max(1e-9, m.outEnd - m.outStart);
     };
 
+    // Moved into deleted notes next to it, the cut runs through them, up to the next live note:
+    // the note takes their audio back (it sounds again, as a part of this note). Deleted notes
+    // the cut passes are gone; one it stops inside keeps the rest of its audio, still deleted.
+    auto deletedAt = [&](int k) { return k >= 0 && k < n && k < (int)d.edits.notes.size() && d.edits.notes[(size_t)k].deleted; };
+    {
+        const int old = startEdge ? spans[(size_t)note].start : spans[(size_t)note].end;
+        int f = (int)std::lround(secFrame(note, inOf(note, outSec)));
+        const int dir = startEdge ? -1 : 1;
+        if (deletedAt(note + dir) && (f - old) * dir > 0) {
+            int live = note + dir;
+            while (deletedAt(live)) live += dir;
+            int lo = 0, hi = (int)eff.frames.size();
+            if (startEdge) {
+                if (live >= 0) lo = spans[(size_t)live].end;
+                hi = old - 1;
+            } else {
+                if (live < n) hi = spans[(size_t)live].start;
+                lo = old + 1;
+            }
+            if (const int sg = segOf(note); sg >= 0) {
+                lo = std::max(lo, (int)std::lround(eff.segments[(size_t)sg].first / hopSec));
+                hi = std::min(hi, (int)std::lround(eff.segments[(size_t)sg].second / hopSec));
+            }
+            if (lo > hi) return false;
+            f = std::clamp(f, lo, hi);
+            // A deleted note left with less than kMinFrames is taken whole.
+            for (int k = note + dir; k != live; k += dir) {
+                const NoteSpan& sp = spans[(size_t)k];
+                if (startEdge ? (f > sp.start && f < sp.end && f - sp.start < kMinFrames) : (f > sp.start && f < sp.end && sp.end - f < kMinFrames))
+                    f = startEdge ? sp.start : sp.end;
+            }
+            if (f == old) return false;
+            std::vector<NoteTimes> u = t;
+            std::vector<NoteSpan> s2 = spans;
+            const double sec = frameSec(note, f);
+            if (startEdge) { s2[(size_t)note].start = f; u[(size_t)note].inStart = sec; u[(size_t)note].outStart = outOf(note, sec); }
+            else { s2[(size_t)note].end = f; u[(size_t)note].inEnd = sec; u[(size_t)note].outEnd = outOf(note, sec); }
+            std::vector<int> gone;
+            for (int k = note + dir; k != live; k += dir) {
+                NoteSpan& sp = s2[(size_t)k];
+                if (startEdge ? sp.start >= f : sp.end <= f) { gone.push_back(k); continue; }
+                const bool cut = startEdge ? sp.end > f : sp.start < f;
+                if (!cut) continue;
+                const double ks = frameSec(k, f);
+                if (startEdge) { sp.end = f; u[(size_t)k].inEnd = ks; u[(size_t)k].outEnd = outOf(k, ks); }
+                else { sp.start = f; u[(size_t)k].inStart = ks; u[(size_t)k].outStart = outOf(k, ks); }
+            }
+            if (!noNewLayoutFaults(eff, d.edits, t, u)) return false;
+            conform(d, eff);
+            d.edits.spans = s2;
+            for (int k = 0; k < n; ++k)
+                if (k == note || (deletedAt(k) && std::find(gone.begin(), gone.end(), k) == gone.end()))
+                    if (u[(size_t)k].inStart != t[(size_t)k].inStart || u[(size_t)k].inEnd != t[(size_t)k].inEnd)
+                        setNoteTimes(d.edits.notes[(size_t)k], u[(size_t)k]);
+            std::sort(gone.begin(), gone.end());
+            for (auto it = gone.rbegin(); it != gone.rend(); ++it) {
+                const int k = *it;
+                d.edits.spans.erase(d.edits.spans.begin() + k);
+                d.edits.notes.erase(d.edits.notes.begin() + k);
+                for (auto& v : d.voices)
+                    if (!v.noteMask.empty() && k < (int)v.noteMask.size()) v.noteMask.erase(v.noteMask.begin() + k);
+            }
+            return true;
+        }
+    }
+
     // Which note's mapping the new cut falls under: the note that now plays that moment;
     // with no shared cut, the moved note's own (extended past its edge if need be).
     const double cutOut = startEdge ? t[(size_t)note].outStart : t[(size_t)note].outEnd;

@@ -1368,7 +1368,6 @@ public:
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
             const int boundary = gesture == G::StretchR ? pressed : pressed - 1;
-            if (dt != 0 && e.mods.isAltDown()) restoreDeleted(d->edits, boundary); // Alt: brings a deleted note back
             moveBoundary(d->edits, *ed.eff_, boundary, dt, ed.selection_,
                          gesture == G::StretchL);
         }
@@ -2897,6 +2896,7 @@ void PitchEditor::deleteSelection()
 {
     if (selection_.empty() || eff_ == nullptr) return;
     const std::set<int> sel = selection_;
+    selection_.clear(); // deleted notes are hidden: they do not stay selected
     edit([this, sel](Document& d) { glina::deleteNotes(d.edits, *eff_, sel); });
 }
 
@@ -3187,7 +3187,14 @@ void PitchEditor::moveCutAt(int note, bool startEdge, double outSecond)
 {
     if (eff_ == nullptr || note < 0 || note >= (int)eff_->notes.size()) { refresh(); return; }
     const Analysis& a = *eff_;
-    edit([&](Document& d) { moveCut(d, a, note, startEdge, outSecond); }, true);
+    const size_t before = doc() != nullptr ? doc()->edits.notes.size() : 0;
+    size_t after = before;
+    edit([&](Document& d) { moveCut(d, a, note, startEdge, outSecond); after = d.edits.notes.size(); }, true);
+    // A cut run through deleted notes takes them away: the dragged note stays selected under its new index.
+    if (after < before) {
+        selection_ = {startEdge ? note - (int)(before - after) : note};
+        refresh();
+    }
 }
 
 void PitchEditor::joinAt(int left)
