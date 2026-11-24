@@ -3524,6 +3524,8 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         togglePlay();
         return true;
     }
+    // Ctrl+Delete: delete the selected notes (silent, pulled back by an edge).
+    if (cmd && code == juce::KeyPress::deleteKey) { deleteSelection(); return true; }
     if (cmd) return false;
 
     if (code == juce::KeyPress::upKey || code == juce::KeyPress::downKey) {
@@ -3536,7 +3538,6 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) {
         if (hoverPin_ >= 0) { removePin(hoverPin_); return true; }
-        if (mods.isAltDown()) { deleteSelection(); return true; }
         resetNotes();
         return true;
     }
