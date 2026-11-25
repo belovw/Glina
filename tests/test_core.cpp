@@ -280,6 +280,102 @@ static void testDocumentIO(const Analysis& a)
     CHECK(r.keyMode == 2 && std::abs(r.snapAmount - 0.6) < 1e-9, "scale mode lost");
     Document plain; // default mode and snap: no new record, same bytes as before
     CHECK(serialize(plain).find("\nmode ") == std::string::npos, "default mode written");
+    CHECK(serialize(plain).find("leadmix") == std::string::npos, "default lead mix written");
+    Document cm = d; if (cm.edits.notes.size() > 1) cm.edits.notes[1].consMuted = true;
+    Document cr;
+    CHECK(deserialize(serialize(cm), cr) && cr.edits.notes.size() > 1 && cr.edits.notes[1].consMuted, "consonant mute lost on save");
+    Document mu = d; if (mu.edits.notes.size() > 1) mu.edits.notes[1].muted = true;
+    Document mr;
+    CHECK(deserialize(serialize(mu), mr), "mute parse failed");
+    CHECK(mr.edits.notes.size() > 1 && mr.edits.notes[1].muted, "mute lost on save");
+    Document lm = d; lm.leadEnabled = false; lm.leadPan = 0.5;
+    Document lr;
+    CHECK(deserialize(serialize(lm), lr), "lead mix parse failed");
+    CHECK(!lr.leadEnabled && std::abs(lr.leadPan - 0.5) < 1e-9, "lead enable / pan lost");
+}
+
+// Mute: a muted note goes silent and keeps its place; the others are unchanged.
+static void testDelete(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[delete] a deleted note is silent; pulling its edge brings it back\n");
+    if (a.notes.size() < 3) { std::printf("  skipped: too few notes\n"); return; }
+    EditSet plain;
+    plain.notes.resize(a.notes.size());
+    const size_t k = 1;
+    EditSet del = plain;
+    deleteNotes(del, a, {(int)k});
+    CHECK(del.notes[k].deleted && del.notes[k].consMuted, "delete did not set the flags");
+    const auto y0 = render(s.audio.data(), s.audio.size(), a, plain);
+    const auto y1 = render(s.audio.data(), s.audio.size(), a, del);
+    auto rms = [&](const std::vector<float>& y) {
+        const size_t from = (size_t)(a.notes[k].startSec * sr), to = (size_t)(a.notes[k].endSec * sr);
+        double acc = 0;
+        for (size_t t = from; t < to && t < y.size(); ++t) acc += (double)y[t] * y[t];
+        return std::sqrt(acc / std::max<size_t>(1, to - from));
+    };
+    const double before = rms(y0), after = rms(y1);
+    CHECK(before > 1e-3, "note %zu silent even without delete", k);
+    // Neighbours' grain windows reach ~30 ms into it; their own audio, not the deleted note.
+    CHECK(after < before * 1e-2, "deleted note still sounds: %.6f vs %.6f", after, before);
+    // Alt-drag of its edge brings it back.
+    EditSet back = del;
+    restoreDeleted(back, (int)k - 1);
+    CHECK(!back.notes[k].deleted, "alt-drag did not bring the deleted note back");
+    EditSet br = plain;
+    deleteBreaths(br, a, {(int)k});
+    restoreDeleted(br, (int)k - 1);
+    CHECK(!br.notes[k].breathDeleted, "alt-drag did not bring the breath back");
+    // The note before a deleted one stretched over it: the notes after stay where they were.
+    if (a.notes.size() >= 4) {
+        EditSet over = plain;
+        deleteNotes(over, a, {1, 2});
+        const std::vector<NoteTimes> t0 = noteTimes(a, over);
+        const double want = t0[3].outStart - 1e-3; // just before the next live note
+        moveBoundary(over, a, 0, want - t0[0].outEnd, {0}, false);
+        const std::vector<NoteTimes> t1 = noteTimes(a, over);
+        CHECK(t1[0].outEnd > t0[2].outStart, "the stretch did not reach over the deleted notes (%.3f)", t1[0].outEnd);
+        const TimeMap m0 = TimeMap::build(a, plain), m1 = TimeMap::build(a, over);
+        for (size_t i = 3; i < a.notes.size(); ++i)
+            CHECK(std::abs(m1.noteStartOut(i) - m0.noteStartOut(i)) < 1e-3 * sr,
+                  "note %zu pushed by the stretch over deleted notes: %.4f s", i,
+                  (m1.noteStartOut(i) - m0.noteStartOut(i)) / sr);
+    }
+}
+
+static void testMute(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[mute] a muted note is silent, the rest keep sounding\n");
+    (void)s;
+    if (a.notes.size() < 3) { std::printf("  skipped: too few notes\n"); return; }
+    EditSet plain;
+    plain.notes.resize(a.notes.size());
+    EditSet muted = plain;
+    const size_t k = 1;
+    muted.notes[k].muted = true;
+    const auto y0 = render(s.audio.data(), s.audio.size(), a, plain);
+    const auto y1 = render(s.audio.data(), s.audio.size(), a, muted);
+    CHECK(y0.size() == y1.size(), "length changed by mute");
+    auto rms = [&](const std::vector<float>& y, size_t i) {
+        const size_t from = (size_t)(a.notes[i].startSec * sr), to = (size_t)(a.notes[i].endSec * sr);
+        double acc = 0;
+        for (size_t t = from; t < to && t < y.size(); ++t) acc += (double)y[t] * y[t];
+        return std::sqrt(acc / std::max<size_t>(1, to - from));
+    };
+    const double before = rms(y0, k), after = rms(y1, k);
+    CHECK(before > 1e-3, "note %zu silent even without mute", k);
+    CHECK(after < before * 1e-3, "muted note still sounds: %.6f vs %.6f", after, before);
+    // Muted consonant in front of note k: the gap before it is silent.
+    EditSet cons = plain;
+    cons.notes[k].consMuted = true;
+    const auto y2 = render(s.audio.data(), s.audio.size(), a, cons);
+    const double g0 = a.notes[k - 1].endFrame * (double)a.hop / sr, g1 = a.notes[k].startFrame * (double)a.hop / sr;
+    const size_t from = (size_t)(g0 * sr), to = (size_t)(g1 * sr);
+    double gacc = 0;
+    for (size_t t = from; t < to && t < y2.size(); ++t) gacc += (double)y2[t] * y2[t];
+    CHECK(to <= from || gacc < 1e-6, "muted consonant still sounds: %.3g", gacc);
+    const double other0 = rms(y0, 0), other1 = rms(y1, 0);
+    CHECK(std::abs(other0 - other1) < 0.02 * other0, "neighbour changed by mute: %.6f vs %.6f", other0, other1);
+    std::printf("  note %zu rms %.4f -> %.6f when muted; neighbour %.4f -> %.4f\n", k, before, after, other0, other1);
 }
 
 // Scale steps per mode, and the key a document resolves to.
@@ -871,6 +967,570 @@ static void testDocumentV4(const Analysis& a)
     CHECK(deserialize(plain, p) && !p.edits.autoVibrato.active() && p.edits.notes[2].tiltR == 0, "v3 loads with features off");
 }
 
+// The worst overlap of any note with any earlier one (independent of the library's checks).
+static double worstOverlap(const std::vector<NoteTimes>& t)
+{
+    double w = 0, latest = -1e9;
+    for (const NoteTimes& n : t) {
+        w = std::max(w, latest - n.outStart);
+        latest = std::max(latest, n.outEnd);
+    }
+    return w;
+}
+
+static void testTrackViewCut()
+{
+    std::printf("[track view] a note cut at an item's edge keeps its place in time\n");
+    const double sr = 48000;
+    std::vector<test::SynthNote> melB = test::demoMelody();
+    for (auto& n : melB) n.midi += 2;
+    const test::SynthResult sa = test::synthesize(test::demoMelody(), sr);
+    const test::SynthResult sb = test::synthesize(melB, sr, 30, 5.2, 777);
+    auto effA = std::make_shared<const Analysis>(analyze(sa.audio.data(), sa.audio.size(), sr));
+    auto effB = std::make_shared<const Analysis>(analyze(sb.audio.data(), sb.audio.size(), sr));
+    const double hopSec = (double)effA->hop / sr;
+    std::vector<TrackPiece> pieces(2);
+    pieces[0].eff = effA;
+    pieces[0].winEnd = (double)effA->numSamples / sr;
+    pieces[1].eff = effB;
+    pieces[1].winStart = 0.05;
+    pieces[1].winEnd = (double)effB->numSamples / sr;
+    pieces[1].placeSec = pieces[0].winEnd + 0.3;
+    conform(pieces[0].doc, *effA);
+    conform(pieces[1].doc, *effB);
+    TrackView v;
+    if (!buildTrackView(pieces, 0, v) || v.analysis == nullptr) { CHECK(false, "view not built"); return; }
+    const Analysis& va = *v.analysis;
+    const size_t nA = effA->notes.size();
+    // One stretched view note running from A's last note into B's first one.
+    Document d = v.doc;
+    d.edits.spans[nA - 1].end = d.edits.spans[nA].end;
+    d.edits.spans.erase(d.edits.spans.begin() + (long)nA);
+    d.edits.notes.erase(d.edits.notes.begin() + (long)nA);
+    d.edits.notes[nA - 1].stretch = 1.2;
+    const auto docs = splitTrackView(v, d, pieces);
+    if (docs.size() != 2) { CHECK(false, "split back"); return; }
+    Document db = docs[1];
+    const Analysis effB2 = withLayout(*effB, db.edits.spans);
+    conform(db, effB2);
+    const NoteTimes tb = noteTimes(effB2, db.edits)[0];
+    const int off = v.maps[1].frameOffset;
+    const double vIn0 = va.notes[nA - 1].startSec;
+    const double cutIn = tb.inStart + off * hopSec;           // the cut, in view time
+    const double expected = vIn0 + (cutIn - vIn0) * 1.2;      // where the view note's output had reached there
+    const double got = tb.outStart + off * hopSec;
+    std::printf("  part in item B starts at %.4f s, the note had reached %.4f s there\n", got, expected);
+    CHECK(std::abs(got - expected) < 1e-6, "the part in item B continues the note (%.6f vs %.6f)", got, expected);
+}
+
+static void testSeparations(const Analysis& a)
+{
+    std::printf("[separations] soft: the neighbour follows; hard: it stays; saved with the project\n");
+    const int n = (int)a.notes.size();
+    EditSet e0;
+    e0.notes.resize((size_t)n);
+    const auto t = noteTimes(a, e0);
+    int touch = -1, gap = -1; // a touching pair (b, b+1) and a pair with a gap, both away from the ends
+    for (int b = 1; b + 2 < n; ++b) {
+        const double g = t[(size_t)b + 1].outStart - t[(size_t)b].outEnd;
+        if (touch < 0 && std::abs(g) < 0.005) touch = b;
+        if (gap < 0 && g > 0.03 && g < 0.5) gap = b;
+    }
+    std::printf("  touching pair at %d, pair with a gap at %d\n", touch, gap);
+    if (touch < 0 || gap < 0) { CHECK(false, "demo melody has both kinds of pairs"); return; }
+
+    CHECK(softSeparation(e0, a, touch), "touching notes: soft by default");
+    CHECK(!softSeparation(e0, a, gap), "notes with a gap: hard by default");
+
+    { // soft (default): moving the right note drags the left note's end
+        EditSet e = e0;
+        const double applied = moveNotes(e, a, {touch + 1}, 0.02);
+        const auto u = noteTimes(a, e);
+        CHECK(applied > 0.019 && std::abs(u[(size_t)touch].outEnd - (t[(size_t)touch].outEnd + 0.02)) < 1e-9,
+              "soft: the left neighbour's end follows");
+    }
+    { // hard: the left neighbour stays, a gap opens
+        EditSet e = e0;
+        toggleSeparation(e, a, touch);
+        CHECK(!softSeparation(e, a, touch), "toggled to hard");
+        const double applied = moveNotes(e, a, {touch + 1}, 0.02);
+        const auto u = noteTimes(a, e);
+        CHECK(applied > 0.019 && std::abs(u[(size_t)touch].outEnd - t[(size_t)touch].outEnd) < 1e-9,
+              "hard: the left neighbour stays put");
+        EditSet e2 = e0;
+        toggleSeparation(e2, a, touch);
+        const double into = moveNotes(e2, a, {touch + 1}, -0.02);
+        CHECK(std::abs(into) < 1e-9, "hard: a move into the touching neighbour is stopped (%.4f)", into);
+        // edge drag across a hard separation moves only the dragged edge
+        EditSet e3 = e0;
+        toggleSeparation(e3, a, touch);
+        moveBoundary(e3, a, touch, -0.02, {}, false);
+        const auto v = noteTimes(a, e3);
+        CHECK(std::abs(v[(size_t)touch + 1].outStart - t[(size_t)touch + 1].outStart) < 1e-9, "hard: edge drag leaves the neighbour");
+    }
+    { // soft across a gap: the neighbour follows and the gap is kept
+        EditSet e = e0;
+        toggleSeparation(e, a, gap);
+        CHECK(softSeparation(e, a, gap), "toggled to soft");
+        moveNotes(e, a, {gap + 1}, 0.01);
+        const auto u = noteTimes(a, e);
+        const double g0 = t[(size_t)gap + 1].outStart - t[(size_t)gap].outEnd;
+        const double g1 = u[(size_t)gap + 1].outStart - u[(size_t)gap].outEnd;
+        CHECK(std::abs(g1 - g0) < 1e-9, "soft across a gap: the gap is kept (%.4f vs %.4f)", g1, g0);
+    }
+    { // saved and read back; reset keeps it
+        Document d;
+        d.edits = e0;
+        toggleSeparation(d.edits, a, touch);
+        toggleSeparation(d.edits, a, gap);
+        Document r;
+        CHECK(deserialize(serialize(d), r), "reads back");
+        CHECK(r.edits.notes.size() == d.edits.notes.size() && !softSeparation(r.edits, a, touch) && softSeparation(r.edits, a, gap),
+              "separations survive save and load");
+        Document plain;
+        plain.edits = e0;
+        CHECK(serialize(plain).find("seps") == std::string::npos, "nothing extra is written without separations");
+        resetNoteEdits(r.edits, a, {touch, touch + 1, gap, gap + 1});
+        CHECK(!softSeparation(r.edits, a, touch) && softSeparation(r.edits, a, gap), "reset keeps separations");
+    }
+}
+
+static void testDeletedNeighbours(const test::SynthResult& s, const Analysis& a)
+{
+    std::printf("[deleted] neighbours of deleted notes stretch over them, the cut runs through them\n");
+    const int n = (int)a.notes.size();
+    const auto spans = spansOf(a);
+    int p = -1; // notes p .. p+3, each long enough
+    for (int i = 0; i + 4 < n && p < 0; ++i) {
+        bool ok = true;
+        for (int k = i; k <= i + 3; ++k) ok = ok && spans[(size_t)k].end - spans[(size_t)k].start > 20;
+        if (ok) p = i;
+    }
+    if (p < 0) { std::printf("  skipped: no four long notes\n"); return; }
+    const double sr = a.sampleRate;
+    EditSet base;
+    base.notes.resize((size_t)n);
+    deleteNotes(base, a, {p + 1, p + 2});
+    const auto t0 = noteTimes(a, base);
+    // 1. The note before stretched past the start of the live note after them: it lies over
+    //    that note (overlap); that note is neither moved nor squeezed, nothing after it moves.
+    {
+        EditSet e = base;
+        const double past = 0.3 * (t0[(size_t)p + 3].outEnd - t0[(size_t)p + 3].outStart);
+        const double dt = t0[(size_t)p + 3].outStart + past - t0[(size_t)p].outEnd;
+        const double applied = moveBoundary(e, a, p, dt, {p}, false, true);
+        const auto t1 = noteTimes(a, e);
+        std::printf("  stretch over: wanted %.4f s, applied %.4f s\n", dt, applied);
+        CHECK(std::abs(applied - dt) < 1e-6, "the stretch stopped (%.4f of %.4f)", applied, dt);
+        for (int k = p + 3; k < n; ++k)
+            CHECK(std::abs(t1[(size_t)k].outStart - t0[(size_t)k].outStart) < 1e-9 && std::abs(t1[(size_t)k].outEnd - t0[(size_t)k].outEnd) < 1e-9,
+                  "note %d moved or changed its length", k);
+        const TimeMap m0 = TimeMap::build(a, base), m = TimeMap::build(a, e);
+        CHECK(m.overlays().size() == 1 && m.overlays()[0].note == (size_t)p, "no overlay for the stretched note");
+        CHECK(std::abs(m.noteEndOut((size_t)p) / sr - t1[(size_t)p].outEnd) < 1e-3, "the overlay does not end where the note ends");
+        for (int k = p + 3; k < n; ++k)
+            CHECK(std::abs(m.noteStartOut((size_t)k) - m0.noteStartOut((size_t)k)) < 1.0, "note %d sounds elsewhere (%.1f samples)", k,
+                  m.noteStartOut((size_t)k) - m0.noteStartOut((size_t)k));
+        // Heard: the note under it sounds as before once the overlay is over; under the overlay
+        // both play (louder than the note alone).
+        const auto y0 = render(s.audio.data(), s.audio.size(), a, base), y1 = render(s.audio.data(), s.audio.size(), a, e);
+        auto rms = [&](const std::vector<float>& y, double from, double to) {
+            double acc = 0;
+            size_t cnt = 0;
+            for (size_t t = (size_t)(from * sr); t < (size_t)(to * sr) && t < y.size(); ++t, ++cnt) acc += (double)y[t] * y[t];
+            return std::sqrt(acc / std::max<size_t>(1, cnt));
+        };
+        // After it, the level of the note follows the original (grains may sit at other phases).
+        const double after0 = t1[(size_t)p].outEnd + 0.04, after1 = t1[(size_t)p + 3].outEnd - 0.01;
+        double worst = 0;
+        for (double w = after0; w + 0.02 <= after1; w += 0.02) {
+            const double r0 = rms(y0, w, w + 0.02), r1 = rms(y1, w, w + 0.02);
+            if (r0 > 1e-3) worst = std::max(worst, std::abs(r1 / r0 - 1.0));
+        }
+        std::printf("  overlay: under it %.4f (alone %.4f); after it the level differs by %.1f %% at most\n",
+                    rms(y1, t1[(size_t)p + 3].outStart + 0.01, t1[(size_t)p].outEnd - 0.01),
+                    rms(y0, t1[(size_t)p + 3].outStart + 0.01, t1[(size_t)p].outEnd - 0.01), 100 * worst);
+        CHECK(worst < 0.1, "the note under the overlay sounds different after it (%.1f %%)", 100 * worst);
+        CHECK(rms(y1, t1[(size_t)p + 3].outStart + 0.01, t1[(size_t)p].outEnd - 0.01) >
+                  1.05 * rms(y0, t1[(size_t)p + 3].outStart + 0.01, t1[(size_t)p].outEnd - 0.01),
+              "the overlay is not heard");
+        // On past the end of the note it lies over: nothing after it moves either.
+        EditSet far = base;
+        const double dtFar = t0[(size_t)p + 3].outEnd + 0.05 - t0[(size_t)p].outEnd;
+        CHECK(std::abs(moveBoundary(far, a, p, dtFar, {p}, false, true) - dtFar) < 1e-6, "the stretch stopped at the end of the note under it");
+        const auto tf = noteTimes(a, far);
+        for (int k = p + 3; k < n; ++k)
+            CHECK(std::abs(tf[(size_t)k].outStart - t0[(size_t)k].outStart) < 1e-9, "note %d moved by the long stretch", k);
+        const TimeMap mf = TimeMap::build(a, far);
+        for (int k = p + 3; k < n; ++k)
+            CHECK(std::abs(mf.noteStartOut((size_t)k) - m0.noteStartOut((size_t)k)) < 1.0, "note %d sounds elsewhere after the long stretch", k);
+        const auto yf = render(s.audio.data(), s.audio.size(), a, far);
+        CHECK(yf.size() == y0.size(), "the long stretch changed the length");
+    }
+    // 2. The live note after them pulled to the left by its start: it does not stretch to the right,
+    //    and the sound (time map) has it where the layout has it; past the note before, it lies over it.
+    {
+        EditSet e = base;
+        const double dt = -0.8 * (t0[(size_t)p + 3].outStart - t0[(size_t)p].outEnd);
+        const double applied = moveBoundary(e, a, p + 2, dt, {p + 3}, true, true);
+        const auto t1 = noteTimes(a, e);
+        CHECK(std::abs(applied - dt) < 1e-6, "the start stopped early (%.4f of %.4f)", applied, dt);
+        CHECK(std::abs(t1[(size_t)p + 3].outEnd - t0[(size_t)p + 3].outEnd) < 1e-9, "its end moved");
+        const TimeMap m = TimeMap::build(a, e);
+        for (int k : {p, p + 3, p + 4})
+            CHECK(std::abs(m.noteStartOut((size_t)k) / sr - t1[(size_t)k].outStart) < 2e-3,
+                  "note %d sounds at %.4f s, the layout has %.4f s", k, m.noteStartOut((size_t)k) / sr, t1[(size_t)k].outStart);
+        CHECK(std::abs(m.noteEndOut((size_t)p + 3) / sr - t1[(size_t)p + 3].outEnd) < 2e-3, "its end sounds elsewhere");
+        EditSet over = base;
+        const double dt2 = t0[(size_t)p].outEnd - 0.4 * (t0[(size_t)p].outEnd - t0[(size_t)p].outStart) - t0[(size_t)p + 3].outStart;
+        const double applied2 = moveBoundary(over, a, p + 2, dt2, {p + 3}, true, true);
+        const auto t2 = noteTimes(a, over);
+        CHECK(std::abs(applied2 - dt2) < 1e-6, "the start stopped at the note before (%.4f of %.4f)", applied2, dt2);
+        CHECK(std::abs(t2[(size_t)p].outStart - t0[(size_t)p].outStart) < 1e-9 && std::abs(t2[(size_t)p].outEnd - t0[(size_t)p].outEnd) < 1e-9,
+              "the note before changed");
+        const TimeMap m2 = TimeMap::build(a, over);
+        CHECK(std::abs(m2.noteStartOut((size_t)p + 3) / sr - t2[(size_t)p + 3].outStart) < 2e-3, "the pulled note sounds at %.4f s, not %.4f s",
+              m2.noteStartOut((size_t)p + 3) / sr, t2[(size_t)p + 3].outStart);
+        CHECK(std::abs(m2.noteEndOut((size_t)p) / sr - t2[(size_t)p].outEnd) < 2e-3, "the note before does not keep its end");
+        // On past the start of the note before: that note is all under it.
+        EditSet back = base;
+        const double dt3 = t0[(size_t)p].outStart - 0.05 - t0[(size_t)p + 3].outStart;
+        CHECK(std::abs(moveBoundary(back, a, p + 2, dt3, {p + 3}, true, true) - dt3) < 1e-6, "the start stopped at the start of the note before");
+        const auto t3 = noteTimes(a, back);
+        const TimeMap m3 = TimeMap::build(a, back);
+        CHECK(std::abs(m3.noteStartOut((size_t)p + 3) / sr - t3[(size_t)p + 3].outStart) < 2e-3, "pulled back far, it sounds at %.4f s, not %.4f s",
+              m3.noteStartOut((size_t)p + 3) / sr, t3[(size_t)p + 3].outStart);
+        CHECK(std::abs(m3.noteStartOut((size_t)p) / sr - t3[(size_t)p].outStart) < 2e-3 && std::abs(m3.noteEndOut((size_t)p) / sr - t3[(size_t)p].outEnd) < 2e-3,
+              "the note under it sounds elsewhere");
+        const auto y3 = render(s.audio.data(), s.audio.size(), a, back);
+        CHECK(!y3.empty(), "render");
+    }
+    // 3. The cut after note p moved (Alt) far to the right: it runs through both deleted notes up to
+    //    the live one; they are gone and their audio is part of note p.
+    {
+        Document d;
+        d.edits = base;
+        conform(d, a);
+        CHECK(moveCut(d, a, p, false, t0[(size_t)p + 3].outEnd), "the cut did not move");
+        CHECK((int)d.edits.notes.size() == n - 2, "the deleted notes are not gone (%zu notes)", d.edits.notes.size());
+        CHECK(d.edits.spans[(size_t)p].end == spans[(size_t)p + 3].start, "the cut stops at %d, the live note starts at %d",
+              d.edits.spans[(size_t)p].end, spans[(size_t)p + 3].start);
+        CHECK(!d.edits.notes[(size_t)p].deleted && !d.edits.notes[(size_t)p + 1].deleted, "a live note became deleted");
+    }
+    // ... and moved only into the first deleted note: the rest of it stays, deleted.
+    {
+        Document d;
+        d.edits = base;
+        conform(d, a);
+        const int mid = (spans[(size_t)p + 1].start + spans[(size_t)p + 1].end) / 2;
+        const double at = t0[(size_t)p].outEnd + (mid - spans[(size_t)p].end) * (double)a.hop / sr;
+        CHECK(moveCut(d, a, p, false, at), "the cut did not move");
+        CHECK((int)d.edits.notes.size() == n, "a note is gone");
+        CHECK(std::abs(d.edits.spans[(size_t)p].end - mid) <= 1, "the cut is at %d, not %d", d.edits.spans[(size_t)p].end, mid);
+        CHECK(d.edits.spans[(size_t)p + 1].start == d.edits.spans[(size_t)p].end && d.edits.notes[(size_t)p + 1].deleted,
+              "the rest of the deleted note is not kept deleted");
+    }
+}
+
+static void testMoveCut(const Analysis& a)
+{
+    std::printf("[cut] moving a cut re-assigns audio between notes; the sound stays in time\n");
+    const int n = (int)a.notes.size();
+    const auto spans = spansOf(a);
+    int b = -1; // two notes that touch in the source
+    for (int i = 1; i + 2 < n; ++i)
+        if (spans[(size_t)i].end == spans[(size_t)i + 1].start && spans[(size_t)i].end - spans[(size_t)i].start > 30 &&
+            spans[(size_t)i + 1].end - spans[(size_t)i + 1].start > 30) { b = i; break; }
+    if (b < 0) { CHECK(false, "demo melody has two long notes touching in the source"); return; }
+    const double hopSec = (double)a.hop / a.sampleRate;
+
+    // Untouched notes: the cut moves 10 frames left; both notes stay unedited in time.
+    {
+        Document d;
+        conform(d, a);
+        const auto t0 = noteTimes(a, d.edits);
+        const double target = t0[(size_t)b].outEnd - 10 * hopSec;
+        CHECK(moveCut(d, a, b, false, target), "cut moved");
+        CHECK(d.edits.spans[(size_t)b].end == spans[(size_t)b].end - 10 && d.edits.spans[(size_t)b + 1].start == spans[(size_t)b].end - 10,
+              "the shared cut is 10 frames earlier (%d)", d.edits.spans[(size_t)b].end);
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        bool still = true;
+        for (const auto& t : noteTimes(eff, d.edits)) still = still && std::abs(t.outStart - t.inStart) < 1e-9 && std::abs(t.outEnd - t.inEnd) < 1e-9;
+        CHECK(still, "no note is moved or stretched by moving a cut");
+    }
+    // A stretched pair: the audio at the new cut plays where it did; the pair's outer ends stay.
+    {
+        Document d;
+        conform(d, a);
+        const auto t00 = noteTimes(a, d.edits);
+        setNoteDuration(d.edits, a, b, (t00[(size_t)b].inEnd - t00[(size_t)b].inStart) * 1.3); // the right note gives way (soft)
+        const auto t0 = noteTimes(a, d.edits);
+        const double target = t0[(size_t)b].outEnd + 12 * hopSec; // into the right note
+        CHECK(moveCut(d, a, b, false, target), "cut moved into the right note");
+        const int f = d.edits.spans[(size_t)b].end;
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto t1 = noteTimes(eff, d.edits);
+        // where the right note played source frame f before
+        const NoteTimes& R0 = t0[(size_t)b + 1];
+        const double secF = eff.notes[(size_t)b + 1].startSec;
+        const double expected = R0.outStart + (secF - R0.inStart) * (R0.outEnd - R0.outStart) / (R0.inEnd - R0.inStart);
+        std::printf("  cut to frame %d: notes meet at %.5f s, that audio played at %.5f s before\n", f, t1[(size_t)b].outEnd, expected);
+        CHECK(std::abs(t1[(size_t)b].outEnd - expected) < 1e-6 && std::abs(t1[(size_t)b + 1].outStart - expected) < 1e-6,
+              "the audio at the new cut plays where it did");
+        CHECK(std::abs(t1[(size_t)b].outStart - t0[(size_t)b].outStart) < 1e-9 && std::abs(t1[(size_t)b + 1].outEnd - t0[(size_t)b + 1].outEnd) < 1e-9,
+              "the pair's outer ends stay");
+        CHECK(worstOverlap(t1) < 1e-9, "no overlap");
+    }
+    // Limits: a cut dragged far stops so that each note keeps ~20 ms.
+    {
+        Document d;
+        conform(d, a);
+        CHECK(moveCut(d, a, b, false, 0.0), "cut dragged to the far left");
+        CHECK(d.edits.spans[(size_t)b].end - d.edits.spans[(size_t)b].start == 4, "the left note keeps 4 frames (%d)",
+              d.edits.spans[(size_t)b].end - d.edits.spans[(size_t)b].start);
+    }
+    // Pulled apart (hard separation): the dragged edge follows the pointer, the gap stays.
+    {
+        Document d;
+        conform(d, a);
+        toggleSeparation(d.edits, a, b);
+        moveBoundary(d.edits, a, b, -0.1, {}, false); // the left note ends 0.1 s earlier
+        const auto t0 = noteTimes(a, d.edits);
+        const double g0 = t0[(size_t)b + 1].outStart - t0[(size_t)b].outEnd;
+        CHECK(g0 > 0.09, "a gap is open (%.4f)", g0);
+        const double target = t0[(size_t)b + 1].outStart - 5 * hopSec; // the right note's start, 5 frames left
+        CHECK(moveCut(d, a, b + 1, true, target), "cut moved");
+        CHECK(d.edits.spans[(size_t)b + 1].start == spans[(size_t)b].end - 5, "the cut is 5 frames earlier (%d)",
+              d.edits.spans[(size_t)b + 1].start - spans[(size_t)b].end);
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto t1 = noteTimes(eff, d.edits);
+        const double g1 = t1[(size_t)b + 1].outStart - t1[(size_t)b].outEnd;
+        std::printf("  apart: gap %.4f s before, %.4f s after; right note starts %.4f s (pointer %.4f s)\n", g0, g1,
+                    t1[(size_t)b + 1].outStart, target);
+        CHECK(std::abs(t1[(size_t)b + 1].outStart - target) < 1e-6, "the dragged edge follows the pointer");
+        CHECK(g1 > 0.5 * g0, "the gap stays open");
+        CHECK(std::abs(t1[(size_t)b + 1].outEnd - t0[(size_t)b + 1].outEnd) < 1e-9 && std::abs(t1[(size_t)b].outStart - t0[(size_t)b].outStart) < 1e-9,
+              "the outer ends stay");
+    }
+}
+
+static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double sr)
+{
+    std::printf("[gaps] notes pulled apart: the gap is silent; a pause keeps its length before the later note\n");
+    const int n = (int)a.notes.size();
+    EditSet e0;
+    e0.notes.resize((size_t)n);
+    const auto t = noteTimes(a, e0);
+    int touch = -1, gap = -1;
+    for (int b = 1; b + 2 < n; ++b) {
+        const double g = t[(size_t)b + 1].outStart - t[(size_t)b].outEnd;
+        const double dl = t[(size_t)b].outEnd - t[(size_t)b].outStart, dr = t[(size_t)b + 1].outEnd - t[(size_t)b + 1].outStart;
+        if (touch < 0 && std::abs(g) < 0.005 && dl > 0.3 && dr > 0.15) touch = b;
+        if (gap < 0 && g > 0.03 && g < 0.5 && dr > 0.15) gap = b;
+    }
+    std::printf("  touching pair at %d, pair with a pause at %d\n", touch, gap);
+    if (touch < 0 || gap < 0) { CHECK(false, "demo melody has both kinds of pairs"); return; }
+    const double fade = kSilenceFadeSec * sr;
+    const std::vector<float> y0 = render(s.audio.data(), s.audio.size(), a, e0);
+
+    { // soft: the neighbour follows, nothing opens
+        EditSet e = e0;
+        moveNotes(e, a, {touch + 1}, 0.02);
+        CHECK(TimeMap::build(a, e).silences().empty(), "soft move: no silence");
+    }
+    { // hard: the left note's end pulled back 0.2 s; the right note stays
+        EditSet e = e0;
+        toggleSeparation(e, a, touch);
+        const double applied = moveBoundary(e, a, touch, -0.2, {}, false);
+        const TimeMap m = TimeMap::build(a, e);
+        CHECK(applied < -0.19, "the edge moved (%.4f)", applied);
+        CHECK(m.silences().size() == 1, "one silence (%d)", (int)m.silences().size());
+        if (m.silences().size() != 1) return;
+        const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
+        std::printf("  touching pair: silence %.4f..%.4f s\n", s0 / sr, s1 / sr);
+        CHECK(std::abs(s0 - m.noteEndOut((size_t)touch)) < 1e-6 && std::abs(s1 - m.noteStartOut((size_t)touch + 1)) < 1e-6,
+              "the silence is the gap between the notes");
+        CHECK(std::abs(m.noteStartOut((size_t)touch + 1) / sr - t[(size_t)touch + 1].outStart) < 2.0 / sr, "the right note stays in place");
+        CHECK(std::abs((s1 - s0) / sr - 0.2) < 0.003, "the gap is 0.2 s (%.4f)", (s1 - s0) / sr);
+        const double joint = a.notes[(size_t)touch].endSec * sr;
+        CHECK(std::abs(m.inToOutBefore(joint) - s0) < 1 && std::abs(m.inToOut(joint) - s1) < 1, "the joint maps to both ends of the silence");
+        // The line of the right note's first frame sits after the silence, the left note's last before it.
+        const int fr = a.notes[(size_t)touch + 1].startFrame;
+        CHECK(m.silenceBetween((fr - 1) * (double)a.hop, fr * (double)a.hop), "the pitch line breaks at the silence");
+        CHECK(m.inToOut(fr * (double)a.hop) > s1 && m.inToOut((fr - 1) * (double)a.hop) < s0, "frames on either side");
+        const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
+        CHECK(y.size() == y0.size(), "the clip keeps its length");
+        double peak = 0;
+        for (long o = (long)std::ceil(s0); o < (long)std::floor(s1) && o < (long)y.size(); ++o) peak = std::max(peak, std::abs((double)y[(size_t)o]));
+        double after = 0;
+        for (long o = (long)(s1 + fade); o < (long)(s1 + fade + 0.05 * sr) && o < (long)y.size(); ++o) after += (double)y[(size_t)o] * y[(size_t)o];
+        after = std::sqrt(after / (0.05 * sr));
+        std::printf("  rendered: peak in the gap %.6f, level after it %.4f\n", peak, after);
+        CHECK(peak == 0, "the gap is silent");
+        CHECK(after > 0.01, "the right note sounds after it");
+        CHECK(m.gainAt(0.5 * (s0 + s1), fade) == 0 && m.gainAt(s1 + 2 * fade, fade) == 1 && m.gainAt(s0 - 2 * fade, fade) == 1,
+              "A/B follows the same silence");
+        const double mid = m.gainAt(s0 - 0.5 * fade, fade);
+        CHECK(mid > 0.4 && mid < 0.6, "a short fade before the silence (%.3f)", mid);
+    }
+    { // a pause between the notes: the right note moved later; the pause keeps its length before it
+        EditSet e = e0;
+        const double applied = moveNotes(e, a, {gap + 1}, 0.1);
+        const TimeMap m = TimeMap::build(a, e);
+        const double pause = a.notes[(size_t)gap + 1].startSec - a.notes[(size_t)gap].endSec;
+        std::printf("  pause %.4f s, note moved %.4f s, %d silence(s)\n", pause, applied, (int)m.silences().size());
+        CHECK(applied > 3 * kMinSilenceSec, "the note moved");
+        CHECK(m.silences().size() == 1, "one silence");
+        if (m.silences().size() != 1) return;
+        const double r = m.noteStartOut((size_t)gap + 1) / sr;
+        CHECK(std::abs(m.silences()[0].second / sr - (r - pause)) < 1e-6, "the silence ends where the pause begins");
+        CHECK(std::abs((m.silences()[0].second - m.silences()[0].first) / sr - applied) < 1e-3, "the silence is the move");
+        CHECK(std::abs(m.outToIn((r - 0.5 * pause) * sr) / sr - (a.notes[(size_t)gap + 1].startSec - 0.5 * pause)) < 1e-6,
+              "the pause plays at its own speed just before the note");
+    }
+    { // grown by less than the shortest silence: stretched as before
+        EditSet e = e0;
+        moveNotes(e, a, {gap + 1}, 0.5 * kMinSilenceSec);
+        CHECK(TimeMap::build(a, e).silences().empty(), "a small widening: no silence");
+    }
+    { // the last note shortened: the tail keeps its length, silence fills the clip to its end
+        EditSet e = e0;
+        const double applied = moveBoundary(e, a, n - 1, -0.2, {}, false);
+        const TimeMap m = TimeMap::build(a, e);
+        CHECK(applied < -0.19 && m.silences().size() == 1, "tail: one silence (%d, %.4f)", (int)m.silences().size(), applied);
+        if (m.silences().size() != 1) return;
+        const double tail = (double)a.numSamples - a.notes[(size_t)n - 1].endSec * sr;
+        CHECK(std::abs(m.silences()[0].first - m.noteEndOut((size_t)n - 1) - tail) < 2, "the tail keeps its length");
+        CHECK(std::abs(m.silences()[0].second - m.inToOut((double)a.numSamples)) < 1e-6 &&
+                  std::abs(m.inToOut((double)a.numSamples) - (double)a.numSamples) < 1e-6,
+              "silence to the clip's end; the clip keeps its length");
+    }
+}
+
+static void testTimeFaults(const Analysis& a)
+{
+    std::printf("[time edits] a fault elsewhere does not block; reset, split, join keep the layout sound\n");
+    const int n = (int)a.notes.size();
+    if (n < 8) { CHECK(false, "need 8 notes"); return; }
+
+    // An overlap left by an earlier build (note 2 pulled back onto note 1).
+    EditSet bad;
+    bad.notes.resize((size_t)n);
+    {
+        const auto t = noteTimes(a, bad);
+        bad.notes[2].timeOffsetSec = -0.5 * (t[1].outEnd - t[1].outStart);
+    }
+    const double ov = worstOverlap(noteTimes(a, bad));
+    CHECK(ov > 0.01, "setup: an overlap exists (%.4f)", ov);
+    {
+        EditSet e = bad;
+        const double applied = moveNotes(e, a, {6}, 0.01);
+        std::printf("  move far from the overlap: applied %.4f of 0.01\n", applied);
+        CHECK(std::abs(applied - 0.01) < 1e-9, "a move far from an overlap is not blocked (%.4f)", applied);
+        CHECK(std::abs(worstOverlap(noteTimes(a, e)) - ov) < 1e-9, "the old overlap is untouched");
+    }
+    {
+        EditSet e = bad;
+        const double deeper = moveNotes(e, a, {2}, -0.01);
+        CHECK(deeper == 0, "the overlapping note may not go deeper (%.4f)", deeper);
+        const double away = moveNotes(e, a, {2}, 0.01);
+        CHECK(std::abs(away - 0.01) < 1e-9, "the overlapping note may move away (%.4f)", away);
+        CHECK(worstOverlap(noteTimes(a, e)) < ov - 0.009, "moving away shrinks the overlap");
+    }
+
+    // Reset: a moved run goes back as one block, touching neighbours follow.
+    {
+        EditSet e;
+        e.notes.resize((size_t)n);
+        const double applied = moveNotes(e, a, {3, 4}, 0.04);
+        CHECK(applied > 0.02, "setup: run moved (%.4f)", applied);
+        e.notes[3].pitchOffset = 1;
+        resetNoteEdits(e, a, {3, 4});
+        double worst = 0;
+        for (const auto& t : noteTimes(a, e)) worst = std::max({worst, std::abs(t.outStart - t.inStart), std::abs(t.outEnd - t.inEnd)});
+        std::printf("  reset of a moved run: every note within %.2g s of its recorded time\n", worst);
+        CHECK(worst < 1e-9, "reset brings the run and its touching neighbours back (%.3g)", worst);
+        CHECK(e.notes[3].pitchOffset == 0, "reset clears the pitch");
+    }
+    // Reset of a note whose recorded place is taken now: pitch goes, timing stays.
+    {
+        EditSet e;
+        e.notes.resize((size_t)n);
+        std::set<int> tail;
+        for (int i = 4; i < n; ++i) tail.insert(i);
+        const double applied = moveNotes(e, a, tail, 0.06);
+        if (applied > 0.05) {
+            auto t = noteTimes(a, e);
+            NoteTimes n3 = t[3];
+            n3.outEnd = t[4].inStart + 0.03; // note 3 now reaches into note 4's recorded place, not touching it
+            setNoteTimes(e.notes[3], n3);
+            e.notes[4].pitchOffset = 1;
+            const auto before = noteTimes(a, e);
+            CHECK(worstOverlap(before) < 1e-9, "setup: sound layout");
+            resetNoteEdits(e, a, {4});
+            const auto after = noteTimes(a, e);
+            CHECK(std::abs(after[4].outStart - before[4].outStart) < 1e-9 && std::abs(after[4].outEnd - before[4].outEnd) < 1e-9,
+                  "note 4 keeps its timing: its recorded place is taken");
+            CHECK(e.notes[4].pitchOffset == 0, "note 4's pitch is reset anyway");
+            CHECK(worstOverlap(after) < 1e-9, "reset makes no overlap");
+        } else {
+            CHECK(false, "setup: tail moved (%.4f)", applied);
+        }
+    }
+
+    // Split of a stretched note: the halves stay where the note was.
+    {
+        Document d;
+        conform(d, a);
+        const auto t0 = noteTimes(a, d.edits);
+        setNoteDuration(d.edits, a, 2, (t0[2].inEnd - t0[2].inStart) * 1.5);
+        const auto before = noteTimes(a, d.edits);
+        const Note& nn = a.notes[2];
+        const int frame = (nn.startFrame + nn.endFrame) / 2;
+        CHECK(splitNote(d, a, 2, frame), "split done");
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto after = noteTimes(eff, d.edits);
+        std::printf("  split of a stretched note: halves %.4f-%.4f | %.4f-%.4f, note was %.4f-%.4f\n", after[2].outStart,
+                    after[2].outEnd, after[3].outStart, after[3].outEnd, before[2].outStart, before[2].outEnd);
+        CHECK(std::abs(after[2].outStart - before[2].outStart) < 1e-9, "left half starts where the note did");
+        CHECK(std::abs(after[3].outEnd - before[2].outEnd) < 1e-9, "right half ends where the note did");
+        CHECK(std::abs(after[3].outStart - after[2].outEnd) < 1e-9, "the halves touch");
+        CHECK(worstOverlap(after) < 1e-9, "split makes no overlap");
+    }
+    // A note squeezed to its minimal length is not split (its halves would be too short).
+    {
+        Document d;
+        conform(d, a);
+        setNoteDuration(d.edits, a, 2, 0.03);
+        const Note& nn = a.notes[2];
+        CHECK(!splitNote(d, a, 2, (nn.startFrame + nn.endFrame) / 2), "a squeezed note is not split");
+    }
+
+    // Join of two notes with different timing: the joined note covers both.
+    {
+        Document d;
+        conform(d, a);
+        const auto t0 = noteTimes(a, d.edits);
+        moveBoundary(d.edits, a, 3, 0.03, {}, false); // note 3 longer, note 4 shorter (if they touch)
+        moveNotes(d.edits, a, {4}, 0.02);
+        const auto before = noteTimes(a, d.edits);
+        CHECK(joinNotes(d, a, 3), "join done");
+        const Analysis eff = withLayout(a, d.edits.spans);
+        conform(d, eff);
+        const auto after = noteTimes(eff, d.edits);
+        std::printf("  join: %.4f-%.4f + %.4f-%.4f -> %.4f-%.4f\n", before[3].outStart, before[3].outEnd, before[4].outStart,
+                    before[4].outEnd, after[3].outStart, after[3].outEnd);
+        CHECK(std::abs(after[3].outStart - before[3].outStart) < 1e-9, "joined note starts where the left one did");
+        CHECK(std::abs(after[3].outEnd - before[4].outEnd) < 1e-9, "joined note ends where the right one did");
+        CHECK(worstOverlap(after) < 1e-9, "join makes no overlap");
+        (void)t0;
+    }
+}
+
 static void testTransfer(const Analysis& a)
 {
     std::printf("[transfer A] note edits copied with per-parameter share\n");
@@ -1254,6 +1914,47 @@ static void testIntervalFix()
                   e.notes[(size_t)i].pitchOffset, want);
         }
     }
+    // With the edits of the time tools: a deleted note a neighbour is stretched over, and a note
+    // dragged over the next one (an overlay). F places every live note where it pulled it: neither
+    // the deleted note nor the overlay pushes the notes after them.
+    for (int variant = 0; variant < 2; ++variant) {
+        const auto a = customer(0, 505 + (uint32_t)variant);
+        EditSet e;
+        e.notes.resize(a->notes.size());
+        const auto b0 = noteTimes(*a, e);
+        if (variant == 0) {
+            deleteNotes(e, *a, {4});
+            e.notes[3].stretch = (b0[4].outEnd - b0[3].outStart) / (b0[3].inEnd - b0[3].inStart); // over note 4
+        } else {
+            e.notes[3].sepBefore = NoteEdit::Sep::Hard;
+            const double end = b0[3].outStart + 0.6 * (b0[3].outEnd - b0[3].outStart); // into note 3
+            e.notes[2].stretch = (end - b0[2].outStart) / (b0[2].inEnd - b0[2].inStart);
+        }
+        AlignInfo inf;
+        const Warp w = alignThreads(thread(*a, e), refT, intervalAlignOptions(0), {}, &inf);
+        IntervalOptions o;
+        o.timeAmount = 1.0;
+        const auto f = planIntervalFix(*a, e, amin, refT, w, {}, o);
+        const bool ok = applyIntervalFix(e, *a, f);
+        const auto t = noteTimes(*a, e);
+        double worst = 0;
+        int worstNote = -1;
+        for (const auto& x : f) {
+            if (!x.timed || e.notes[(size_t)x.note].deleted) continue;
+            const double d = std::max(std::abs(t[(size_t)x.note].outStart - x.outStart), std::abs(t[(size_t)x.note].outEnd - x.outEnd));
+            if (d > worst) { worst = d; worstNote = x.note; }
+        }
+        const char* name = variant == 0 ? "a deleted note under a neighbour" : "an overlay";
+        std::printf("  %-34s time placed: %s, worst live note %.1f ms from its pull (note %d)\n", name, ok ? "yes" : "NO",
+                    worst * 1000, worstNote);
+        CHECK(ok, "%s: time not placed", name);
+        CHECK(worst < 0.005, "%s: note %d placed %.1f ms from where F pulled it", name, worstNote, worst * 1000);
+        if (variant == 0) {
+            bool untouched = true;
+            for (const auto& x : f) untouched = untouched && (x.note != 4 || (!x.timed && x.pitchDelta == 0));
+            CHECK(untouched, "the deleted note was pulled");
+        }
+    }
     { // a time tolerance larger than any difference: no time change
         const auto a = customer(0, 504);
         EditSet e;
@@ -1559,6 +2260,7 @@ int main()
     testIntervalFix();
     testMelismaCuts();
     testTrackView();
+    testTrackViewCut();
     testPins();
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
@@ -1587,6 +2289,13 @@ int main()
         testAutoVibrato(sr);
         testDocumentV4(a);
         testTransfer(a);
+        testTimeFaults(a);
+        testSeparations(a);
+        testMoveCut(a);
+        testDeletedNeighbours(s, a);
+        testSilentGaps(s, a, sr);
+        testMute(s, a, sr);
+        testDelete(s, a, sr);
     }
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

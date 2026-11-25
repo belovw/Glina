@@ -25,6 +25,8 @@ struct Document {
     int keyMode = -1;
     double snapAmount = 1.0; // share of the way "К ладу" moves a note to its step, 0..1
     double leadGainDb = 0;   // lead level in the mix (harmonies have their own)
+    bool leadEnabled = true; // false: the lead is left out of the mix (its checkbox)
+    double leadPan = 0;      // lead position in the mix, -1 (left) .. +1 (right)
     // Musical grid for the standalone app (a DAW host supplies its own tempo map).
     double tempoBpm = 0;     // 0 = show seconds
     int beatsPerBar = 4;
@@ -47,6 +49,14 @@ void conform(Document& d, const Analysis& eff);
 bool splitNote(Document& d, const Analysis& eff, int note, int frame);
 // Join note `note` with the next one (must be adjacent or separated by < 40 ms).
 bool joinNotes(Document& d, const Analysis& eff, int note);
+// Move a cut, for when the analysis put a note boundary in the wrong place: the edge of `note`
+// (its start if `startEdge`, else its end) goes to the source audio now heard at `outSec`.
+// The sound stays where it is in time; only which note a piece of audio belongs to changes
+// (with it, the pitch edit applied to it). If the neighbour on that side touches the note in
+// the source, the shared cut moves and the neighbour grows or shrinks; otherwise only this
+// note's edge moves (not past the neighbour). Each note keeps ~20 ms; a move that would make
+// notes overlap is refused. Returns true if the layout changed.
+bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double outSec);
 
 // Cuts notes where planMelismaCuts says (splitNote, so each piece keeps the note's edits).
 // `eff` is the analysis for `d` as it is; `rebuild` returns it again after each cut (the layout

@@ -2,6 +2,7 @@
 #include "glina/Editing.h"
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 
@@ -80,54 +81,206 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
 {
     TimeMap m;
     const double sr = a.sampleRate;
+    const double minSilence = kMinSilenceSec * sr;
     m.in_.push_back(0);
     m.out_.push_back(0);
+    m.noteOut_.reserve(a.notes.size());
+    // A deleted note gives way on both sides: it ends no later than where the next live note
+    // (with the pause, its consonant or breath, before it) is placed, so it holds no one back.
+    // A live note that reaches past that point (of any later live note) overlaps it: the part
+    // past it, with its pause if it comes to that, is an overlay (liveCap).
+    std::vector<double> cap(a.notes.size(), std::numeric_limits<double>::infinity());
+    std::vector<double> liveCap(a.notes.size(), std::numeric_limits<double>::infinity());
+    {
+        double next = std::numeric_limits<double>::infinity();
+        for (size_t i = a.notes.size(); i-- > 0;) {
+            const NoteEdit& ed = i < e.notes.size() ? e.notes[i] : kNoEdit;
+            if (ed.deleted) { cap[i] = next; continue; }
+            liveCap[i] = next;
+            const double startIn = a.notes[i].startSec * sr;
+            const double prevEnd = i > 0 ? a.notes[i - 1].endSec * sr : startIn;
+            // The earliest of the later notes: one pulled back past several notes caps them all.
+            next = std::min(next, startIn + ed.timeOffsetSec * sr - std::max(0.0, startIn - prevEnd));
+        }
+    }
     double lastIn = 0, lastOut = 0;
+    bool lastDeleted = false; // also: the last note overlaps the next one
+    m.mainEnd_.reserve(a.notes.size());
     for (size_t i = 0; i < a.notes.size(); ++i) {
         const NoteEdit& ed = i < e.notes.size() ? e.notes[i] : kNoEdit;
         const double stretch = ed.consonant ? 1.0 : ed.stretch;
         if (ed.timeOffsetSec != 0 || stretch != 1) m.identity_ = false;
-        const double ai = std::max(lastIn + 1, a.notes[i].startSec * sr);
-        const double bi = std::max(ai + 1, a.notes[i].endSec * sr);
+        const double startIn = a.notes[i].startSec * sr;
+        double ai = std::max(lastIn + 1, startIn);
         // A note keeps its own position unless moved; a stretched or moved
-        // neighbour that would overlap pushes it later instead.
+        // neighbour that would overlap pushes it later instead. A deleted note (silent)
+        // and the pause next to it give way instead: a neighbour stretched over them
+        // squeezes them and does not push the notes after them.
+        const double squeeze = ed.deleted || lastDeleted ? 1e-3 : 0.1;
         double ao = ai + ed.timeOffsetSec * sr;
-        ao = std::max(ao, lastOut + 0.1 * (ai - lastIn));
+        ao = std::max(ao, lastOut + squeeze * (ai - lastIn));
+        if (ed.deleted) ao = std::max(lastOut + squeeze * (ai - lastIn), std::min(ao, cap[i]));
+        // Further from the audio before it than in the recording: the pause (breath, consonant)
+        // keeps its length just before the note and the rest is silence. Stretched, the pause
+        // (or, between notes that touched, the one sample of their joint) would buzz.
+        // seg: the map from (lastIn, lastOut) on: the pause (with a silence) and the note.
+        std::vector<std::pair<double, double>> seg;
+        const double pauseIn = std::max(0.0, startIn - lastIn);
+        double sil0 = -1, sil1 = -1;
+        if (ao - lastOut - pauseIn > minSilence) {
+            sil0 = lastOut;
+            sil1 = ao - pauseIn;
+            if (pauseIn > 0) seg.emplace_back(lastIn, sil1);
+            else ai = lastIn; // the notes touched: this one starts where the last one ended
+        }
+        const double bi = std::max(ai + 1, a.notes[i].endSec * sr);
         double bo = ao + (bi - ai) * std::max(0.05, stretch);
         bo = std::max(bo, ao + 0.1 * (bi - ai));
-        m.in_.push_back(ai); m.out_.push_back(ao);
+        if (ed.deleted) // ends where its own layout ends, however far a neighbour pushed its start
+            bo = std::max(std::min(startIn + ed.timeOffsetSec * sr + (a.notes[i].endSec * sr - startIn) * std::max(0.05, stretch),
+                                   cap[i]),
+                          ao + 1e-3 * (bi - ai));
+        seg.emplace_back(ai, ao);
         // Only the steady middle of a note is stretched: the attack and the
         // transition into the next note keep their timing, so transients stay crisp.
         const double din = bi - ai, dout = bo - ao;
         const double att = std::min(0.040 * sr, 0.30 * din), rel = std::min(0.030 * sr, 0.20 * din);
-        if (std::abs(dout - din) > 1 && dout - att - rel > 0.15 * (din - att - rel)) {
-            m.in_.push_back(ai + att); m.out_.push_back(ao + att);
-            m.in_.push_back(bi - rel); m.out_.push_back(bo - rel);
+        if (!ed.deleted && std::abs(dout - din) > 1 && dout - att - rel > 0.15 * (din - att - rel)) {
+            seg.emplace_back(ai + att, ao + att);
+            seg.emplace_back(bi - rel, bo - rel);
         }
-        m.in_.push_back(bi); m.out_.push_back(bo);
-        lastIn = bi; lastOut = bo;
+        seg.emplace_back(bi, bo);
+        m.noteOut_.emplace_back(ao, bo);
+        double mainEnd = bo;
+        bool overlaps = false;
+        if (!ed.deleted && bo > liveCap[i] + 1.0) {
+            // Over a later live note: the main map stops where that note's pause begins; the rest
+            // of this note (and of its pause, if the later note reaches back that far) is an overlay.
+            const double cut = std::max(liveCap[i], lastOut);
+            std::pair<double, double> prev{lastIn, lastOut};
+            size_t k = 0;
+            while (k + 1 < seg.size() && seg[k].second <= cut) prev = seg[k++];
+            const auto [i0, o0] = prev;
+            const auto [i1, o1] = seg[k];
+            std::vector<std::pair<double, double>> main(seg.begin(), seg.begin() + (long)k);
+            Overlay ov;
+            ov.note = i;
+            double inCut = i0;
+            if (i1 > i0) {
+                inCut = o1 > o0 ? i0 + (i1 - i0) * (cut - o0) / (o1 - o0) : i0;
+                ov.in.push_back(inCut);
+                ov.out.push_back(cut);
+                main.emplace_back(inCut, cut);
+            } else {
+                main.emplace_back(i0, cut); // inside the silence: the overlay starts after it
+            }
+            for (size_t j = k; j < seg.size(); ++j) { ov.in.push_back(seg[j].first); ov.out.push_back(seg[j].second); }
+            mainEnd = cut + 1e-3 * (bi - inCut);
+            main.emplace_back(bi, mainEnd);
+            seg = std::move(main);
+            if (sil0 >= 0) sil1 = std::min(sil1, cut);
+            m.overlays_.push_back(std::move(ov));
+            overlaps = true;
+        }
+        if (sil0 >= 0 && sil1 - sil0 > 0.5) {
+            m.silence_.emplace_back(sil0, sil1);
+            m.silenceIn_.push_back(lastIn);
+        }
+        for (const auto& [pi, po] : seg) { m.in_.push_back(pi); m.out_.push_back(po); }
+        m.mainEnd_.push_back(mainEnd);
+        lastIn = bi; lastOut = mainEnd;
+        lastDeleted = ed.deleted || overlaps;
     }
     const double end = std::max((double)a.numSamples, lastIn + 1);
-    m.in_.push_back(end);
     // The clip keeps its length (in a DAW the item does not grow): the tail after
-    // the last note absorbs any change, unless notes were pushed past the end.
-    m.out_.push_back(e.keepLength ? std::max(end, lastOut + 0.1 * (end - lastIn)) : lastOut + (end - lastIn));
-    if (m.identity_) { m.in_ = {0, end}; m.out_ = {0, end}; }
+    // the last note absorbs any change, unless notes were pushed past the end. A tail
+    // that would grow keeps its length after the last note and silence fills the rest.
+    const double endOut = e.keepLength ? std::max(end, lastOut + 0.1 * (end - lastIn)) : lastOut + (end - lastIn);
+    const double tailIn = end - lastIn;
+    if (!a.notes.empty() && endOut - lastOut - tailIn > minSilence) {
+        m.in_.push_back(end);
+        m.out_.push_back(lastOut + tailIn);
+        m.silence_.emplace_back(lastOut + tailIn, endOut);
+        m.silenceIn_.push_back(end);
+    }
+    m.in_.push_back(end);
+    m.out_.push_back(endOut);
+    if (m.identity_) {
+        m.in_ = {0, end};
+        m.out_ = {0, end};
+        m.silence_.clear();
+        m.silenceIn_.clear();
+        m.overlays_.clear();
+    }
     return m;
 }
 
+// Where xs holds the same time twice (a silence: input time stands still), interpMap
+// gives the later output and interpMapBefore the earlier one.
 static double interpMap(const std::vector<double>& xs, const std::vector<double>& ys, double t)
 {
     if (xs.size() < 2) return t;
-    if (t <= xs.front()) return ys.front() + (t - xs.front());
+    if (t < xs.front()) return ys.front() + (t - xs.front());
     if (t >= xs.back()) return ys.back() + (t - xs.back());
     const size_t j = std::upper_bound(xs.begin(), xs.end(), t) - xs.begin();
     const double x0 = xs[j - 1], x1 = xs[j], y0 = ys[j - 1], y1 = ys[j];
     return x1 > x0 ? y0 + (y1 - y0) * (t - x0) / (x1 - x0) : y0;
 }
 
-double TimeMap::inToOut(double t) const { return identity_ ? t : interpMap(in_, out_, t); }
+static double interpMapBefore(const std::vector<double>& xs, const std::vector<double>& ys, double t)
+{
+    if (xs.size() < 2) return t;
+    if (t <= xs.front()) return ys.front() + (t - xs.front());
+    if (t > xs.back()) return ys.back() + (t - xs.back());
+    const size_t j = std::lower_bound(xs.begin(), xs.end(), t) - xs.begin(); // first x >= t (j >= 1)
+    if (xs[j] == t) return ys[j];
+    const double x0 = xs[j - 1], x1 = xs[j], y0 = ys[j - 1], y1 = ys[j];
+    return x1 > x0 ? y0 + (y1 - y0) * (t - x0) / (x1 - x0) : y0;
+}
+
+double TimeMap::mainInToOut(double t) const { return identity_ ? t : interpMap(in_, out_, t); }
+double TimeMap::inToOut(double t) const
+{
+    for (const Overlay& v : overlays_)
+        if (t > v.in.front() && t <= v.in.back()) return interpMap(v.in, v.out, t);
+    return mainInToOut(t);
+}
+double TimeMap::inToOutBefore(double t) const
+{
+    for (const Overlay& v : overlays_)
+        if (t > v.in.front() && t <= v.in.back()) return interpMapBefore(v.in, v.out, t);
+    return identity_ ? t : interpMapBefore(in_, out_, t);
+}
 double TimeMap::outToIn(double t) const { return identity_ ? t : interpMap(out_, in_, t); }
+
+bool TimeMap::silenceBetween(double inA, double inB) const
+{
+    const auto it = std::upper_bound(silenceIn_.begin(), silenceIn_.end(), inA);
+    return it != silenceIn_.end() && *it <= inB;
+}
+
+namespace {
+// Level around one silence [s0, s1): fades out over `fade` before it, in after it.
+double silenceEnv(double t, double s0, double s1, double fade)
+{
+    if (t >= s0 && t < s1) return 0.0;
+    if (fade <= 0) return 1.0;
+    if (t < s0 && t >= s0 - fade) return 0.5 + 0.5 * std::cos(M_PI * (t - (s0 - fade)) / fade);
+    if (t >= s1 && t < s1 + fade) return 0.5 - 0.5 * std::cos(M_PI * (t - s1) / fade);
+    return 1.0;
+}
+} // namespace
+
+double TimeMap::gainAt(double t, double fade) const
+{
+    if (silence_.empty()) return 1.0;
+    // The first silence whose fade-in is not over by t; then every one whose fade-out has begun.
+    auto it = std::lower_bound(silence_.begin(), silence_.end(), t,
+                               [&](const std::pair<double, double>& s, double x) { return s.second + fade <= x; });
+    double g = 1.0;
+    for (; it != silence_.end() && it->first - fade <= t; ++it) g *= silenceEnv(t, it->first, it->second, fade);
+    return g;
+}
 
 // ---------------------------------------------------------------------------
 // Auto vibrato of one note, on the OUTPUT timeline (a stretched note keeps its
@@ -141,7 +294,10 @@ static bool addAutoVibrato(const Analysis& a, const TimeMap& map, const AutoVibr
     const Note& nt = a.notes[(size_t)ni];
     const double sr = a.sampleRate;
     const double t0 = map.inToOut(nt.startFrame * (double)a.hop) / sr;
-    const double t1 = map.inToOut(nt.endFrame * (double)a.hop) / sr;
+    double t1 = map.inToOut(nt.endFrame * (double)a.hop) / sr;
+    // A silence opened at the note's end: the vibrato fades out before it, as at the clip's end.
+    if (map.silenceBetween(nt.endSec * sr - 1, nt.endFrame * (double)a.hop))
+        t1 = map.inToOutBefore(nt.endSec * sr) / sr + 0.5 * a.hop / sr;
     const double rate = std::clamp(v.rateHz, 0.5, 20.0);
     const double delay = std::max(0.0, v.delayMs / 1000.0);
     if (t1 - t0 <= delay) return false;
@@ -364,36 +520,52 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
 
     const Controls c = buildControls(a, e);
     const TimeMap map = TimeMap::build(a, e);
-    const double outLen = map.inToOut((double)n);
+    const double outLen = map.mainInToOut((double)n);
     const size_t outN = (size_t)std::max(0.0, std::ceil(outLen));
     std::vector<double> acc(outN + 4096, 0.0);
-
-    uint32_t rng = 0x9E3779B9u;
-    size_t i = 0;
-    long lastGrain = -1;
-    double ts = map.inToOut(M[0].pos);
-
-    while (ts < outLen) {
-        const double tau = map.outToIn(ts);
-        while (i + 1 < M.size() && std::abs(M[i + 1].pos - tau) <= std::abs(M[i].pos - tau)) ++i;
-
-        size_t g = i;
-        // Time-stretched noise: avoid repeating the very same unvoiced grain (buzz).
-        if (!M[g].voiced && (long)g == lastGrain) {
-            rng = rng * 1664525u + 1013904223u;
-            const size_t alt = (rng >> 16) & 1 ? g + 1 : (g > 0 ? g - 1 : g + 1);
-            if (alt < M.size() && !M[alt].voiced) g = alt;
+    // Frames of deleted notes, and the consonant or breath before each: their grains are left
+    // out (a neighbour stretched over them still sounds).
+    std::vector<char> deletedFrame(a.frames.size(), 0);
+    for (size_t i = 0; i < e.notes.size() && i < a.notes.size(); ++i)
+        if (e.notes[i].deleted) {
+            const int from = i > 0 ? a.notes[i - 1].endFrame : 0;
+            for (int f = std::max(0, from); f < std::min(a.notes[i].endFrame, (int)deletedFrame.size()); ++f) deletedFrame[(size_t)f] = 1;
         }
-        lastGrain = (long)g;
-        const PitchMark& mk = M[g];
+    auto skipped = [&](double pos) {
+        const size_t fr = (size_t)std::max(0.0, pos / a.hop);
+        return fr < deletedFrame.size() && deletedFrame[fr];
+    };
+    // In an overlay (which may carry the pause before its note): a muted consonant and deleted
+    // breaths there are left out, as the main map silences them.
+    std::vector<char> quietFrame(a.frames.size(), 0);
+    for (size_t i = 0; i < e.notes.size() && i < a.notes.size(); ++i) {
+        if (!e.notes[i].consMuted && !e.notes[i].breathDeleted) continue;
+        const int from = std::max(0, i > 0 ? a.notes[i - 1].endFrame : 0);
+        for (int f = from; f < std::min(a.notes[i].startFrame, (int)quietFrame.size()); ++f)
+            if (e.notes[i].consMuted || a.frames[(size_t)f].kind == FrameKind::Breath) quietFrame[(size_t)f] = 1;
+    }
+    auto quiet = [&](double pos) {
+        const size_t fr = (size_t)std::max(0.0, pos / a.hop);
+        return fr < quietFrame.size() && quietFrame[fr];
+    };
+    auto inOverlay = [&](double pos) {
+        for (const auto& v : map.overlays())
+            if (pos > v.in.front() && pos <= v.in.back()) return true;
+        return false;
+    };
 
+    // One grain (pitch mark g) placed at output time ts; returns the step to the next one, or
+    // 0 for a mark that has no grain.
+    auto grain = [&](size_t g, double ts) -> double {
+        const PitchMark& mk = M[g];
         double halfR = g + 1 < M.size() ? M[g + 1].pos - mk.pos : 0.0;
         double halfL = g > 0 ? mk.pos - M[g - 1].pos : halfR;
         if (halfR <= 0) halfR = halfL;
-        if (halfL <= 0 || halfR <= 0) { ts += 1.0; continue; }
+        if (halfL <= 0 || halfR <= 0) return 0.0;
         const double maxHalf = 0.03 * a.sampleRate;
         halfL = std::min(halfL, maxHalf);
         halfR = std::min(halfR, maxHalf);
+        if (skipped(mk.pos)) return -halfR;
 
         const double frame = mk.pos / a.hop;
         const bool voiced = mk.voiced;
@@ -412,8 +584,95 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
             if (w <= 0) continue;
             acc[o] += gain * w * cubicAt(x, n, mk.pos + u);
         }
+        return voiced ? halfR / beta : halfR;
+    };
 
-        ts += voiced ? halfR / beta : halfR;
+    // Grains along output time [from, to) of mapping `outToIn`, marks limited to input [lo, hi].
+    uint32_t rng = 0x9E3779B9u;
+    auto run = [&](double from, double to, auto&& outToIn, double lo, double hi, bool main) {
+        size_t i = (size_t)(std::lower_bound(M.begin(), M.end(), lo, [](const PitchMark& m, double v) { return m.pos < v; }) - M.begin());
+        if (i > 0) --i;
+        long lastGrain = -1;
+        for (double ts = from; ts < to;) {
+            const double tau = outToIn(ts);
+            while (i + 1 < M.size() && std::abs(M[i + 1].pos - tau) <= std::abs(M[i].pos - tau)) ++i;
+            size_t g = i;
+            // Time-stretched noise: avoid repeating the very same unvoiced grain (buzz).
+            if (!M[g].voiced && (long)g == lastGrain) {
+                rng = rng * 1664525u + 1013904223u;
+                const size_t alt = (rng >> 16) & 1 ? g + 1 : (g > 0 ? g - 1 : g + 1);
+                if (alt < M.size() && !M[alt].voiced) g = alt;
+            }
+            lastGrain = (long)g;
+            if (M[g].pos < lo || M[g].pos > hi || (main ? inOverlay(M[g].pos) : quiet(M[g].pos))) { // not played here
+                const double h = g + 1 < M.size() ? M[g + 1].pos - M[g].pos : 0.0;
+                ts += std::clamp(h, 1.0, 0.03 * a.sampleRate);
+                continue;
+            }
+            const double step = grain(g, ts);
+            ts += step == 0 ? 1.0 : std::abs(step);
+        }
+    };
+    run(map.mainInToOut(M[0].pos), outLen, [&](double t) { return map.outToIn(t); }, -1e300, 1e300, true);
+
+    // Gaps opened between notes: silence, with short fades in the audio on either side.
+    const double fade = kSilenceFadeSec * a.sampleRate;
+    for (const auto& [s0, s1] : map.silences()) {
+        const long b = std::max(0L, (long)std::floor(s0 - fade));
+        const long e = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+        for (long o = b; o < e; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+    }
+    // Muted consonants: the output gap in front of a note (from the end of the note before it).
+    for (size_t i = 0; i < e.notes.size() && i < map.noteCount(); ++i) {
+        if (!e.notes[i].consMuted) continue;
+        // A deleted note a neighbour is stretched over (squeezed in the map): its grains are left
+        // out; zeroing there would cut into the neighbour. In its place it is silenced as muted.
+        if (e.notes[i].deleted && map.noteEndOut(i) - map.noteStartOut(i) < 0.5 * (a.notes[i].endSec - a.notes[i].startSec) * a.sampleRate)
+            continue;
+        const double s0 = i > 0 ? map.noteMainEndOut(i - 1) : 0.0, s1 = map.noteStartOut(i);
+        if (s1 <= s0) continue;
+        const long b = std::max(0L, (long)std::floor(s0 - fade));
+        const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+        for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+    }
+    // Deleted breaths: the Breath frames in the unvoiced sound before a note, each run silent.
+    for (size_t i = 0; i < e.notes.size() && i < map.noteCount() && i < a.notes.size(); ++i) {
+        if (!e.notes[i].breathDeleted) continue;
+        const size_t from = i > 0 ? (size_t)std::max(0, a.notes[i - 1].endFrame) : 0;
+        const size_t to = std::min((size_t)std::max(0, a.notes[i].startFrame), a.frames.size());
+        for (size_t f = from; f < to;) {
+            if (a.frames[f].kind != FrameKind::Breath) { ++f; continue; }
+            size_t g = f;
+            while (g < to && a.frames[g].kind == FrameKind::Breath) ++g;
+            const double s0 = map.inToOut((double)f * a.hop), s1 = map.inToOut((double)g * a.hop);
+            const long b = std::max(0L, (long)std::floor(s0 - fade));
+            const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+            if (s1 > s0) for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+            f = g;
+        }
+    }
+    // Muted notes: silent over their whole output span (grains of the neighbours that reach
+    // into it are removed too), so the mute is complete.
+    for (size_t i = 0; i < e.notes.size() && i < map.noteCount(); ++i) {
+        if (!e.notes[i].muted) continue;
+        const double s0 = map.noteStartOut(i), s1 = map.noteMainEndOut(i); // its overlay is not played
+        const long b = std::max(0L, (long)std::floor(s0 - fade));
+        const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));
+        for (long o = b; o < end; ++o) acc[(size_t)o] *= silenceEnv((double)o, s0, s1, fade);
+    }
+
+    // Overlays: the end of a note played over the next ones, on top of them. Added after the
+    // silences and mutes of the main map, which are not theirs.
+    for (const auto& v : map.overlays()) {
+        if (v.note < e.notes.size() && (e.notes[v.note].muted || e.notes[v.note].deleted)) continue;
+        auto toIn = [&](double t) {
+            if (t <= v.out.front()) return v.in.front();
+            if (t >= v.out.back()) return v.in.back();
+            const size_t j = (size_t)(std::upper_bound(v.out.begin(), v.out.end(), t) - v.out.begin());
+            const double x0 = v.out[j - 1], x1 = v.out[j], y0 = v.in[j - 1], y1 = v.in[j];
+            return x1 > x0 ? y0 + (y1 - y0) * (t - x0) / (x1 - x0) : y0;
+        };
+        run(v.out.front(), std::min(v.out.back(), outLen), toIn, v.in.front(), v.in.back(), false);
     }
 
     std::vector<float> out(outN);

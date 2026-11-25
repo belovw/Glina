@@ -13,6 +13,15 @@ namespace glina::plugin {
 using ui::T;
 
 namespace {
+// The key of a clip's render. Separations only steer later time edits and do not change the
+// sound: they stay out of the key, so switching one does not throw away the saved render.
+uint64_t renderKeyOf(uint64_t contentHash, const Document& d)
+{
+    Document k = d;
+    for (auto& n : k.edits.notes) n.sepBefore = NoteEdit::Sep::Auto;
+    return renderstore::key(contentHash, serialize(k));
+}
+
 // Plug-in instances (their REAPER link) bound to each document controller.
 std::mutex linksMutex;
 std::vector<std::pair<GlinaDocumentController*, reaper::HostLink*>>& hostLinks()
@@ -248,7 +257,7 @@ void GlinaDocumentController::watchSave(const std::vector<const GlinaAudioModifi
     for (auto* m : mods) {
         const auto& data = *m->getGlinaSource()->data;
         auto cache = m->currentCache();
-        if (!data.samplesReady || cache == nullptr || cache->key != renderstore::key(data.contentHash, serialize(m->doc))) {
+        if (!data.samplesReady || cache == nullptr || cache->key != renderKeyOf(data.contentHash, m->doc)) {
             ++notReady; // still analysing or rendering: this state is rendered again on open
             continue;
         }
@@ -403,7 +412,7 @@ void GlinaDocumentController::startRender(GlinaAudioModification* mod)
     auto eff = mod->effective;
     const uint64_t version = mod->editVersion;
     auto alive = mod->alive;
-    const uint64_t key = renderstore::key(data->contentHash, serialize(doc));
+    const uint64_t key = renderKeyOf(data->contentHash, doc);
     // A render saved with the project is used whatever the option says (it only controls writing).
     std::vector<juce::File> folders;
     if (!mod->forceRender) folders = renderFolders();

@@ -53,6 +53,12 @@ bool inScale(int m, const Key& k)
     return false;
 }
 
+// Custom cursors are built in software images and owned by the editor, never static: a
+// static one outlived the editor and, released while the plug-in DLL was being unloaded,
+// tore down the GPU (Direct2D) device under the Windows loader lock. The graphics driver
+// then waited for a thread that needed that lock, and REAPER hung on exit with the
+// plug-in file locked.
+//
 // Cursor for Alt+click (cut): a thin vertical bar with a gap at the cut point, outlined so
 // that it shows on both the light and the dark theme.
 // Never keep such a cursor (or any image) in a static: on Windows an image lives on the graphics
@@ -73,6 +79,24 @@ juce::MouseCursor makeCutCursor()
         g.drawLine(x, 14.f, x, 25.f, 1.5f);
     }
     return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
+}
+// Cursor for Alt over a note boundary (drag: move the cut; click: join): a solid bar with
+// arrowheads to both sides, outlined like the cut cursor.
+juce::MouseCursor makeCutMoveCursor()
+{
+    juce::Image img(juce::Image::ARGB, 21, 25, true, juce::SoftwareImageType());
+    juce::Graphics g(img);
+    const float x = 10.5f, y = 12.5f;
+    juce::Path arrows;
+    arrows.addTriangle(1.f, y, 6.f, y - 4.f, 6.f, y + 4.f);
+    arrows.addTriangle(20.f, y, 15.f, y - 4.f, 15.f, y + 4.f);
+    g.setColour(juce::Colour(0xcc000000));
+    g.drawLine(x, 0.f, x, 25.f, 3.f);
+    g.strokePath(arrows, juce::PathStrokeType(2.f));
+    g.setColour(juce::Colours::white);
+    g.drawLine(x, 0.f, x, 25.f, 1.5f);
+    g.fillPath(arrows);
+    return juce::MouseCursor(img, 10, 12);
 }
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
@@ -264,6 +288,9 @@ class PitchEditor::Roll final : public juce::Component {
 public:
     explicit Roll(PitchEditor& o) : ed(o) { setWantsKeyboardFocus(true); }
 
+    // Alt cursor for the move (see makeCutMoveCursor): a member, never a static (see makeCutCursor).
+    const juce::MouseCursor cutMoveCursor = makeCutMoveCursor();
+
     static constexpr float kKeysW = 46, kRulerH = 20, kStripH = 6;
     juce::Rectangle<float> canvas() const
     {
@@ -277,7 +304,7 @@ public:
     juce::Rectangle<float> noteRect(int i) const
     {
         const Note& n = ed.eff_->notes[(size_t)i];
-        const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
+        const float x0 = xOf(ed.noteStartSec(i)), x1 = xOf(ed.noteEndSec(i));
         const float s = semi();
         double centre = ed.editedCentre(i);
         // While a tilt is dragged the box stays put and only the line moves; it settles on release.
@@ -315,6 +342,58 @@ public:
         if (p.x < r.getX() + edge) return top ? Zone::CornerL : Zone::Left;
         if (p.x > r.getRight() - edge) return top ? Zone::CornerR : Zone::Right;
         return Zone::Body;
+    }
+
+    // The separation under `p` on note `i`'s edge strip: the boundary with the neighbour on that
+    // side (its index on the left), if the neighbour is close (gap under kSepGapSec); else -1.
+    // The gap is wider than the threshold a separation can be made at, so a hard separation whose
+    // notes were pushed apart still shows and can be double-clicked back to soft.
+    static constexpr double kSepGapSec = 0.3;
+    int boundaryAt(int i, juce::Point<float> p) const
+    {
+        const Zone z = zoneOf(i, p);
+        const int b = (z == Zone::Left || z == Zone::CornerL) ? i - 1 : (z == Zone::Right || z == Zone::CornerR) ? i : -1;
+        return b >= 0 && b + 1 < (int)ed.eff_->notes.size() && separationGap(b) < kSepGapSec ? b : -1;
+    }
+    double separationGap(int b) const
+    {
+        return ed.noteStartSec(b + 1) - ed.noteEndSec(b);
+    }
+
+    // Separations between close neighbours: soft (linked) a thin line between the two notes;
+    // hard (each moves alone) a bracket at each note's edge, as in Melodyne.
+    void drawSeparations(juce::Graphics& g, const Analysis& A, const Document& d)
+    {
+        const auto c = canvas();
+        const float s = semi();
+        const int n = (int)A.notes.size();
+        const std::vector<bool> softSep = softSeparations(d.edits, A);
+        auto deleted = [&](int i) { return i < (int)d.edits.notes.size() && d.edits.notes[(size_t)i].deleted; };
+        for (int b = 0; b + 1 < n && b < (int)softSep.size(); ++b) {
+            if (separationGap(b) >= kSepGapSec) continue;
+            if (deleted(b) || deleted(b + 1)) continue; // a deleted note has no separation to show
+            const auto l = noteRect(b), r = noteRect(b + 1);
+            if (r.getX() < c.getX() - 10 || l.getRight() > c.getRight() + 10) continue;
+            const float top = std::min(l.getY(), r.getY()), bottom = std::max(l.getBottom(), r.getBottom());
+            if (softSep[(size_t)b]) {
+                const float x = 0.5f * (l.getRight() + r.getX());
+                g.setColour(col::dim.withAlpha(0.55f));
+                g.drawLine(x, top + 1, x, bottom - 1, 0.8f);
+            } else {
+                const float t = std::max(3.f, s * 0.18f); // bracket tick length
+                g.setColour(col::dim.withAlpha(0.9f));
+                juce::Path p; // "]" at the end of the left note, "[" at the start of the right one
+                p.startNewSubPath(l.getRight() - t, l.getY());
+                p.lineTo(l.getRight(), l.getY());
+                p.lineTo(l.getRight(), l.getBottom());
+                p.lineTo(l.getRight() - t, l.getBottom());
+                p.startNewSubPath(r.getX() + t, r.getY());
+                p.lineTo(r.getX(), r.getY());
+                p.lineTo(r.getX(), r.getBottom());
+                p.lineTo(r.getX() + t, r.getBottom());
+                g.strokePath(p, juce::PathStrokeType(1.2f));
+            }
+        }
     }
 
     // ---- painting ------------------------------------------------------------------
@@ -385,6 +464,12 @@ public:
             drawTrackName(g);
             drawHarmonies(g, *A);
             drawNotes(g, *A, *d);
+            drawSeparations(g, *A, *d);
+            if (cutMode && pressed >= 0 && (gesture == G::StretchL || gesture == G::StretchR)) {
+                const auto r = noteRect(pressed);
+                g.setColour(col::accent);
+                g.drawLine(cutX, r.getY() - semi(), cutX, r.getBottom() + semi(), 1.5f);
+            }
             drawCurves(g, *A);
             drawThreads(g, *d);
             if (!marquee.isEmpty()) {
@@ -539,14 +624,102 @@ public:
         return (float)std::clamp((db - (ed.levelRef_ - 36.0)) / 36.0, 0.16, 1.0);
     }
 
+    // Unvoiced sound (consonant) in front of note i: from the end of note i-1 up to note i.
+    static bool hasConsonant(const Analysis& A, int i)
+    {
+        const int from = i > 0 ? A.notes[(size_t)i - 1].endFrame : 0;
+        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        for (int k = std::max(0, from); k < to; ++k) {
+            const FrameKind kd = A.frames[(size_t)k].kind;
+            if (kd == FrameKind::Sibilant || kd == FrameKind::Breath) return true;
+        }
+        return false;
+    }
+    juce::Rectangle<float> consRect(int i) const
+    {
+        float x0 = i > 0 ? xOf(ed.noteEndSec(i - 1)) : canvas().getX();
+        // Start the zone at the first non-silent frame, so the pause before a consonant stays empty.
+        if (ed.eff_ != nullptr && i < (int)ed.eff_->notes.size()) {
+            const Analysis& A = *ed.eff_;
+            const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
+            const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+            const double hopSec = (double)A.hop / A.sampleRate;
+            for (int f = from; f < to; ++f) {
+                if (A.frames[(size_t)f].kind == FrameKind::Silence) continue;
+                x0 = std::max(x0, xOf(ed.outSec(f * hopSec)));
+                break;
+            }
+        }
+        const float x1 = xOf(ed.noteStartSec(i));
+        const float s = semi();
+        const float y = yOf(ed.editedCentre(i));
+        return {x0, y - s * 0.17f, std::max(0.f, x1 - x0), s * 0.34f};
+    }
+    // The note whose consonant zone is under a point, or -1.
+    int consonantAt(juce::Point<float> p) const
+    {
+        if (ed.eff_ == nullptr) return -1;
+        for (int i = 0; i < (int)ed.eff_->notes.size(); ++i)
+            if (hasConsonant(*ed.eff_, i) && consRect(i).contains(p)) return i;
+        return -1;
+    }
+
+    // Waveform of the unvoiced sound in a consonant zone: its level frame by frame, drawn like
+    // a note's blob. Sibilants and breaths get their own shades.
+    void drawUnvoiced(juce::Graphics& g, const Analysis& A, int i, juce::Rectangle<float> r, bool muted, bool breathDeleted) const
+    {
+        const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
+        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        if (to <= from) return;
+        const double hopSec = (double)A.hop / A.sampleRate;
+        const float yc = r.getCentreY();
+        const float half = semi() * 0.45f;
+        const int stride = std::max(1, (int)((to - from) / std::max(4.f, r.getWidth() / 2.f)));
+        for (int kind = 0; kind < 2; ++kind) { // 0 sibilant, 1 breath
+            if (kind == 1 && breathDeleted) continue;
+            const FrameKind want = kind == 0 ? FrameKind::Sibilant : FrameKind::Breath;
+            std::vector<juce::Point<float>> top, bottom;
+            for (int f = from; f < to; f += stride) {
+                const FrameKind kd = A.frames[(size_t)f].kind;
+                if (kd != want) continue;
+                const float x = xOf(ed.outSec(f * hopSec));
+                const float a = half * levelOf(A, f, 0.0);
+                top.push_back({x, yc - a});
+                bottom.push_back({x, yc + a});
+            }
+            if (top.size() < 2) continue;
+            juce::Path p;
+            p.startNewSubPath(top.front());
+            for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k]);
+            for (size_t k = bottom.size(); k-- > 0;) p.lineTo(bottom[k]);
+            p.closeSubPath();
+            const float alpha = muted ? 0.18f : (kind == 0 ? 0.55f : 0.35f);
+            g.setColour((kind == 0 ? col::offTune : col::dim).withAlpha(alpha));
+            g.fillPath(p);
+        }
+    }
+
     void drawNotes(juce::Graphics& g, const Analysis& A, const Document& d)
     {
+        for (int i = 0; i < (int)A.notes.size() && i < (int)d.edits.notes.size(); ++i) {
+            if (!hasConsonant(A, i)) continue;
+            const auto r = consRect(i);
+            if (r.getWidth() < 2.f) continue;
+            const bool m = d.edits.notes[(size_t)i].consMuted;
+            const bool sel = ed.consSelection_.count(i) > 0;
+            g.setColour(col::dim.withAlpha(m ? 0.10f : sel ? 0.45f : 0.28f));
+            g.fillRoundedRectangle(r, 3.f);
+            g.setColour(sel ? col::lift : col::dim.withAlpha(m ? 0.4f : 0.6f));
+            g.drawRoundedRectangle(r, 3.f, sel ? 1.4f : 0.8f);
+            drawUnvoiced(g, A, i, r, m, d.edits.notes[(size_t)i].breathDeleted);
+        }
         const auto c = canvas();
         const float s = semi();
         const double hopSec = (double)A.hop / A.sampleRate;
         for (int i = 0; i < (int)A.notes.size(); ++i) {
             const Note& n = A.notes[(size_t)i];
             const NoteEdit& e = d.edits.notes[(size_t)i];
+            if (e.deleted) continue; // deleted: hidden, its audio is only there to be pulled back
             const auto box = noteRect(i);
             if (box.getRight() < c.getX() || box.getX() > c.getRight()) continue;
             const double centre = ed.editedCentre(i);
@@ -576,11 +749,12 @@ public:
             for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k].x, yc - top[k].y);
             for (size_t k = top.size() - 1; k >= 1; --k) p.lineTo(top[k].x, yc + top[k].y);
             p.closeSubPath();
-            g.setColour(fill.withAlpha(sel ? 0.62f : 0.36f));
+            // Muted: a faint ghost of the note, kept in place.
+            g.setColour(fill.withAlpha(e.muted ? 0.14f : sel ? 0.62f : 0.36f));
             g.fillPath(p);
             // Thin, quiet outline: the fill carries the colour. Selected: the note's own colour,
             // lighter, a little thicker.
-            g.setColour(sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
+            g.setColour(e.muted ? fill.withAlpha(0.45f) : sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
             g.strokePath(p, juce::PathStrokeType(sel ? 1.2f : 0.6f));
 
             if (e.formantShift != 0 || e.timeOffsetSec != 0 || e.stretch != 1 || e.driftAmount != 1 ||
@@ -604,12 +778,25 @@ public:
         const int nf = (int)A.frames.size();
         const int k0 = std::clamp((int)(ed.inSec(secOf(c.getX())) / hopSec) - 2, 0, nf);
         const int k1 = std::clamp((int)(ed.inSec(secOf(c.getRight())) / hopSec) + 3, 0, nf);
-        auto draw = [&](auto valueAt, juce::Colour colr, float w) {
+        // Frames inside a muted note: their line is drawn paler.
+        std::vector<char> muted(A.frames.size(), 0);
+        if (const Document* d = ed.doc())
+            for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
+                if (d->edits.notes[i].muted)
+                    for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 1;
+        // Deleted notes: their line is not drawn at all (value 2).
+        if (const Document* d = ed.doc())
+            for (size_t i = 0; i < A.notes.size() && i < d->edits.notes.size(); ++i)
+                if (d->edits.notes[i].deleted)
+                    for (int f = std::max(0, A.notes[i].startFrame); f < std::min(A.notes[i].endFrame, nf); ++f) muted[(size_t)f] = 2;
+        auto draw = [&](auto valueAt, juce::Colour colr, float w, bool wantMuted) {
             juce::Path p;
             bool pen = false;
             for (int k = k0; k < k1; ++k) {
+                // A gap opened between notes is silent: the line breaks there.
+                if (k > 0 && ed.timeMap_.silenceBetween((k - 1) * (double)A.hop, k * (double)A.hop)) pen = false;
                 const double m = valueAt(k);
-                if (m <= 0) { pen = false; continue; }
+                if (m <= 0 || muted[(size_t)k] == 2 || (muted[(size_t)k] == 1) != wantMuted) { pen = false; continue; }
                 const juce::Point<float> pt(xOf(ed.outSec(k * hopSec)), yOf(m));
                 if (!pen) p.startNewSubPath(pt); else p.lineTo(pt);
                 pen = true;
@@ -617,13 +804,15 @@ public:
             g.setColour(colr);
             g.strokePath(p, juce::PathStrokeType(w));
         };
-        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f);
+        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig, 1.f, false);
+        draw([&](int k) { return A.frames[(size_t)k].midi; }, col::pitchOrig.withAlpha(0.3f), 1.f, true);
         if (ed.curve_.size() == A.frames.size()) {
-            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f);
+            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit, 1.4f, false);
+            draw([&](int k) { return ed.curve_[(size_t)k]; }, col::pitchEdit.withAlpha(0.3f), 1.4f, true);
             // Pencil-drawn stretches on top, in their own colour.
             if (const Document* d = ed.doc(); d != nullptr && !d->edits.draw.empty()) {
                 const std::vector<float> dense = drawnDense(d->edits, nf);
-                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f);
+                draw([&](int k) { return std::isnan(dense[(size_t)k]) ? 0.0 : ed.curve_[(size_t)k]; }, col::drawn, 2.f, false);
             }
         }
     }
@@ -637,8 +826,7 @@ public:
             const juce::Colour vc = col::voice((int)j);
             for (size_t i = 0; i < hp.size(); ++i) {
                 if (std::isnan(hp[i])) continue;
-                const Note& n = A.notes[i];
-                const float x0 = xOf(ed.outSec(n.startSec)), x1 = xOf(ed.outSec(n.endSec));
+                const float x0 = xOf(ed.noteStartSec((int)i)), x1 = xOf(ed.noteEndSec((int)i));
                 const juce::Rectangle<float> r(x0, yOf(hp[i]) - s * 0.17f, std::max(2.f, x1 - x0), s * 0.34f);
                 g.setColour(vc.withAlpha(0.22f));
                 g.fillRoundedRectangle(r, 3.f);
@@ -660,7 +848,7 @@ public:
             int e = k + 1;
             while (e < (int)A.frames.size() && A.frames[(size_t)e].kind == kind) ++e;
             if (kind == FrameKind::Sibilant || kind == FrameKind::Breath) {
-                const float x0 = xOf(ed.outSec((k - 0.5) * hopSec)), x1 = xOf(ed.outSec((e - 0.5) * hopSec));
+                const float x0 = xOf(ed.outSec((k - 0.5) * hopSec)), x1 = xOf(ed.outSecBefore((e - 0.5) * hopSec));
                 if (x1 >= c.getX() && x0 <= c.getRight()) {
                     g.setColour(kind == FrameKind::Sibilant ? col::sibilant : col::breath);
                     g.fillRect(x0, y + 1, std::max(1.f, x1 - x0), kStripH - 2);
@@ -679,9 +867,12 @@ public:
     {
         const Document* d = ed.doc();
         if (ed.eff_ == nullptr || d == nullptr || i < 1 || i >= (int)ed.eff_->notes.size()) return false;
+        // A transition into or out of a deleted note is not shown (nor its handle).
+        if (i < (int)d->edits.notes.size() && (d->edits.notes[(size_t)i].deleted || d->edits.notes[(size_t)i - 1].deleted)) return false;
         const Note& L = ed.eff_->notes[(size_t)i - 1];
         const Note& R = ed.eff_->notes[(size_t)i];
         if (R.startFrame - L.endFrame > 1) return false; // a gap: no glide to shape
+        if (ed.noteStartSec(i) - ed.noteEndSec(i - 1) > kMinSilenceSec * 0.5) return false; // pulled apart
         if ((size_t)i >= d->edits.notes.size() || d->edits.notes[(size_t)i].consonant ||
             d->edits.notes[(size_t)i - 1].consonant) return false;
         const auto bL = noteRect(i - 1), bR = noteRect(i);
@@ -967,8 +1158,11 @@ public:
         if (th >= 0) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; } // thread: hand
         const int i = hitNote(e.position);
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
-        if (e.mods.isAltDown()) { setMouseCursor(cutCursor()); return; } // Alt+click cuts the note
         const Zone z = zoneOf(i, e.position);
+        if (e.mods.isAltDown()) { // Alt: the cut tool. Body: click cuts. Edge: drag moves the cut, click joins.
+            setMouseCursor(z == Zone::Body ? cutCursor() : cutMoveCursor);
+            return;
+        }
         setMouseCursor(z == Zone::Body ? juce::MouseCursor::UpDownLeftRightResizeCursor
                        : (z == Zone::CornerL || z == Zone::CornerR) ? juce::MouseCursor::UpDownResizeCursor
                                                                     : juce::MouseCursor::LeftRightResizeCursor);
@@ -1003,6 +1197,17 @@ public:
             startPps_ = ed.pps_;
             return;
         }
+        // A click on a consonant zone selects it; M then mutes the selected zones. (Not in link
+        // editing: there a click takes a link, and notes are not touched.)
+        if (!ed.editLinks_ && !e.mods.isAnyModifierKeyDown() && !e.mods.isPopupMenu()) {
+            const int cons = consonantAt(e.position);
+            if (cons >= 0) {
+                ed.consSelection_ = {cons};
+                repaint();
+                return;
+            }
+        }
+        if (!ed.consSelection_.empty()) { ed.consSelection_.clear(); repaint(); }
         bool refEnd = false;
         int pin = pinAt(e.position, refEnd);
         if (pin < 0 && ed.editLinks_) { pin = pinLineAt(e.position); refEnd = true; } // the line of a pin: its reference end
@@ -1101,6 +1306,13 @@ public:
         tiltRight = z == Zone::CornerR;
         gesture = z == Zone::Left ? G::StretchL : z == Zone::Right ? G::StretchR
                 : (z == Zone::CornerL || z == Zone::CornerR) ? G::PendingCorner : G::Pending;
+        // Alt on an edge: the cut tool (drag moves the cut, a click joins). An edge drag
+        // started without Alt switches to it when Alt is pressed on the way.
+        cutAtPress = e.mods.isAltDown() && z != Zone::Body;
+        if (cutAtPress) gesture = (z == Zone::Left || z == Zone::CornerL) ? G::StretchL : G::StretchR;
+        cutMode = cutAtPress;
+        movedAny = false;
+        cutX = e.position.x;
         ed.refresh();
     }
 
@@ -1183,6 +1395,18 @@ public:
             case G::Smooth:
                 break;
         }
+        if (std::abs(off.x) >= 2) movedAny = true;
+        if (gesture == G::StretchL || gesture == G::StretchR) {
+            cutMode = e.mods.isAltDown();
+            if (cutMode) { // moving the cut: nothing is stretched; the new cut shows as a line until release
+                d->edits = before.edits;
+                changed = false;
+                cutX = e.position.x;
+                ed.refreshCurves(false);
+                repaint();
+                return;
+            }
+        }
         const double dt = off.x / ed.pps_;
         if (gesture == G::Pitch) {
             double delta = -off.y / semi();
@@ -1217,8 +1441,9 @@ public:
         } else {
             // An edge is a boundary between two notes (or two blocks of selected notes).
             d->edits = before.edits;
-            moveBoundary(d->edits, *ed.eff_, gesture == G::StretchR ? pressed : pressed - 1, dt, ed.selection_,
-                         gesture == G::StretchL);
+            const int boundary = gesture == G::StretchR ? pressed : pressed - 1;
+            moveBoundary(d->edits, *ed.eff_, boundary, dt, ed.selection_,
+                         gesture == G::StretchL, true); // the mouse may lay a note over the next
         }
         changed = true;
         ed.refreshCurves(false);
@@ -1255,6 +1480,17 @@ public:
             changed = false;
             return;
         }
+        if ((g0 == G::StretchL || g0 == G::StretchR) && cutMode && pressed >= 0) {
+            const bool startEdge = g0 == G::StretchL;
+            const int note = pressed;
+            cutMode = false;
+            pressed = -1;
+            changed = false;
+            if (movedAny) ed.moveCutAt(note, startEdge, secOf(e.position.x));
+            else if (cutAtPress) ed.joinAt(startEdge ? note - 1 : note); // Alt+click on a cut: join
+            else ed.refresh();
+            return;
+        }
         if (g0 == G::Pending && pressed >= 0 && e.mods.isAltDown() && !changed) {
             ed.splitAt(pressed, secOf(e.position.x));
         } else if (changed) {
@@ -1273,7 +1509,9 @@ public:
         if (ed.editLinks_ || pinAt(e.position, refEnd) >= 0) return;
         const int i = hitNote(e.position);
         const int gi = i < 0 ? hitGhost(e.position) : -1;
-        if (i >= 0) {
+        if (const int b = i >= 0 ? boundaryAt(i, e.position) : -1; b >= 0) {
+            ed.toggleSeparationAt(b); // double-click a separation: soft <-> hard
+        } else if (i >= 0) {
             ed.selection_ = {i};
             ed.snapToScale();
         } else if (gi >= 0) {
@@ -1414,6 +1652,10 @@ public:
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
+    bool cutMode = false;    // an edge drag with Alt: moves the cut (the source boundary), not the time
+    bool cutAtPress = false; // Alt was down when the edge was pressed (a click then joins)
+    bool movedAny = false;   // the mouse moved during this press
+    float cutX = 0;          // where the moved cut would go (screen x)
     int pressed = -1;
     bool changed = false;
     Document before;
@@ -1810,6 +2052,12 @@ public:
         EditSlider formant, gain, pan, delay, detune;
         juce::TextButton all, sel, remove;
     };
+    // The lead (original) row: on/off, level and pan only; no interval or humanising.
+    struct LeadRow {
+        juce::ToggleButton on;
+        juce::Label note;
+        EditSlider gain, pan;
+    };
 
     explicit Harmonies(PitchEditor& o) : ed(o)
     {
@@ -1821,6 +2069,23 @@ public:
                        "Цветные полоски на нотах — партии голосов."),
                      juce::dontSendNotification);
         addAndMakeVisible(hint);
+        lead.on.setButtonText(juce::String(0));
+        lead.on.setColour(juce::ToggleButton::tickColourId, col::dim);
+        quiet(lead.on);
+        lead.on.onClick = [this] {
+            const bool v = lead.on.getToggleState();
+            ed.edit([v](Document& d) { d.leadEnabled = v; });
+        };
+        addAndMakeVisible(lead.on);
+        lead.note.setText(T("оригинал"), juce::dontSendNotification);
+        lead.note.setColour(juce::Label::textColourId, col::dim);
+        addAndMakeVisible(lead.note);
+        wireSlider(lead.gain, "Гр.", -40, 12, 0.5, "");
+        lead.gain.apply = [](Document& d, double v) { d.leadGainDb = v; };
+        lead.gain.slider.setTooltip(T("Громкость оригинала, дБ"));
+        wireSlider(lead.pan, "Пан.", -100, 100, 1, "");
+        lead.pan.apply = [](Document& d, double v) { d.leadPan = v / 100.0; };
+        lead.pan.slider.setTooltip(T("Панорама оригинала: −100 лево, +100 право"));
         add.setButtonText(T("+ Голос"));
         quiet(add);
         add.onClick = [this] {
@@ -1843,13 +2108,19 @@ public:
     int preferredHeight() const
     {
         const Document* d = ed.doc();
-        return kHeader + kRow * (d != nullptr ? (int)d->voices.size() : 0) + 6;
+        return kHeader + kRow * (1 + (d != nullptr ? (int)d->voices.size() : 0)) + 6;
     }
 
     void setupSlider(Row& row, EditSlider& s, int j, const char* name, double lo, double hi, double step,
                      const char* suffix, std::function<void(HarmonyVoice&, double)> fn)
     {
         s.apply = [j, fn](Document& d, double v) { if (j < (int)d.voices.size()) fn(d.voices[(size_t)j], v); };
+        wireSlider(s, name, lo, hi, step, suffix);
+        juce::ignoreUnused(row);
+    }
+
+    void wireSlider(EditSlider& s, const char* name, double lo, double hi, double step, const char* suffix)
+    {
         s.label.setText(T(name), juce::dontSendNotification);
         s.label.setColour(juce::Label::textColourId, col::dim);
         s.label.setJustificationType(juce::Justification::centredRight);
@@ -1875,7 +2146,6 @@ public:
         };
         addAndMakeVisible(s.label);
         addAndMakeVisible(s.slider);
-        juce::ignoreUnused(row);
     }
 
     void buildRows(int count)
@@ -1953,6 +2223,17 @@ public:
         const int n = d != nullptr ? (int)d->voices.size() : 0;
         if (n != (int)rows.size()) buildRows(n);
         add.setEnabled(d != nullptr && n < kMaxVoices);
+        if (d != nullptr) {
+            lead.on.setToggleState(d->leadEnabled, juce::dontSendNotification);
+            auto setLead = [](EditSlider& s, double x) {
+                if (s.dragging) return;
+                s.updating = true;
+                s.slider.setValue(x, juce::dontSendNotification);
+                s.updating = false;
+            };
+            setLead(lead.gain, d->leadGainDb);
+            setLead(lead.pan, d->leadPan * 100);
+        }
         for (int j = 0; j < n; ++j) {
             const HarmonyVoice& v = d->voices[(size_t)j];
             Row& r = *rows[(size_t)j];
@@ -1980,9 +2261,11 @@ public:
         g.fillAll(col::panel);
         g.setColour(col::panelLine);
         g.drawHorizontalLine(0, 0.f, (float)getWidth());
+        g.setColour(col::dim);
+        g.fillRect(0, kHeader + 6, 3, kRow - 10);
         for (int j = 0; j < (int)rows.size(); ++j) {
             g.setColour(col::voice(j));
-            g.fillRect(0, kHeader + j * kRow + 6, 3, kRow - 10);
+            g.fillRect(0, kHeader + (j + 1) * kRow + 6, 3, kRow - 10);
         }
     }
 
@@ -1994,6 +2277,17 @@ public:
         add.setBounds(head.removeFromLeft(90));
         head.removeFromLeft(10);
         hint.setBounds(head);
+        {
+            auto line = r.removeFromTop(kRow).reduced(0, 3);
+            lead.on.setBounds(line.removeFromLeft(44));
+            lead.note.setBounds(line.removeFromLeft(140));
+            line.removeFromLeft(6);
+            const int sw = juce::jlimit(70, 150, (line.getWidth() - 260) / 5 - 50);
+            for (auto* s : {&lead.gain, &lead.pan}) {
+                s->label.setBounds(line.removeFromLeft(54));
+                s->slider.setBounds(line.removeFromLeft(sw + 50));
+            }
+        }
         for (auto& rp : rows) {
             Row& row = *rp;
             auto line = r.removeFromTop(kRow).reduced(0, 3);
@@ -2001,7 +2295,7 @@ public:
             row.interval.setBounds(line.removeFromLeft(140));
             line.removeFromLeft(6);
             const int sw = juce::jlimit(70, 150, (line.getWidth() - 260) / 5 - 50);
-            for (auto* s : {&row.formant, &row.gain, &row.pan, &row.delay, &row.detune}) {
+            for (auto* s : {&row.gain, &row.pan, &row.delay, &row.formant, &row.detune}) {
                 s->label.setBounds(line.removeFromLeft(54));
                 s->slider.setBounds(line.removeFromLeft(sw + 50));
             }
@@ -2015,6 +2309,7 @@ public:
     PitchEditor& ed;
     juce::Label title, hint;
     juce::TextButton add;
+    LeadRow lead;
     std::vector<std::unique_ptr<Row>> rows;
 };
 
@@ -2592,6 +2887,26 @@ double PitchEditor::outSec(double in) const
     return timeMap_.inToOut(in * eff_->sampleRate) / eff_->sampleRate;
 }
 
+double PitchEditor::outSecBefore(double in) const
+{
+    if (eff_ == nullptr || timeMap_.isIdentity()) return in;
+    return timeMap_.inToOutBefore(in * eff_->sampleRate) / eff_->sampleRate;
+}
+
+double PitchEditor::noteStartSec(int i) const
+{
+    if (eff_ == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
+    if (timeMap_.isIdentity() || timeMap_.noteCount() != eff_->notes.size()) return outSec(eff_->notes[(size_t)i].startSec);
+    return timeMap_.noteStartOut((size_t)i) / eff_->sampleRate;
+}
+
+double PitchEditor::noteEndSec(int i) const
+{
+    if (eff_ == nullptr || i < 0 || i >= (int)eff_->notes.size()) return 0;
+    if (timeMap_.isIdentity() || timeMap_.noteCount() != eff_->notes.size()) return outSec(eff_->notes[(size_t)i].endSec);
+    return timeMap_.noteEndOut((size_t)i) / eff_->sampleRate;
+}
+
 double PitchEditor::inSec(double out) const
 {
     if (eff_ == nullptr || timeMap_.isIdentity()) return out;
@@ -2723,7 +3038,7 @@ void PitchEditor::fitView()
     lo_ = std::floor(mn) - 4;
     hi_ = std::ceil(mx) + 4;
     if (hi_ - lo_ < 14) { const double c = 0.5 * (lo_ + hi_); lo_ = c - 7; hi_ = c + 7; }
-    const double first = outSec(eff_->notes.front().startSec), last = outSec(eff_->notes.back().endSec);
+    const double first = noteStartSec(0), last = noteEndSec((int)eff_->notes.size() - 1);
     const double span = std::max(1.0, last - first + 1.0);
     pps_ = std::max(2.0, roll_->canvas().getWidth() / span);
     scroll_ = std::max(0.0, first - 0.5);
@@ -2765,15 +3080,55 @@ void PitchEditor::applyCorrection()
     });
 }
 
+// Ctrl+Delete with consonant zones selected: deletes only their breath.
+void PitchEditor::deleteBreathSelection()
+{
+    if (consSelection_.empty() || eff_ == nullptr) return;
+    const std::set<int> zones = consSelection_;
+    edit([this, zones](Document& d) { glina::deleteBreaths(d.edits, *eff_, zones); });
+}
+
+// Alt+Delete: removes the selected notes, leaving silence; their edges can be dragged back.
+void PitchEditor::deleteSelection()
+{
+    if (selection_.empty() || eff_ == nullptr) return;
+    const std::set<int> sel = selection_;
+    selection_.clear(); // deleted notes are hidden: they do not stay selected
+    edit([this, sel](Document& d) { glina::deleteNotes(d.edits, *eff_, sel); });
+}
+
+// M: mutes the selected notes; if all are muted already, unmutes them.
+void PitchEditor::toggleMuteSelection()
+{
+    if (!consSelection_.empty()) {
+        bool anyLoud = false;
+        if (Document* d = doc()) for (int i : consSelection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].consMuted) anyLoud = true;
+        const bool cm = anyLoud;
+        const std::set<int> zones = consSelection_;
+        edit([zones, cm](Document& d) {
+            for (int i : zones) if (i < (int)d.edits.notes.size()) d.edits.notes[(size_t)i].consMuted = cm;
+        });
+        return;
+    }
+    if (selection_.empty() || eff_ == nullptr) return;
+    bool anyLoud = false;
+    if (Document* d = doc()) for (int i : selection_) if (i < (int)d->edits.notes.size() && !d->edits.notes[(size_t)i].muted) anyLoud = true;
+    const bool m = anyLoud;
+    const int last = *selection_.rbegin();
+    edit([this, m, last](Document& d) {
+        for (int i : selection_) if (i < (int)d.edits.notes.size()) {
+            d.edits.notes[(size_t)i].muted = m;
+            d.edits.notes[(size_t)i].consMuted = m; // the consonant in front of it goes too
+        }
+        // The consonant after the last note is the one in front of the next note.
+        if (last + 1 < (int)d.edits.notes.size()) d.edits.notes[(size_t)last + 1].consMuted = m;
+    });
+}
+
 void PitchEditor::resetNotes()
 {
     if (selection_.empty() || eff_ == nullptr) return;
-    edit([&](Document& d) {
-        for (int i : selection_) {
-            d.edits.notes[(size_t)i] = NoteEdit{};
-            eraseDrawn(d.edits, eff_->notes[(size_t)i].startFrame, eff_->notes[(size_t)i].endFrame);
-        }
-    });
+    edit([&](Document& d) { glina::resetNoteEdits(d.edits, *eff_, selection_); });
 }
 
 void PitchEditor::erasePencilInSelection()
@@ -3146,6 +3501,34 @@ void PitchEditor::toggleConsonant()
     }, true);
 }
 
+void PitchEditor::moveCutAt(int note, bool startEdge, double outSecond)
+{
+    if (eff_ == nullptr || note < 0 || note >= (int)eff_->notes.size()) { refresh(); return; }
+    const Analysis& a = *eff_;
+    const size_t before = doc() != nullptr ? doc()->edits.notes.size() : 0;
+    size_t after = before;
+    edit([&](Document& d) { moveCut(d, a, note, startEdge, outSecond); after = d.edits.notes.size(); }, true);
+    // A cut run through deleted notes takes them away: the dragged note stays selected under its new index.
+    if (after < before) {
+        selection_ = {startEdge ? note - (int)(before - after) : note};
+        refresh();
+    }
+}
+
+void PitchEditor::joinAt(int left)
+{
+    if (eff_ == nullptr || left < 0 || left + 1 >= (int)eff_->notes.size()) { refresh(); return; }
+    selection_ = {left};
+    joinSelected();
+}
+
+void PitchEditor::toggleSeparationAt(int i)
+{
+    if (eff_ == nullptr || i < 0 || i + 1 >= (int)eff_->notes.size()) return;
+    const Analysis& a = *eff_;
+    edit([&](Document& d) { toggleSeparation(d.edits, a, i); });
+}
+
 void PitchEditor::cycleGrid()
 {
     static const int order[] = {4, 8, 16};
@@ -3291,7 +3674,7 @@ void PitchEditor::selectStep(int dir, bool extend)
     if (!extend) selection_.clear();
     selection_.insert(i);
     // Keep the note visible.
-    const double t0 = outSec(eff_->notes[(size_t)i].startSec), t1 = outSec(eff_->notes[(size_t)i].endSec);
+    const double t0 = noteStartSec(i), t1 = noteEndSec(i);
     const double visible = roll_->canvas().getWidth() / pps_;
     if (t0 < scroll_ || t1 > scroll_ + visible) scroll_ = std::max(0.0, t0 - 0.2 * visible);
     refresh();
@@ -3488,6 +3871,13 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         togglePlay();
         return true;
     }
+    // Ctrl+Delete: delete the selected notes (silent, pulled back by an edge). Link editing
+    // touches only links.
+    if (cmd && code == juce::KeyPress::deleteKey) {
+        if (editLinks_) return true;
+        if (!consSelection_.empty()) deleteBreathSelection(); else deleteSelection();
+        return true;
+    }
     if (cmd) return false;
 
     if (code == juce::KeyPress::upKey || code == juce::KeyPress::downKey) {
@@ -3502,6 +3892,10 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
         if (hoverPin_ >= 0) { removePin(hoverPin_); return true; }
         if (editLinks_) return true; // link editing: Delete touches only links
         resetNotes();
+        return true;
+    }
+    if ((ch == 'm' || ch == 'M') && !cmd && !mods.isAltDown()) {
+        if (!editLinks_) toggleMuteSelection(); // link editing touches only links
         return true;
     }
     if (code == juce::KeyPress::homeKey) {

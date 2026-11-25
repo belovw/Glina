@@ -72,7 +72,11 @@ private:
     void commit(const Document& before, bool layoutChanged = false);
     template <typename Fn> void edit(Fn&& fn, bool layoutChanged = false);
     double outSec(double inSec) const;
+    double outSecBefore(double inSec) const; // at a gap opened between notes: its start, not its end
     double inSec(double outSec) const;
+    // Output start and end of note i, as it sounds (a gap opened next to it stays out).
+    double noteStartSec(int i) const;
+    double noteEndSec(int i) const;
     double editedCentre(int note) const;
     std::vector<ClipHost::GridLine> gridLines(double t0, double t1) const;
     juce::String keyLabel(int tonic, bool minor) const;
@@ -82,6 +86,9 @@ private:
     void snapToScale();
     void applyCorrection();
     void resetNotes();
+    void toggleMuteSelection();
+    void deleteSelection();
+    void deleteBreathSelection();
     void toggleDrift();
     void cycleVibrato();
     void toggleAutoVibrato(); // Shift+V: auto vibrato on (last depth, ±30 ¢ the first time) / off
@@ -89,6 +96,12 @@ private:
     // selected (everything: the notes' own settings are dropped).
     void writeVibrato(Document& d, const AutoVibrato& v) const;
     void toggleConsonant();
+    // Switch the separation between note `i` and `i + 1` between soft (linked) and hard.
+    void toggleSeparationAt(int i);
+    // Move the cut at `note`'s start (or end) to the audio now heard at `outSecond` (see moveCut).
+    void moveCutAt(int note, bool startEdge, double outSecond);
+    // Join note `left` with the next one (Alt+click on the cut between them).
+    void joinAt(int left);
     void syncInspector();
     void layoutInspector(); // size the inspector to its controls inside its scrolling view
     // ---- other tracks ("ghosts") --------------------------------------------------
@@ -133,6 +146,7 @@ private:
     std::vector<std::vector<double>> harm_;    // per voice: pitch per note (NaN = muted)
     float levelRef_ = -20.f;
     std::set<int> selection_;
+    std::set<int> consSelection_; // consonant zones selected by a click: M mutes them
     double lastVibDepth_ = 30; // depth Shift+V turns auto vibrato back on with
     bool fitted_ = false;
     int toolbarH_ = 40;     // height of the toolbar (it wraps onto more lines when narrow)

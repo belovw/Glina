@@ -30,9 +30,11 @@ std::vector<ThreadFrame> threadOf(const Analysis& a, const EditSet& e, const std
         const Frame& f = a.frames[(size_t)k];
         ThreadFrame tf;
         tf.t = toCommon ? toCommon(t) : t;
-        tf.midi = (f.f0 > 0 && curve[(size_t)k] > 0) ? (float)curve[(size_t)k] : 0.f;
-        tf.kind = f.kind;
-        tf.rmsDb = f.rmsDb;
+        if (map.gainAt(t * sr, 0.0) > 0) { // a gap opened between notes stays silent (the defaults)
+            tf.midi = (f.f0 > 0 && curve[(size_t)k] > 0) ? (float)curve[(size_t)k] : 0.f;
+            tf.kind = f.kind;
+            tf.rmsDb = f.rmsDb;
+        }
         out.push_back(tf);
     }
     return out;
@@ -458,7 +460,7 @@ std::vector<NoteFix> planPitchFix(const Analysis& a, const EditSet& e, const std
         for (int k = std::max(0, n.startFrame); k < std::min(n.endFrame, nf) && !edited; ++k)
             if (!std::isnan(drawn[(size_t)k])) edited = true;
         f.edited = edited;
-        if (edited || ed.consonant || info.part) { out.push_back(f); continue; }
+        if (edited || ed.consonant || ed.deleted || info.part) { out.push_back(f); continue; }
         // The middle of the note (glides at its ends belong to the transitions).
         const int len = n.endFrame - n.startFrame;
         const int k0 = n.startFrame + len / 5, k1 = n.endFrame - len / 5;
@@ -500,7 +502,6 @@ float refPitchAt(const std::vector<ThreadFrame>& ref, double t)
     if (it != ref.begin() && (best == nullptr || t - std::prev(it)->t < best->t - t)) best = &*std::prev(it);
     return (best != nullptr && std::abs(best->t - t) <= 0.015) ? best->midi : 0.f;
 }
-constexpr double kTouchSec = 0.005; // notes closer than this touch (as in the time edits)
 } // namespace
 
 AlignOptions intervalAlignOptions(int steps)
@@ -531,10 +532,11 @@ std::vector<IntervalFix> planIntervalFix(const Analysis& a, const EditSet& e, co
     const double pitchAmt = std::clamp(opt.pitchAmount, 0.0, 1.0);
     const double timeAmt = std::clamp(opt.timeAmount, 0.0, 1.0);
     for (int i : notes) {
+        const NoteEdit& ed = i < (int)e.notes.size() ? e.notes[(size_t)i] : none;
+        if (ed.deleted) continue; // silent: F leaves it as it is
         IntervalFix f;
         f.note = i;
         const Note& nt = a.notes[(size_t)i];
-        const NoteEdit& ed = i < (int)e.notes.size() ? e.notes[(size_t)i] : none;
 
         // Pitch: the reference over the note's middle (glides at the ends belong to the transitions).
         if (!ed.consonant) {
@@ -598,7 +600,7 @@ std::vector<NoteCuts> planMelismaCuts(const Analysis& a, const EditSet& e, const
     const std::vector<NoteTimes> times = noteTimes(a, e);
     const double sr = a.sampleRate;
     for (int i : notes) {
-        if (i < (int)e.notes.size() && e.notes[(size_t)i].consonant) continue;
+        if (i < (int)e.notes.size() && (e.notes[(size_t)i].consonant || e.notes[(size_t)i].deleted)) continue;
         const double s = times[(size_t)i].outStart, en = times[(size_t)i].outEnd;
         const double rs = warp.map(s), re = warp.map(en);
         // The reference notes over this note, each over at least minSec of it.
@@ -642,8 +644,11 @@ bool applyIntervalFix(EditSet& e, const Analysis& a, const std::vector<IntervalF
     }
     bool ok = true;
     if (anyTime) {
-        // A note left alone follows a moved neighbour it touches, so no gap or overlap opens there.
-        auto touch = [&](int i) { return i >= 0 && i + 1 < n && std::abs(base[(size_t)i + 1].outStart - base[(size_t)i].outEnd) < kTouchSec; };
+        // A note left alone follows a moved neighbour it is linked to (a soft separation: they
+        // touch, or the user linked them), so no gap or overlap opens there. Across a hard
+        // separation, and next to a deleted note, it stays.
+        const std::vector<bool> linked = softSeparations(e, a);
+        auto touch = [&](int i) { return i >= 0 && i < (int)linked.size() && linked[(size_t)i]; };
         for (int i = 0; i < n; ++i) {
             if (moved[(size_t)i]) continue;
             if (i > 0 && moved[(size_t)i - 1] && touch(i - 1)) t[(size_t)i].outStart = t[(size_t)i - 1].outEnd;

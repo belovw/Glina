@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 namespace glina {
@@ -12,14 +13,7 @@ constexpr double kMinNoteSec = 0.03;
 
 double minDur(const NoteTimes& t) { return std::min(kMinNoteSec, 0.5 * (t.inEnd - t.inStart)); }
 
-// Every note keeps a minimal length, nothing overlaps, nothing leaves the clip.
-// `lo` is the earliest boundary the layout may use. It is normally 0, but note
-// boundaries sit at frame centres, so a clip whose first note starts at frame 0
-// (singing from the very first sample) has its first boundary just below 0. Taking
-// 0 there would make the untouched layout invalid and block every move.
-// Overlaps and the clip end are judged with 1 µs of slack. Layouts saved by an earlier build
-// (or round-tripped through text) can touch with a rounding error of ~1e-9 s; a tighter test
-// called them invalid and blocked every time move, while 1 µs is far below any analysis frame.
+// Overlaps and the clip end are judged with 1 µs of slack in the diagnostic check below.
 constexpr double kTolSec = 1e-6;
 
 // Per note, where its output may lie: the item (segment) it belongs to in a track view, widened
@@ -33,44 +27,136 @@ Bounds boundsOf(const Analysis& a, const std::vector<NoteTimes>& base)
     if (a.segments.empty()) return b;
     for (size_t i = 0; i < base.size(); ++i)
         for (const auto& s : a.segments)
-            if (base[i].inStart >= s.first - 1e-4 && base[i].inStart < s.second) {
+            // By the note's middle: its start sits half a frame before its first frame, so a note
+            // starting on an item's first frame would otherwise belong to no item (and have no bounds).
+            if (const double mid = 0.5 * (base[i].inStart + base[i].inEnd); mid >= s.first && mid < s.second) {
                 b[i] = {std::min(s.first, base[i].outStart), std::max(s.second, base[i].outEnd)};
                 break;
             }
     return b;
 }
 
-bool valid(const std::vector<NoteTimes>& t, double clipLen, double lo, const Bounds& bounds)
+// The conditions a layout must meet, each as a margin that is >= 0 when it holds: every note
+// keeps its minimal length, starts after the end of every earlier note and after `floorSec`,
+// stays inside its item (track view) and ends inside the clip.
+// "Every earlier note", pair by pair, not just the previous one: in a layout an earlier build
+// left out of order, the previous note may lie far back, and a note could otherwise be put
+// onto others. Each condition is a difference of two note edges, so it changes linearly with
+// the dt of a time edit (every edit moves edges linearly).
+struct Limits {
+    double clipLen = 0, floorSec = 0;
+    Bounds bounds;
+    std::vector<char> ignore; // deleted notes: they do not limit the order of the others
+    // A note whose edge, dragged past a hard separation, may go over other notes (they overlap):
+    // its end over the later notes (ovLater), or its start back over the earlier ones.
+    int ovNote = -1;
+    bool ovLater = true;
+};
+
+static bool ignored(const Limits& L, size_t i) { return i < L.ignore.size() && L.ignore[i]; }
+
+// A change below this (seconds) is rounding, not a change.
+constexpr double kChangeEps = 1e-9;
+
+// Calls f(before, after, note, condition) for every condition whose margin differs between the
+// layouts `a` and `b` (same notes). Conditions on edges that did not move are skipped: a pair
+// of notes neither of which moved keeps its margin.
+template <typename F>
+void eachChange(const std::vector<NoteTimes>& a, const std::vector<NoteTimes>& b, const Limits& L, F&& f)
 {
-    double last = lo;
-    for (size_t i = 0; i < t.size(); ++i) {
-        const auto& n = t[i];
-        if (n.outEnd - n.outStart < minDur(n) - kTolSec) return false;
-        if (n.outStart < last - kTolSec) return false;
-        if (i < bounds.size() && (n.outStart < bounds[i].first - kTolSec || n.outEnd > bounds[i].second + kTolSec))
-            return false;
-        last = n.outEnd;
+    constexpr double kFree = 1e9; // a limit that does not exist (single clip: no item bounds)
+    const size_t n = std::min(a.size(), b.size());
+    auto cond = [&](double ma, double mb, size_t note, const char* what) {
+        if (std::abs(mb - ma) > kChangeEps) f(ma, mb, note, what);
+    };
+    std::vector<char> startMoved(n), endMoved(n);
+    for (size_t i = 0; i < n; ++i) {
+        startMoved[i] = std::abs(b[i].outStart - a[i].outStart) > kChangeEps;
+        endMoved[i] = std::abs(b[i].outEnd - a[i].outEnd) > kChangeEps;
+        if (!startMoved[i] && !endMoved[i]) continue;
+        if (!ignored(L, i)) cond(a[i].outEnd - a[i].outStart - minDur(a[i]), b[i].outEnd - b[i].outStart - minDur(b[i]), i, "length");
+        cond(a[i].outStart - L.floorSec, b[i].outStart - L.floorSec, i, "clip start");
+        cond(L.clipLen - a[i].outEnd, L.clipLen - b[i].outEnd, i, "clip end");
+        const bool hasB = i < L.bounds.size();
+        const double lo = hasB && std::isfinite(L.bounds[i].first) ? L.bounds[i].first : -kFree;
+        const double hi = hasB && std::isfinite(L.bounds[i].second) ? L.bounds[i].second : kFree;
+        cond(a[i].outStart - lo, b[i].outStart - lo, i, "item start");
+        cond(hi - a[i].outEnd, hi - b[i].outEnd, i, "item end");
     }
-    return t.empty() || last <= clipLen + kTolSec;
+    // Note k starts after note j (j < k) ends. Only pairs with a moved edge.
+    auto order = [&](size_t j, size_t k) {
+        if (ignored(L, j) || ignored(L, k)) return;
+        if (L.ovNote >= 0 && (L.ovLater ? (int)j == L.ovNote : (int)k == L.ovNote)) return; // may overlap
+        cond(a[k].outStart - a[j].outEnd, b[k].outStart - b[j].outEnd, k, "order");
+    };
+    for (size_t k = 0; k < n; ++k)
+        if (startMoved[k])
+            for (size_t j = 0; j < k; ++j) order(j, k);
+    for (size_t j = 0; j < n; ++j)
+        if (endMoved[j])
+            for (size_t k = j + 1; k < n; ++k)
+                if (!startMoved[k]) order(j, k);
 }
 
-// Largest part of `dt` (shrinking towards 0) for which `make` gives a valid layout.
-template <typename Make>
-double clampDt(double dt, double clipLen, double floorSec, const Bounds& bounds, Make&& make)
+// The full move takes layout t0 to t1, and every margin moves linearly in between:
+// m(x) = m0 + x (m1 - m0) for the share x of the move. The largest x in [0, 1] that breaks no
+// condition that held and makes no broken one worse is found directly, condition by condition.
+// A condition the move does not change does not limit it: a fault elsewhere in the clip (an
+// overlap left by an earlier build) does not block moves; a note that overlaps its neighbour
+// can still move away from it.
+double allowedShare(const std::vector<NoteTimes>& t0, const std::vector<NoteTimes>& t1, const Limits& L)
 {
-    if (valid(make(dt), clipLen, floorSec, bounds)) return dt;
-    double lo = 0, hi = 1;
-    for (int it = 0; it < 40; ++it) {
-        const double mid = 0.5 * (lo + hi);
-        if (valid(make(dt * mid), clipLen, floorSec, bounds)) lo = mid; else hi = mid;
-    }
-    return dt * lo;
+    double x = 1;
+    eachChange(t0, t1, L, [&](double m0, double m1, size_t note, const char* what) {
+        if (m1 >= m0) return; // better
+        const double xk = std::max(0.0, m0 / (m0 - m1));
+        if (xk < x) x = xk;
+    });
+    return x;
+}
+
+// True if going from `before` to `after` breaks no condition that held and makes no broken one worse.
+bool noNewFaults(const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after, const Limits& L)
+{
+    bool ok = true;
+    eachChange(before, after, L, [&](double m0, double m1, size_t, const char*) {
+        if (m1 < -kChangeEps && m1 < m0) ok = false;
+    });
+    return ok;
+}
+
+// The largest part of `dt` that `make` may apply (see allowedShare).
+template <typename Make>
+double limitDt(double dt, const Limits& L, Make&& make)
+{
+    const double x = allowedShare(make(0.0), make(dt), L);
+    return x >= 1 ? dt : dt * x;
+}
+
+// The last note may end a fraction of a millisecond past the clip (frame centres), and an
+// earlier build may have left a note past it: the limit is the latest of these.
+double clipLenOf(const Analysis& a, const std::vector<NoteTimes>& base)
+{
+    double len = (double)a.numSamples / a.sampleRate;
+    for (const NoteTimes& n : base) len = std::max(len, n.outEnd);
+    return len;
 }
 
 // The layout may not start before the clip, nor before where it already starts.
 double floorOf(const std::vector<NoteTimes>& base)
 {
-    return base.empty() ? 0.0 : std::min(0.0, base.front().outStart);
+    double f = 0;
+    for (const NoteTimes& n : base) f = std::min(f, n.outStart);
+    return f;
+}
+
+Limits limitsOf(const Analysis& a, const std::vector<NoteTimes>& base)
+{
+    Limits L;
+    L.clipLen = clipLenOf(a, base);
+    L.floorSec = floorOf(base);
+    L.bounds = boundsOf(a, base);
+    return L;
 }
 
 // Lay out the block of notes [b, e] (taken from `base`) so that it starts at
@@ -113,78 +199,153 @@ std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e)
     return t;
 }
 
+double minNoteLength(const NoteTimes& t) { return minDur(t); }
+
+namespace {
+// Soft separation between note i and i + 1 in layout t (see NoteEdit::sepBefore).
+bool soft(const EditSet& e, const std::vector<NoteTimes>& t, int i)
+{
+    if (i < 0 || i + 1 >= (int)t.size()) return false;
+    // A deleted note is not linked to its neighbours: its boundaries are hard, so it does not move with them.
+    if ((size_t)i + 1 < e.notes.size() && (e.notes[(size_t)i].deleted || e.notes[(size_t)i + 1].deleted)) return false;
+    const NoteEdit::Sep s = (size_t)i + 1 < e.notes.size() ? e.notes[(size_t)i + 1].sepBefore : NoteEdit::Sep::Auto;
+    if (s != NoteEdit::Sep::Auto) return s == NoteEdit::Sep::Soft;
+    return std::abs(t[(size_t)i + 1].outStart - t[(size_t)i].outEnd) < 0.005;
+}
+} // namespace
+
+Limits limitsOf(const Analysis& a, const std::vector<NoteTimes>& base, const EditSet& e)
+{
+    Limits L = limitsOf(a, base);
+    L.ignore.assign(base.size(), 0);
+    for (size_t k = 0; k < base.size() && k < e.notes.size(); ++k) L.ignore[k] = e.notes[k].deleted;
+    return L;
+}
+
+bool softSeparation(const EditSet& e, const Analysis& a, int i)
+{
+    return soft(e, noteTimes(a, e), i);
+}
+
+bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after)
+{
+    return noNewFaults(before, after, limitsOf(a, before));
+}
+
+bool noNewLayoutFaults(const Analysis& a, const EditSet& e, const std::vector<NoteTimes>& before,
+                       const std::vector<NoteTimes>& after)
+{
+    return noNewFaults(before, after, limitsOf(a, before, e));
+}
+
+std::vector<bool> softSeparations(const EditSet& e, const Analysis& a)
+{
+    const std::vector<NoteTimes> t = noteTimes(a, e);
+    std::vector<bool> out(t.empty() ? 0 : t.size() - 1);
+    for (size_t i = 0; i < out.size(); ++i) out[i] = soft(e, t, (int)i);
+    return out;
+}
+
+void toggleSeparation(EditSet& e, const Analysis& a, int i)
+{
+    if (i < 0 || i + 1 >= (int)a.notes.size()) return;
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    const bool wasSoft = softSeparation(e, a, i);
+    e.notes[(size_t)i + 1].sepBefore = wasSoft ? NoteEdit::Sep::Hard : NoteEdit::Sep::Soft;
+}
+
+void setNoteTimes(NoteEdit& e, const NoteTimes& t)
+{
+    const double inDur = std::max(1e-6, t.inEnd - t.inStart);
+    double off = t.outStart - t.inStart;
+    double st = (t.outEnd - t.outStart) / inDur;
+    if (std::abs(off) < 1e-7) off = 0;
+    if (std::abs(st - 1) < 1e-7) st = 1;
+    e.timeOffsetSec = off;
+    e.stretch = st;
+}
+
 void applyNoteTimes(EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t)
 {
     if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
-    for (size_t i = 0; i < t.size() && i < e.notes.size(); ++i) {
-        const double inDur = std::max(1e-6, t[i].inEnd - t[i].inStart);
-        double off = t[i].outStart - t[i].inStart;
-        double st = (t[i].outEnd - t[i].outStart) / inDur;
-        if (std::abs(off) < 1e-7) off = 0;
-        if (std::abs(st - 1) < 1e-7) st = 1;
-        e.notes[i].timeOffsetSec = off;
-        e.notes[i].stretch = st;
-    }
+    for (size_t i = 0; i < t.size() && i < e.notes.size(); ++i) setNoteTimes(e.notes[i], t[i]);
 }
 
 bool placeNotes(EditSet& e, const Analysis& a, std::vector<NoteTimes> t)
 {
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    if (t.size() != base.size()) return false;
-    if (base.empty()) return true;
-    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.back().outEnd);
-    const double floorSec = floorOf(base);
-    const Bounds bounds = boundsOf(a, base);
+    const size_t n = base.size();
+    if (t.size() != n) return false;
+    if (n == 0) return true;
+    const Limits L = limitsOf(a, base, e); // the clip, the items; deleted notes are ignored
     auto consonant = [&](size_t i) { return i < e.notes.size() && e.notes[i].consonant; };
     auto dur = [&](size_t i) { return base[i].outEnd - base[i].outStart; }; // a consonant keeps it
-    const double slack = 2e-6;                                              // inside valid()'s tolerance
+    // As in the time edits: a deleted note gives way to every other (it keeps its own times), and
+    // two notes that already overlap (an overlay, or a layout left by an earlier build) may go on
+    // overlapping. Every other pair keeps its order.
+    auto ordered = [&](size_t j, size_t k) { // j < k
+        return !ignored(L, j) && !ignored(L, k) && base[k].outStart >= base[j].outEnd - kTolSec;
+    };
+    const double slack = 2e-6; // inside the check's tolerance
     // Forward: order, minimal length, the start limits.
-    double prev = floorSec;
-    for (size_t i = 0; i < t.size(); ++i) {
-        NoteTimes& n = t[i];
-        n.outStart = std::max({n.outStart, prev, bounds[i].first});
-        if (consonant(i)) n.outEnd = n.outStart + dur(i);
-        else n.outEnd = std::max(n.outEnd, n.outStart + minDur(n) + slack);
-        prev = n.outEnd;
+    for (size_t k = 0; k < n; ++k) {
+        NoteTimes& x = t[k];
+        if (ignored(L, k)) { x = base[k]; continue; }
+        double lo = std::max(L.floorSec, L.bounds[k].first);
+        for (size_t j = 0; j < k; ++j)
+            if (ordered(j, k)) lo = std::max(lo, t[j].outEnd);
+        x.outStart = std::max(x.outStart, lo);
+        if (consonant(k)) x.outEnd = x.outStart + dur(k);
+        else x.outEnd = std::max(x.outEnd, x.outStart + minDur(x) + slack);
     }
     // Backward: the end limits (the clip, the item); a note pushed back pushes the ones before it.
-    double next = clipLen;
-    for (size_t k = t.size(); k-- > 0;) {
-        NoteTimes& n = t[k];
-        const double limit = std::min(next, bounds[k].second);
-        if (n.outEnd > limit) {
-            n.outEnd = limit;
-            const double len = consonant(k) ? dur(k) : minDur(n) + slack;
-            n.outStart = std::min(n.outStart, n.outEnd - len);
+    for (size_t k = n; k-- > 0;) {
+        if (ignored(L, k)) continue;
+        NoteTimes& x = t[k];
+        double hi = std::min(L.clipLen, L.bounds[k].second);
+        for (size_t m = k + 1; m < n; ++m)
+            if (ordered(k, m)) hi = std::min(hi, t[m].outStart);
+        if (x.outEnd > hi) {
+            x.outEnd = hi;
+            const double len = consonant(k) ? dur(k) : minDur(x) + slack;
+            x.outStart = std::min(x.outStart, x.outEnd - len);
         }
-        next = n.outStart;
     }
-    if (!valid(t, clipLen, floorSec, bounds)) return false;
+    // The result must meet every condition the passes keep.
+    for (size_t k = 0; k < n; ++k) {
+        if (ignored(L, k)) continue;
+        const NoteTimes& x = t[k];
+        if (x.outEnd - x.outStart < minDur(x) - kTolSec) return false;
+        if (x.outStart < L.floorSec - kTolSec || x.outEnd > L.clipLen + kTolSec) return false;
+        if (x.outStart < L.bounds[k].first - kTolSec || x.outEnd > L.bounds[k].second + kTolSec) return false;
+        for (size_t j = 0; j < k; ++j)
+            if (ordered(j, k) && x.outStart < t[j].outEnd - kTolSec) return false;
+    }
     applyNoteTimes(e, a, t);
     return true;
 }
 
-double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge)
+double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& sel, bool startEdge,
+                    bool overlap)
 {
     const int n = (int)a.notes.size();
     if (n == 0 || left < -1 || left > n - 1 || dt == 0) return 0;
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    // The last note may end a fraction of a millisecond past the clip (frame centres), so the
-    // limit is the later of the two; otherwise the untouched layout is invalid and no move works.
-    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
 
     // Selected notes touching the boundary form one block on each side.
     int L0 = left, R1 = left + 1;
     if (left >= 0 && sel.count(left)) while (L0 - 1 >= 0 && sel.count(L0 - 1)) --L0;
     if (left + 1 < n && sel.count(left + 1)) while (R1 + 1 < n && sel.count(R1 + 1)) ++R1;
 
-    // Notes that touch at the boundary move together. If they do not touch (a gap
-    // between them), only the note whose edge is dragged changes; the neighbour stays.
-    const bool touching = left >= 0 && left + 1 < n &&
-                          std::abs(base[(size_t)left + 1].outStart - base[(size_t)left].outEnd) < 0.005;
+    // Across a soft separation the two notes move together. Across a hard one (by default
+    // where there is a gap) only the note whose edge is dragged changes; the neighbour stays.
+    const bool touching = soft(e, base, left);
 
     const bool moveLeft = left >= 0 && (touching || !startEdge);
-    const bool moveRight = left + 1 < n && (touching || startEdge || left < 0);
+    // A selected note across a hard separation moves with the dragged edge too; unselected
+    // neighbours behind a hard separation stay put.
+    const bool rightSelected = left + 1 < n && sel.count(left + 1) > 0;
+    const bool moveRight = left + 1 < n && (touching || startEdge || left < 0 || rightSelected);
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         if (moveLeft) // left block: start fixed, end follows the boundary
@@ -193,7 +354,19 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
             layBlock(t, base, e, left + 1, R1, base[(size_t)left + 1].outStart + d, base[(size_t)R1].outEnd);
         return t;
     };
-    const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
+    // Past a hard separation (a gap, or deleted notes) the dragged edge may go over the notes
+    // beyond: they overlap; those notes are neither moved nor squeezed.
+    Limits lim = limitsOf(a, base, e);
+    if (overlap && !touching) {
+        if (!startEdge && left >= 0 && !rightSelected) {
+            lim.ovNote = left;
+            lim.ovLater = true;
+        } else if (startEdge && left + 1 < n && !(left >= 0 && sel.count(left))) {
+            lim.ovNote = left + 1;
+            lim.ovLater = false;
+        }
+    }
+    const double applied = limitDt(dt, lim, make);
     applyNoteTimes(e, a, make(applied));
     return applied;
 }
@@ -203,14 +376,11 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
     const int n = (int)a.notes.size();
     if (n == 0 || notes.empty() || dt == 0) return 0;
     const std::vector<NoteTimes> base = noteTimes(a, e);
-    // The last note may end a fraction of a millisecond past the clip (frame centres), so the
-    // limit is the later of the two; otherwise the untouched layout is invalid and no move works.
-    const double clipLen = std::max((double)a.numSamples / a.sampleRate, base.empty() ? 0.0 : base.back().outEnd);
     auto moved = [&](int i) { return i >= 0 && i < n && notes.count(i) > 0; };
 
-    // Notes that touch (no gap between them) are linked: the neighbour follows the move.
-    // Where there is a gap, the neighbour stays put and the moved note just moves in the gap.
-    auto touch = [&](int i) { return i >= 0 && i + 1 < n && std::abs(base[(size_t)i + 1].outStart - base[(size_t)i].outEnd) < 0.005; };
+    // Across a soft separation (by default where notes touch) the neighbour follows the move.
+    // Across a hard one (by default where there is a gap) the neighbour stays put.
+    auto touch = [&](int i) { return soft(e, base, i); };
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         for (int i = 0; i < n; ++i) {
@@ -220,9 +390,49 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
         }
         return t;
     };
-    const double applied = clampDt(dt, clipLen, floorOf(base), boundsOf(a, base), make);
+    const double applied = limitDt(dt, limitsOf(a, base, e), make);
     applyNoteTimes(e, a, make(applied));
     return applied;
+}
+
+void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes)
+{
+    const int n = (int)a.notes.size();
+    if (n == 0 || notes.empty()) return;
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    const std::vector<NoteTimes> base = noteTimes(a, e);
+    const Limits L = limitsOf(a, base, e);
+
+    // Timing: each run of consecutive notes goes back to where it was recorded, as one block;
+    // a neighbour touching the run follows its edge, as in a move. If that would overlap or
+    // squeeze a neighbour (the run was moved as part of a larger block), the run keeps its timing.
+    std::vector<NoteTimes> t = base;
+    for (auto it = notes.begin(); it != notes.end();) {
+        const int b = *it;
+        int r = b;
+        for (++it; it != notes.end() && *it == r + 1; ++it) ++r;
+        if (b < 0 || r >= n) continue;
+        std::vector<NoteTimes> c = t;
+        for (int i = b; i <= r; ++i) { c[(size_t)i].outStart = c[(size_t)i].inStart; c[(size_t)i].outEnd = c[(size_t)i].inEnd; }
+        // A neighbour across a soft separation follows the run's edge, keeping the gap (none if they touch).
+        if (b > 0 && soft(e, t, b - 1)) c[(size_t)b - 1].outEnd = c[(size_t)b].outStart - (t[(size_t)b].outStart - t[(size_t)b - 1].outEnd);
+        if (r + 1 < n && soft(e, t, r)) c[(size_t)r + 1].outStart = c[(size_t)r].outEnd + (t[(size_t)r + 1].outStart - t[(size_t)r].outEnd);
+        if (noNewFaults(t, c, L)) t = c;
+    }
+
+    // Everything else goes back to no edit; the drawn pitch on the notes is erased.
+    for (int i : notes) {
+        if (i < 0 || i >= n) continue;
+        const NoteEdit::Sep sep = e.notes[(size_t)i].sepBefore; // the separation is layout, not a sound edit
+        e.notes[(size_t)i] = NoteEdit{};
+        e.notes[(size_t)i].sepBefore = sep;
+        eraseDrawn(e, a.notes[(size_t)i].startFrame, a.notes[(size_t)i].endFrame);
+    }
+    for (int i = 0; i < n; ++i) {
+        const NoteTimes& was = base[(size_t)i];
+        const NoteTimes& now = t[(size_t)i];
+        if (notes.count(i) || now.outStart != was.outStart || now.outEnd != was.outEnd) setNoteTimes(e.notes[(size_t)i], now);
+    }
 }
 
 void setNoteDuration(EditSet& e, const Analysis& a, int i, double seconds)
@@ -317,6 +527,35 @@ const AutoVibrato& vibratoOf(const EditSet& e, int i)
 {
     if (i >= 0 && i < (int)e.notes.size() && e.notes[(size_t)i].ownVibrato) return e.notes[(size_t)i].vibrato;
     return e.autoVibrato;
+}
+
+void deleteNotes(EditSet& e, const Analysis& a, const std::set<int>& notes)
+{
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    for (int i : notes) {
+        if (i < 0 || i >= (int)a.notes.size()) continue;
+        NoteEdit& n = e.notes[(size_t)i];
+        n.deleted = true;
+        n.consMuted = true;
+    }
+}
+
+void restoreDeleted(EditSet& e, int left)
+{
+    for (int i : {left, left + 1}) {
+        if (i < 0 || i >= (int)e.notes.size() || !e.notes[(size_t)i].deleted) continue;
+        e.notes[(size_t)i].deleted = false;
+        e.notes[(size_t)i].consMuted = false;
+    }
+    // The breath before note left + 1 (the unvoiced sound at this boundary) comes back too.
+    if (left + 1 >= 0 && left + 1 < (int)e.notes.size()) e.notes[(size_t)left + 1].breathDeleted = false;
+}
+
+void deleteBreaths(EditSet& e, const Analysis& a, const std::set<int>& notes)
+{
+    if (e.notes.size() < a.notes.size()) e.notes.resize(a.notes.size());
+    for (int i : notes)
+        if (i >= 0 && i < (int)a.notes.size()) e.notes[(size_t)i].breathDeleted = true;
 }
 
 void setTrackVibrato(EditSet& e, const AutoVibrato& v, bool resetNotes)
