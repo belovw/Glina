@@ -10,6 +10,7 @@
 #include "glina/Thread.h"
 #include "glina/TrackView.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <map>
@@ -2077,6 +2078,49 @@ static void testIntervalFix()
     }
 }
 
+// Random time, separation and pitch edits: every render ends, no shorter than the clip, and the
+// pitch edit is heard. (A noise grain sent back to its place looped for ever at a stretched
+// tail: the render never finished and the plug-in kept playing the old one.)
+static void testRenderFuzz()
+{
+    std::printf("[render fuzz] random edits: every render ends, the pitch is heard\n");
+    const double sr = 48000;
+    std::vector<test::SynthNote> mel = test::demoMelody();
+    for (size_t k = 1; k < mel.size(); k += 2) mel[k].sibilantBefore = true;
+    const test::SynthResult s = test::synthesize(mel, sr);
+    const Analysis an = analyze(s.audio.data(), s.audio.size(), sr);
+    uint32_t r = 7;
+    auto rnd = [&] { r = r * 1664525u + 1013904223u; return (double)(r >> 8) / 8388608.0 - 1.0; }; // -1..1
+    int done = 0, wrongLen = 0;
+    double worstMs = 0;
+    for (int it = 0; it < 120; ++it) {
+        EditSet e;
+        e.notes.resize(an.notes.size());
+        for (auto& n : e.notes) {
+            if (rnd() > 0) { n.timeOffsetSec = 0.12 * rnd(); n.stretch = 1 + 0.4 * rnd(); }
+            if (rnd() > 0.3) n.sepBefore = rnd() > 0 ? NoteEdit::Sep::Hard : NoteEdit::Sep::Auto;
+            n.pitchOffset = 2;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::vector<float> y = render(s.audio.data(), s.audio.size(), an, e);
+        worstMs = std::max(worstMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        if (y.size() < s.audio.size()) ++wrongLen; // longer only where notes were pushed past the end
+        ++done;
+    }
+    EditSet up;
+    up.notes.resize(an.notes.size());
+    for (auto& n : up.notes) n.pitchOffset = 3;
+    const std::vector<float> y = render(s.audio.data(), s.audio.size(), an, up);
+    const Analysis b = analyze(y.data(), y.size(), sr);
+    double mean = 0;
+    for (size_t i = 0; i < b.notes.size() && i < an.notes.size(); ++i) mean += b.notes[i].centerMidi - an.notes[i].centerMidi;
+    mean /= std::max<size_t>(1, std::min(b.notes.size(), an.notes.size()));
+    std::printf("  %d renders, slowest %.0f ms, %d shorter than the clip; +3 st heard as %+.2f st\n", done, worstMs, wrongLen, mean);
+    CHECK(wrongLen == 0, "%d renders shorter than the clip", wrongLen);
+    CHECK(worstMs < 5000, "a render took %.0f ms", worstMs);
+    CHECK(std::abs(mean - 3) < 0.1, "the pitch edit is heard as %+.2f st", mean);
+}
+
 // Consonants ('s' before notes) after time edits: the noise is copied as recorded, not
 // rebuilt from grains out of phase (that lost up to two thirds of its highs: "cut" consonants).
 static void testConsonantsKept()
@@ -2420,6 +2464,7 @@ int main()
     testIntervalFix();
     testMelismaCuts();
     testConsonantsKept();
+    testRenderFuzz();
     testTrackView();
     testTrackViewCut();
     testPins();

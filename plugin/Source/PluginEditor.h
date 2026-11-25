@@ -68,6 +68,9 @@ public:
     juce::String renderOrigin() const override;
     bool canRerender() const override;
     void rerender() override;
+    int rerenderTrack() override;
+    int itemsOnTrack() const override;
+    int staleOnTrack() const override;
 
 private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override

@@ -2736,6 +2736,10 @@ PitchEditor::PitchEditor()
     button(helpBtn_, "?", "Справка по мыши и клавишам (F1)", [this] { showHelp(!help_->isVisible()); });
     button(renderBtn_, "Рендер", "Рендер в папке проекта: сохранять, перерендерить", [this] { showRenderMenu(); });
     renderBtn_.setVisible(false); // shown when the host keeps renders (plug-in in REAPER)
+    button(trackRenderBtn_, "Пересчитать трек",
+           "Посчитать заново все айтемы Glina на этом треке текущей версией (после обновления Glina)",
+           [this] { rerenderTrack(); });
+    trackRenderBtn_.setVisible(false);
     abBtn_.setClickingTogglesState(false);
 
     keyLbl_.setText(T("Лад"), juce::dontSendNotification);
@@ -3700,12 +3704,22 @@ void PitchEditor::showHelp(bool show)
     if (show) help_->toFront(false);
 }
 
+void PitchEditor::rerenderTrack()
+{
+    if (host_ == nullptr) return;
+    const int n = host_->rerenderTrack();
+    trackRenderBtn_.setButtonText(T("Пересчитываю: ") + juce::String(n));
+    trackRenderBtn_.setColour(juce::TextButton::textColourOffId, col::buttonText);
+}
+
 void PitchEditor::showRenderMenu()
 {
     if (host_ == nullptr || !host_->hasRenderOptions()) return;
     juce::PopupMenu m;
     m.addItem(1, T("Сохранять рендер в папке проекта (подпапка Glina)"), true, host_->savesRender());
     m.addItem(2, T("Перерендерить клип текущей версией"), host_->canRerender());
+    const int items = host_->itemsOnTrack();
+    m.addItem(4, T("Пересчитать весь трек (айтемов: ") + juce::String(items) + ")", items > 0);
     const auto origin = host_->renderOrigin();
     m.addSeparator();
     m.addItem(3, T("Сейчас: ") + (origin.isNotEmpty() ? origin : T("рендер посчитан заново")), false);
@@ -3714,6 +3728,7 @@ void PitchEditor::showRenderMenu()
         if (safe == nullptr || safe->host_ == nullptr) return;
         if (r == 1) safe->host_->setSavesRender(!safe->host_->savesRender());
         if (r == 2) safe->host_->rerender();
+        if (r == 4) safe->rerenderTrack();
         safe->updateToolbar();
     });
 }
@@ -3724,7 +3739,13 @@ void PitchEditor::updateToolbar()
     const bool showRender = host_ != nullptr && host_->hasRenderOptions();
     if (renderBtn_.isVisible() != showRender) {
         renderBtn_.setVisible(showRender);
+        trackRenderBtn_.setVisible(showRender);
         resized();
+    }
+    if (showRender) { // marked while some item of the track plays a render of an older Glina
+        const int stale = host_->staleOnTrack();
+        trackRenderBtn_.setButtonText(stale > 0 ? T("Пересчитать трек (") + juce::String(stale) + ")" : T("Пересчитать трек"));
+        trackRenderBtn_.setColour(juce::TextButton::textColourOffId, stale > 0 ? col::warn : col::buttonText);
     }
     playBtn_.setVisible(host_ != nullptr && host_->handlesTransportKeys());
     pencilBtn_.setEnabled(ready);
@@ -3784,7 +3805,7 @@ void PitchEditor::resized()
         {&splitBtn_, 82, 4, 82},     {&joinBtn_, 74, 12, 74},
         {&pencilBtn_, 84, 12, 84},   {&gridBtn_, 42, 4, 42},      {&triBtn_, 26, 4, 26},       {&abBtn_, 44, 4, 44},
         {&harmBtn_, 84, 4, 84},      {&tracksBtn_, 26, 4, 26},    {&shiftBtn_, 26, 4, 26},    {&fitBtn_, 44, 4, 44},
-        {&renderBtn_, 66, 4, 66},    {&themeBtn_, 26, 4, 26},     {&helpBtn_, 28, 4, 28}};
+        {&renderBtn_, 66, 4, 66},    {&trackRenderBtn_, 150, 4, 130},    {&themeBtn_, 26, 4, 26},     {&helpBtn_, 28, 4, 28}};
     auto isCaption = [this](const Slot* s) {
         return s->c == &corrPitchLbl_ || s->c == &corrDriftLbl_ || s->c == &snapLbl_ || s->c == &timeLbl_;
     };

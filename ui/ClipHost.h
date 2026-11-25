@@ -185,6 +185,11 @@ public:
     virtual juce::String renderOrigin() const { return {}; }
     virtual bool canRerender() const { return false; }      // the render is from an older engine
     virtual void rerender() {}
+    // The whole track: every Glina item on it rendered again with the current engine (returns how
+    // many); how many items it has, and how many of them play a render of an older engine.
+    virtual int rerenderTrack() { return 0; }
+    virtual int itemsOnTrack() const { return 0; }
+    virtual int staleOnTrack() const { return 0; }
 
     // Fired (asynchronously) when analysis/render finished or the clip changed.
     juce::ChangeBroadcaster changes;

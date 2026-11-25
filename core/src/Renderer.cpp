@@ -668,6 +668,7 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         bool given = startMark >= 0 && (size_t)startMark < M.size();
         if (given) i = (size_t)startMark;
         long lastGrain = -1, lastPlayed = -1;
+        double lastTs = -std::numeric_limits<double>::infinity(); // grains only go forward
         for (double ts = from; ts < to;) {
             size_t g = i;
             if (given) {
@@ -704,14 +705,20 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
             // the noise comes out as recorded, except where a squeezed or stretched pause skips
             // or repeats a grain. Where the map is a plain shift around it (a pause kept at its
             // length, a moved note) it goes exactly where the map puts its mark.
+            // (Only when that place is this grain's: a grain taken instead of a repeated one, in a
+            // stretched tail, has its place behind; going back there looped for ever.)
             if (!M[g].voiced && g > 0 && g + 1 < M.size()) {
                 const double p = M[g].pos, hL = p - M[g - 1].pos, hR = M[g + 1].pos - p;
                 const double q = inToOut(p);
-                if (hL > 0 && hR > 0 && std::abs(inToOut(p + hR) - q - hR) < 0.5 && std::abs(q - inToOut(p - hL) - hL) < 0.5)
-                    ts = p + std::round(q - p);
+                const double exact = p + std::round(q - p);
+                if (hL > 0 && hR > 0 && std::abs(inToOut(p + hR) - q - hR) < 0.5 && std::abs(q - inToOut(p - hL) - hL) < 0.5 &&
+                    std::abs(exact - ts) <= 0.5 * std::min(hL, hR))
+                    ts = exact;
                 else
                     ts = p + std::round(ts - p);
             }
+            if (ts <= lastTs) ts = lastTs + 1; // never back: the loop always ends
+            lastTs = ts;
             const double step = grain(g, ts);
             if (step > 0) lastPlayed = (long)g;
             ts += step == 0 ? 1.0 : std::abs(step);

@@ -610,6 +610,38 @@ void PluginClip::rerender()
     if (mod_ != nullptr && dc_ != nullptr) dc_->rerender(mod_);
 }
 
+namespace {
+// The Glina modifications of a track's items, each once (items may share one).
+std::vector<GlinaAudioModification*> modsOfTrack(juce::ARARegionSequence* seq)
+{
+    std::vector<GlinaAudioModification*> out;
+    if (seq == nullptr) return out;
+    for (auto* r : glinaItemsOf(seq))
+        if (auto* m = dynamic_cast<GlinaAudioModification*>(r->getAudioModification()))
+            if (std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
+    return out;
+}
+} // namespace
+
+int PluginClip::rerenderTrack()
+{
+    if (dc_ == nullptr) return 0;
+    const auto mods = modsOfTrack(seq_);
+    logLine(T("пересчитать трек: айтемов ") + juce::String((int)mods.size()));
+    for (auto* m : mods) dc_->rerender(m);
+    return (int)mods.size();
+}
+
+int PluginClip::itemsOnTrack() const { return (int)modsOfTrack(seq_).size(); }
+
+int PluginClip::staleOnTrack() const
+{
+    int n = 0;
+    for (auto* m : modsOfTrack(seq_))
+        if (m->renderFromDisk && m->renderEngineVersion != kRenderVersion) ++n;
+    return n;
+}
+
 void PluginClip::setPlaying(bool p)
 {
     if (auto* pc = playback()) { if (p) pc->requestStartPlayback(); else pc->requestStopPlayback(); }

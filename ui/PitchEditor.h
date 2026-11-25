@@ -133,6 +133,7 @@ private:
     void toggleBypass();
     void showHelp(bool);
     void showRenderMenu();
+    void rerenderTrack(); // every item of the track rendered again (plug-in)
     void updateToolbar();
 
     void timerCallback() override;
@@ -233,6 +234,7 @@ private:
     bool pencil_ = false;
     juce::TextButton pencilBtn_, gridBtn_;
     juce::TextButton renderBtn_; // plug-in: render kept in the project folder
+    juce::TextButton trackRenderBtn_; // plug-in: render every item of the track again
     int gridDenom_ = 4;        // grid = note value 1/N of a whole note: 4, 8 or 16
     bool triplets_ = false;    // triplet grid: beats split in 3 (6 for 1/16)
     IconButton triBtn_;
