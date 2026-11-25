@@ -509,6 +509,7 @@ public:
                             st << T(" · ") << ed.intervalName();
                             if (ed.intervalSteps() != 0) st << T(" (") << ed.keyLabel(ik.tonic, ik.minor) << T(", ") << from << T(")");
                             st << T(": F — подтянуть ") << (ed.selection_.empty() ? T("все ноты") : T("выделенные"));
+                            if (!ed.links_.cuts.empty()) st << T(" · мелизмов разрезать: ") << (int)ed.links_.cuts.size();
                         } else if (ed.links_.toFix > 0) st << T(" · неверных нот: ") << ed.links_.toFix << T(" (F — исправить)");
                     }
                 }
@@ -824,8 +825,14 @@ public:
             g.drawText(txt, box, juce::Justification::centred);
         };
         if (ed.intervalSteps() != kNoInterval) {
+            std::set<int> cutNotes;
+            for (const auto& c : L.cuts) {
+                cutNotes.insert(c.note);
+                const int k = (int)c.frames.size() + 1;
+                mark(c.note, juce::String(k) + (k < 5 ? T(" ноты") : T(" нот")));
+            }
             for (const auto& f : L.pulls) {
-                if (!f.pitched || std::abs(f.pitchDelta) < 0.5) continue;
+                if (cutNotes.count(f.note) || !f.pitched || std::abs(f.pitchDelta) < 0.5) continue;
                 mark(f.note, (f.pitchDelta > 0 ? "+" : minus) + juce::String(std::abs(f.pitchDelta), 1).replace(".", ",") + T(" пт"));
             }
         } else {
@@ -2940,6 +2947,8 @@ void PitchEditor::refreshLinks()
     } else {
         links_.pulls = planIntervalFix(*eff_, doc()->edits, intervalKey(), links_.ref, links_.warp, {}, intervalOptions());
         for (const auto& f : links_.pulls) if (std::abs(f.pitchDelta) >= 0.005 || f.timed) ++links_.toPull;
+        for (const auto& n : gv.g.notes) links_.refNotes.push_back({n.t0, n.t1, n.midi});
+        links_.cuts = planMelismaCuts(*eff_, doc()->edits, links_.refNotes, links_.warp, {});
     }
 }
 
@@ -2955,22 +2964,46 @@ void PitchEditor::applyLinkFixes()
         edit([&](Document& d) { applyPitchFix(d.edits, fixes); });
         return;
     }
-    const Analysis& a = *eff_;
-    const std::vector<IntervalFix> plan =
-        planIntervalFix(a, doc()->edits, intervalKey(), links_.ref, links_.warp, notes, intervalOptions());
-    if (plan.empty()) return;
-    const bool pinsOn = links_.pinsOn;
-    bool placed = true;
-    edit([&](Document& d) {
-        const TimeMap before = TimeMap::build(a, d.edits);
-        placed = applyIntervalFix(d.edits, a, plan);
-        // Pins stay on the sound they were put on: their end on this track follows the time edit.
-        if (pinsOn && !d.pins.empty()) {
-            const TimeMap after = TimeMap::build(a, d.edits);
-            const double sr = a.sampleRate;
-            for (auto& p : d.pins) p.tgt = after.inToOut(before.outToIn(p.tgt * sr)) / sr;
+    // With an interval: melismas first (a note of ours under several reference notes is cut where
+    // they change), then every asked-for piece is pulled. One undo step for all of it.
+    const Key key = intervalKey();
+    const IntervalOptions opts = intervalOptions();
+    Document* d = doc();
+    const Document before = *d;
+    const int n0 = (int)eff_->notes.size();
+    std::vector<int> pull = selection_.empty() ? std::vector<int>{} : notes; // empty = every note
+    const Analysis* a = eff_;
+    bool cut = false;
+    const std::vector<NoteCuts> cuts = planMelismaCuts(*a, d->edits, links_.refNotes, links_.warp, pull);
+    if (!cuts.empty()) {
+        const std::vector<int> first = applyMelismaCuts(*d, *a, cuts, [this]() -> const Analysis* {
+            host_->documentChanged(true); // rebuild the layout before the next cut
+            return host_->analysis();
+        });
+        a = host_->analysis();
+        cut = first.back() != n0;
+        if (cut) host_->documentChanged(true); // the pieces were placed after the last rebuild
+        a = host_->analysis();
+        if (!pull.empty()) {
+            std::vector<int> pieces;
+            for (int i : pull)
+                if (i >= 0 && i < n0) for (int k = first[(size_t)i]; k < first[(size_t)i + 1]; ++k) pieces.push_back(k);
+            pull = pieces;
         }
-    });
+    }
+    if (a == nullptr) return;
+    const std::vector<IntervalFix> plan = planIntervalFix(*a, d->edits, key, links_.ref, links_.warp, pull, opts);
+    const TimeMap mapBefore = TimeMap::build(*a, d->edits);
+    const bool placed = applyIntervalFix(d->edits, *a, plan);
+    // Pins stay on the sound they were put on: their end on this track follows the time edit.
+    if (links_.pinsOn && !d->pins.empty()) {
+        const TimeMap after = TimeMap::build(*a, d->edits);
+        const double sr = a->sampleRate;
+        for (auto& p : d->pins) p.tgt = after.inToOut(mapBefore.outToIn(p.tgt * sr)) / sr;
+    }
+    if (serialize(before) == serialize(*d)) { refresh(); return; }
+    if (!selection_.empty()) selection_ = std::set<int>(pull.begin(), pull.end());
+    commit(before, cut);
     if (!placed && host_ != nullptr) host_->log(T("по времени ноты не подтянуты: не удалось расставить их без наложений"));
 }
 

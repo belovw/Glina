@@ -132,6 +132,23 @@ AlignOptions intervalAlignOptions(int steps);
 std::vector<IntervalFix> planIntervalFix(const Analysis& tgtA, const EditSet& tgtE, const Key& key,
                                          const std::vector<ThreadFrame>& ref, const Warp& warp,
                                          const std::vector<int>& notes, const IntervalOptions& opt = {});
+// ---- melismas: one note of ours where the reference sings several -----------------------
+// The reference's notes (after its edits) on the same timeline as its thread.
+struct RefNote {
+    double t0 = 0, t1 = 0, midi = 0;
+};
+// Where to cut a note of ours: analysis frames (input timeline), ascending.
+struct NoteCuts {
+    int note = -1;
+    std::vector<int> frames;
+};
+// For each note asked for (empty = every note; consonants never): the reference notes the warp
+// lays over it, each over at least `minSec`. Where two of them follow each other at different
+// pitches (half a semitone or more), the note is cut where the second one starts (through the
+// warp), so each piece can be pulled to its own note. Pieces are at least `minSec` long.
+std::vector<NoteCuts> planMelismaCuts(const Analysis& a, const EditSet& e, const std::vector<RefNote>& ref,
+                                      const Warp& warp, const std::vector<int>& notes, double minSec = 0.05);
+
 // Applies the planned pitch and time (time through placeNotes: order and lengths stay valid).
 // False when the time could not be placed (the pitch is applied anyway).
 bool applyIntervalFix(EditSet& e, const Analysis& a, const std::vector<IntervalFix>& fixes);

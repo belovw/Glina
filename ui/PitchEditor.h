@@ -48,6 +48,7 @@ public:
     juce::Point<float> linkEndForTest(float x, bool ref) const;
     int pinCountForTest() const { return doc() != nullptr ? (int)doc()->pins.size() : 0; }
     bool editLinksForTest() const { return editLinks_; }
+    int noteCountForTest() const { return eff_ != nullptr ? (int)eff_->notes.size() : 0; }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -194,6 +195,8 @@ private:
         int toFix = 0;                     // notes F would move
         std::vector<IntervalFix> pulls;    // with an interval: where F would pull every note
         int toPull = 0;                    // notes F would change (pitch or time)
+        std::vector<RefNote> refNotes;     // the reference's notes (its ghost), on the reference's thread timeline
+        std::vector<NoteCuts> cuts;        // with an interval: melismas F would cut (every note)
     };
     Links links_;
     // F (one undo step), on the selected notes or all: without an interval, move the wrong notes

@@ -306,6 +306,7 @@ public:
             if (args[i] == "--selftest") { selftest_ = true; continue; }
             if (args[i] == "--links") { links_ = true; continue; }
             if (args[i] == "--fix") { fix_ = true; continue; }
+            if (args[i] == "--fix-undo") { fix_ = fixUndo_ = true; continue; }
             if (args[i] == "--links-edit-test") { linksEdit_ = true; continue; }
             if (args[i] == "--interval" && i + 1 < args.size()) { interval_ = args[++i].getIntValue(); continue; } // box id: 2 unison, 3 third up...
             if (args[i] == "--light") continue;
@@ -375,7 +376,19 @@ private:
                 if (interval_ > 0) m.editor().setIntervalForTest(interval_);
                 return;
             }
-            if (fix_ && !fixDone_) { fixDone_ = true; m.editor().keyPressed(juce::KeyPress('f', {}, 'f')); return; }
+            if (fix_ && !fixDone_) {
+                fixDone_ = true;
+                const int n0 = m.editor().noteCountForTest();
+                m.editor().keyPressed(juce::KeyPress('f', {}, 'f'));
+                const int n1 = m.editor().noteCountForTest();
+                if (fixUndo_) {
+                    m.editor().keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+                    const int n2 = m.editor().noteCountForTest();
+                    m.editor().keyPressed(juce::KeyPress('z', juce::ModifierKeys(juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier), 'z'));
+                    std::printf("F: notes %d -> %d, one undo -> %d, redo -> %d\n", n0, n1, n2, m.editor().noteCountForTest());
+                } else std::printf("F: notes %d -> %d\n", n0, n1);
+                return;
+            }
             if (linksEdit_ && !linksEditDone_) { linksEditDone_ = true; linksEditTest(m); return; }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
@@ -784,6 +797,7 @@ private:
     juce::File shotFile_;
     int interval_ = 0; // --interval: the links' interval box id
     bool linksEdit_ = false, linksEditDone_ = false; // --links-edit-test
+    bool fixUndo_ = false; // --fix-undo: F, then one undo and a redo, note counts printed
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;
     bool tracksShown_ = false;

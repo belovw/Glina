@@ -1269,6 +1269,103 @@ static void testIntervalFix()
     }
 }
 
+// A melisma: the reference sings three notes on one vowel, the customer one smeared note.
+// F with an interval cuts the note where the reference changes notes; each piece goes to its own.
+static void testMelismaCuts()
+{
+    std::printf("[melisma] one note of ours over three of the reference: cut, each piece on its note\n");
+    const double sr = 48000;
+    auto thread = [](const Analysis& a, const EditSet& e) { return threadOf(a, e, nullptr, 0.0, (double)a.numSamples / a.sampleRate); };
+    Key amin; amin.tonic = 9; amin.minor = true;
+    // Reference: the demo phrase with note 6 sung as a run 60 - 59 - 57 on one vowel.
+    std::vector<test::SynthNote> refMel = test::demoMelody();
+    refMel[6] = {60, 0.28, 0, true, 0};
+    refMel.insert(refMel.begin() + 7, test::SynthNote{59, 0.26, 0, false, 0});
+    refMel.insert(refMel.begin() + 8, test::SynthNote{57, 0.42, 0, false, 0});
+    const test::SynthResult rs = test::synthesize(refMel, sr, 20, 5.6, 7);
+    const Analysis ra = analyze(rs.audio.data(), rs.audio.size(), sr);
+    EditSet re;
+    re.notes.resize(ra.notes.size());
+    const auto refT = thread(ra, re);
+    std::vector<RefNote> refNotes;
+    for (const Note& n : ra.notes) refNotes.push_back({n.startSec, n.endSec, n.centerMidi});
+    std::printf("  reference: %zu notes (sung %zu)\n", ra.notes.size(), refMel.size());
+
+    // Customer: the plain phrase (one long note 6, smeared at 58.4), 5 % slower, off by tens of cents.
+    std::vector<test::SynthNote> mel = test::demoMelody();
+    for (size_t k = 0; k < mel.size(); ++k) { mel[k].dur *= 1.05; mel[k].detuneCents = (k % 2 ? -40.0 : 35.0); }
+    mel[6].midi = 58.4;
+    mel[6].detuneCents = 0;
+    const test::SynthResult cs = test::synthesize(mel, sr, 25, 5.2, 99);
+    const Analysis base = analyze(cs.audio.data(), cs.audio.size(), sr);
+    // Our note over the run: the one holding the middle of the long note.
+    const double mid = 0.5 * (cs.noteStart[6] + cs.noteEnd[6]);
+    int run = -1;
+    for (int i = 0; i < (int)base.notes.size(); ++i)
+        if (base.notes[(size_t)i].startSec <= mid && mid < base.notes[(size_t)i].endSec) run = i;
+    CHECK(run >= 0, "customer: no note over the long note");
+    if (run < 0) return;
+
+    Document d;
+    d.edits.notes.resize(base.notes.size());
+    AlignInfo inf;
+    const Warp w = alignThreads(thread(base, d.edits), refT, intervalAlignOptions(0), {}, &inf);
+    const auto cuts = planMelismaCuts(base, d.edits, refNotes, w, {});
+    int cutsOnRun = 0, cutsElsewhere = 0;
+    for (const auto& c : cuts) (c.note == run ? cutsOnRun : cutsElsewhere) += (int)c.frames.size();
+    std::printf("  cuts: %d in the long note, %d elsewhere\n", cutsOnRun, cutsElsewhere);
+    CHECK(cutsOnRun == 2, "want 2 cuts in the long note, got %d", cutsOnRun);
+    CHECK(cutsElsewhere == 0, "%d cuts in other notes", cutsElsewhere);
+
+    // The long note was moved and stretched before (an earlier F): the cuts must not move its sound.
+    d.edits.notes[(size_t)run].timeOffsetSec = 0.03;
+    d.edits.notes[(size_t)run].stretch = 0.9; // shorter, so it overlaps no neighbour
+    const TimeMap mapBefore = TimeMap::build(base, d.edits);
+    Analysis eff = base;
+    const std::vector<int> first = applyMelismaCuts(d, eff, cuts, [&]() -> const Analysis* {
+        eff = withLayout(base, d.edits.spans);
+        return &eff;
+    });
+    CHECK((int)eff.notes.size() == (int)base.notes.size() + cutsOnRun + cutsElsewhere, "notes after the cuts: %zu",
+          eff.notes.size());
+    CHECK(first.size() == base.notes.size() + 1 && first.back() == (int)eff.notes.size(), "piece index map");
+    {
+        const TimeMap mapAfter = TimeMap::build(eff, d.edits);
+        double worst = 0;
+        for (double t = base.notes[(size_t)run].startSec; t < base.notes[(size_t)run].endSec; t += 0.01)
+            worst = std::max(worst, std::abs(mapAfter.inToOut(t * sr) - mapBefore.inToOut(t * sr)) / sr);
+        std::printf("    a moved, stretched note cut: its sound moved by %.2f ms at most\n", worst * 1000);
+        // Each piece keeps its own attack and release unstretched, so inside a piece the map differs by
+        // (40 ms attack) x (1 - stretch) at most; the piece edges stay exactly where they were.
+        CHECK(worst < 0.006, "cutting moved the note's sound by %.1f ms", worst * 1000);
+        double edges = 0;
+        for (int k = first[(size_t)run]; k < first[(size_t)run + 1]; ++k) {
+            const double t = eff.notes[(size_t)k].startSec * sr;
+            edges = std::max(edges, std::abs(mapAfter.inToOut(t) - mapBefore.inToOut(t)) / sr);
+        }
+        CHECK(edges < 1e-4, "a piece edge moved by %.2f ms", edges * 1000);
+        // Back to the plain layout for the pull below (the pieces stay).
+        for (int k = first[(size_t)run]; k < first[(size_t)run + 1]; ++k) {
+            d.edits.notes[(size_t)k].timeOffsetSec = 0;
+            d.edits.notes[(size_t)k].stretch = 1;
+        }
+    }
+    IntervalOptions o;
+    o.steps = 0;
+    o.timeAmount = 1.0;
+    const auto plan = planIntervalFix(eff, d.edits, amin, refT, w, {}, o);
+    CHECK(applyIntervalFix(d.edits, eff, plan), "time not placed after the cuts");
+    const double want[3] = {60, 59, 57};
+    for (int k = 0; k < 3 && first[(size_t)run] + k < (int)eff.notes.size(); ++k) {
+        const double c = editedCenter(eff, d.edits, first[(size_t)run] + k);
+        std::printf("    piece %d: %.2f (want %.0f)\n", k, c, want[k]);
+        CHECK(std::abs(c - want[k]) < 0.05, "piece %d at %.2f, want %.0f", k, c, want[k]);
+    }
+    // A note over one reference note is never cut.
+    std::vector<RefNote> one = {{0.0, 100.0, 60.0}};
+    CHECK(planMelismaCuts(base, EditSet{}, one, w, {}).empty(), "a note under one reference note was cut");
+}
+
 // Track view: two items of one track (the second off the frame grid, trimmed) as one clip.
 // Pins between a clip and its reference: kept sorted, never crossing a neighbour, saved with the document.
 static void testPins()
@@ -1460,6 +1557,7 @@ int main()
     testThreadAlign();
     testThreadFix();
     testIntervalFix();
+    testMelismaCuts();
     testTrackView();
     testPins();
     for (double sr : {44100.0, 48000.0}) {

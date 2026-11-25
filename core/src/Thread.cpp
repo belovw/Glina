@@ -581,6 +581,49 @@ std::vector<IntervalFix> planIntervalFix(const Analysis& a, const EditSet& e, co
     return out;
 }
 
+std::vector<NoteCuts> planMelismaCuts(const Analysis& a, const EditSet& e, const std::vector<RefNote>& refIn,
+                                      const Warp& warp, const std::vector<int>& notesIn, double minSec)
+{
+    std::vector<NoteCuts> out;
+    const int n = (int)a.notes.size();
+    if (warp.empty() || refIn.size() < 2 || n == 0) return out;
+    std::vector<RefNote> ref = refIn;
+    std::sort(ref.begin(), ref.end(), [](const RefNote& x, const RefNote& y) { return x.t0 < y.t0; });
+    std::vector<int> notes;
+    if (notesIn.empty()) for (int i = 0; i < n; ++i) notes.push_back(i);
+    else
+        for (int i : std::set<int>(notesIn.begin(), notesIn.end()))
+            if (i >= 0 && i < n) notes.push_back(i);
+    const TimeMap map = TimeMap::build(a, e);
+    const std::vector<NoteTimes> times = noteTimes(a, e);
+    const double sr = a.sampleRate;
+    for (int i : notes) {
+        if (i < (int)e.notes.size() && e.notes[(size_t)i].consonant) continue;
+        const double s = times[(size_t)i].outStart, en = times[(size_t)i].outEnd;
+        const double rs = warp.map(s), re = warp.map(en);
+        // The reference notes over this note, each over at least minSec of it.
+        std::vector<const RefNote*> over;
+        for (const RefNote& r : ref)
+            if (std::min(re, r.t1) - std::max(rs, r.t0) >= minSec) over.push_back(&r);
+        NoteCuts c;
+        c.note = i;
+        double last = s;
+        for (size_t k = 1; k < over.size(); ++k) {
+            if (std::abs(over[k]->midi - over[k - 1]->midi) < 0.5) continue; // the same pitch: no cut needed
+            // Where the next note starts (the middle of a gap between them), on our timeline.
+            const double b = over[k]->t0 > over[k - 1]->t1 ? 0.5 * (over[k - 1]->t1 + over[k]->t0) : over[k]->t0;
+            const double t = warp.unmap(b);
+            if (t - last < minSec || en - t < minSec) continue;
+            const int f = (int)std::lround(map.outToIn(t * sr) / a.hop);
+            if (f <= a.notes[(size_t)i].startFrame || f >= a.notes[(size_t)i].endFrame) continue;
+            c.frames.push_back(f);
+            last = t;
+        }
+        if (!c.frames.empty()) out.push_back(std::move(c));
+    }
+    return out;
+}
+
 bool applyIntervalFix(EditSet& e, const Analysis& a, const std::vector<IntervalFix>& fixes)
 {
     const int n = (int)a.notes.size();

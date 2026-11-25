@@ -1,4 +1,5 @@
 #include "glina/Document.h"
+#include "glina/Editing.h"
 #include "glina/Notes.h"
 #include "glina/Renderer.h"
 #include "glina/Tuning.h"
@@ -66,6 +67,44 @@ bool splitNote(Document& d, const Analysis& eff, int i, int frame)
     for (auto& v : d.voices)
         if (!v.noteMask.empty()) v.noteMask.insert(v.noteMask.begin() + i + 1, v.noteMask[(size_t)i]);
     return true;
+}
+
+std::vector<int> applyMelismaCuts(Document& d, const Analysis& eff, const std::vector<NoteCuts>& cutsIn,
+                                  const std::function<const Analysis*()>& rebuild)
+{
+    const int n = (int)eff.notes.size();
+    std::vector<int> pieces((size_t)n, 1);
+    std::vector<NoteCuts> cuts = cutsIn;
+    std::sort(cuts.begin(), cuts.end(), [](const NoteCuts& x, const NoteCuts& y) { return x.note > y.note; });
+    const Analysis* a = &eff;
+    const TimeMap was = TimeMap::build(eff, d.edits); // the pieces keep the note's placement
+    for (const NoteCuts& c : cuts) {
+        if (c.note < 0 || c.note >= n) continue;
+        std::vector<int> fr = c.frames;
+        std::sort(fr.rbegin(), fr.rend()); // the last cut first: the note keeps its index, its end moves in
+        for (int f : fr) {
+            if (a == nullptr) break;
+            if (!splitNote(d, *a, c.note, f)) continue;
+            ++pieces[(size_t)c.note];
+            a = rebuild();
+        }
+    }
+    std::vector<int> first((size_t)n + 1, 0);
+    for (int i = 0; i < n; ++i) first[(size_t)i + 1] = first[(size_t)i] + pieces[(size_t)i];
+    // Each piece copied its note's move and stretch; a stretched note's pieces would then not join up.
+    // Place every piece where its part of the note was.
+    if (a != nullptr && first[(size_t)n] == (int)a->notes.size() && first[(size_t)n] != n) {
+        std::vector<NoteTimes> t = noteTimes(*a, d.edits);
+        const double sr = a->sampleRate;
+        for (int i = 0; i < n; ++i)
+            if (pieces[(size_t)i] > 1)
+                for (int k = first[(size_t)i]; k < first[(size_t)i + 1]; ++k) {
+                    t[(size_t)k].outStart = was.inToOut(t[(size_t)k].inStart * sr) / sr;
+                    t[(size_t)k].outEnd = was.inToOut(t[(size_t)k].inEnd * sr) / sr;
+                }
+        applyNoteTimes(d.edits, *a, t);
+    }
+    return first;
 }
 
 bool joinNotes(Document& d, const Analysis& eff, int i)

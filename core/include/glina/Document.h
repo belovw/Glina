@@ -8,6 +8,7 @@
 #include "glina/Types.h"
 
 #include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,12 @@ void conform(Document& d, const Analysis& eff);
 bool splitNote(Document& d, const Analysis& eff, int note, int frame);
 // Join note `note` with the next one (must be adjacent or separated by < 40 ms).
 bool joinNotes(Document& d, const Analysis& eff, int note);
+
+// Cuts notes where planMelismaCuts says (splitNote, so each piece keeps the note's edits).
+// `eff` is the analysis for `d` as it is; `rebuild` returns it again after each cut (the layout
+// changed). Returns, per note before the cuts, the index of its first piece; [n] = the new count.
+std::vector<int> applyMelismaCuts(Document& d, const Analysis& eff, const std::vector<NoteCuts>& cuts,
+                                  const std::function<const Analysis*()>& rebuild);
 
 std::string serialize(const Document& d);
 bool deserialize(const std::string& text, Document& d);
