@@ -1319,7 +1319,7 @@ static void testMoveCut(const Analysis& a)
 
 static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double sr)
 {
-    std::printf("[gaps] notes pulled apart: the gap is silent; a pause keeps its length before the later note\n");
+    std::printf("[gaps] notes pulled apart: silence only where the recording is silent, no break inside a word\n");
     const int n = (int)a.notes.size();
     EditSet e0;
     e0.notes.resize((size_t)n);
@@ -1341,55 +1341,84 @@ static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double
         moveNotes(e, a, {touch + 1}, 0.02);
         CHECK(TimeMap::build(a, e).silences().empty(), "soft move: no silence");
     }
-    { // hard: the left note's end pulled back 0.2 s; the right note stays
+    { // hard: the left note's end pulled back 0.2 s; the right note stays. Inside a word (the
+      // notes touched): no break, the left note's release holds on to the right note.
         EditSet e = e0;
         toggleSeparation(e, a, touch);
         const double applied = moveBoundary(e, a, touch, -0.2, {}, false);
         const TimeMap m = TimeMap::build(a, e);
         CHECK(applied < -0.19, "the edge moved (%.4f)", applied);
-        CHECK(m.silences().size() == 1, "one silence (%d)", (int)m.silences().size());
-        if (m.silences().size() != 1) return;
-        const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
-        std::printf("  touching pair: silence %.4f..%.4f s\n", s0 / sr, s1 / sr);
-        CHECK(std::abs(s0 - m.noteEndOut((size_t)touch)) < 1e-6 && std::abs(s1 - m.noteStartOut((size_t)touch + 1)) < 1e-6,
-              "the silence is the gap between the notes");
+        CHECK(m.silences().empty(), "touching notes pulled apart: no silence (%d)", (int)m.silences().size());
+        CHECK(std::abs(m.noteMainEndOut((size_t)touch) - m.noteStartOut((size_t)touch + 1)) < 2,
+              "the left note sounds up to the right one");
         CHECK(std::abs(m.noteStartOut((size_t)touch + 1) / sr - t[(size_t)touch + 1].outStart) < 2.0 / sr, "the right note stays in place");
-        CHECK(std::abs((s1 - s0) / sr - 0.2) < 0.003, "the gap is 0.2 s (%.4f)", (s1 - s0) / sr);
-        const double joint = a.notes[(size_t)touch].endSec * sr;
-        CHECK(std::abs(m.inToOutBefore(joint) - s0) < 1 && std::abs(m.inToOut(joint) - s1) < 1, "the joint maps to both ends of the silence");
-        // The line of the right note's first frame sits after the silence, the left note's last before it.
-        const int fr = a.notes[(size_t)touch + 1].startFrame;
-        CHECK(m.silenceBetween((fr - 1) * (double)a.hop, fr * (double)a.hop), "the pitch line breaks at the silence");
-        CHECK(m.inToOut(fr * (double)a.hop) > s1 && m.inToOut((fr - 1) * (double)a.hop) < s0, "frames on either side");
         const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
         CHECK(y.size() == y0.size(), "the clip keeps its length");
-        double peak = 0;
-        for (long o = (long)std::ceil(s0); o < (long)std::floor(s1) && o < (long)y.size(); ++o) peak = std::max(peak, std::abs((double)y[(size_t)o]));
-        double after = 0;
-        for (long o = (long)(s1 + fade); o < (long)(s1 + fade + 0.05 * sr) && o < (long)y.size(); ++o) after += (double)y[(size_t)o] * y[(size_t)o];
-        after = std::sqrt(after / (0.05 * sr));
-        std::printf("  rendered: peak in the gap %.6f, level after it %.4f\n", peak, after);
-        CHECK(peak == 0, "the gap is silent");
-        CHECK(after > 0.01, "the right note sounds after it");
-        CHECK(m.gainAt(0.5 * (s0 + s1), fade) == 0 && m.gainAt(s1 + 2 * fade, fade) == 1 && m.gainAt(s0 - 2 * fade, fade) == 1,
-              "A/B follows the same silence");
-        const double mid = m.gainAt(s0 - 0.5 * fade, fade);
-        CHECK(mid > 0.4 && mid < 0.6, "a short fade before the silence (%.3f)", mid);
+        // The level through the gap, in 10 ms windows, against the left note just before it.
+        auto rms = [&](double o0) {
+            double q = 0;
+            const long w = (long)(0.010 * sr);
+            for (long o = (long)o0; o < (long)o0 + w && o < (long)y.size(); ++o) q += (double)y[(size_t)o] * y[(size_t)o];
+            return std::sqrt(q / (double)w);
+        };
+        const double g0 = t[(size_t)touch].outEnd * sr + applied * sr, g1 = m.noteStartOut((size_t)touch + 1);
+        const double before = rms(g0 - 0.03 * sr);
+        double low = 1e9;
+        for (double o = g0; o + 0.010 * sr <= g1; o += 0.005 * sr) low = std::min(low, rms(o));
+        // The recording's own dip at the joint (the transition), for comparison.
+        const double joint = a.notes[(size_t)touch].endSec * sr;
+        double dip = 1e9;
+        for (double o = joint - 0.05 * sr; o + 0.010 * sr <= joint + 0.01 * sr; o += 0.005 * sr) {
+            double q = 0;
+            for (long k = 0; k < (long)(0.010 * sr); ++k) q += (double)s.audio[(size_t)((long)o + k)] * s.audio[(size_t)((long)o + k)];
+            dip = std::min(dip, std::sqrt(q / (0.010 * sr)));
+        }
+        std::printf("  touching pair pulled apart: gap %.3f s, lowest level in it %.4f (note before %.4f, the joint's own dip %.4f)\n",
+                    (g1 - g0) / sr, low, before, dip);
+        CHECK(low > 0.6 * dip, "no break in the gap (%.4f against the joint's %.4f)", low, dip);
+        double lowBefore = 1e9; // the held part, before the transition
+        for (double o = g0; o + 0.010 * sr <= g1 - 0.05 * sr; o += 0.005 * sr) lowBefore = std::min(lowBefore, rms(o));
+        CHECK(lowBefore > 0.6 * before, "the note holds on at its level (%.4f against %.4f)", lowBefore, before);
     }
-    { // a pause between the notes: the right note moved later; the pause keeps its length before it
+    { // a pause with sound all through (an 's'): the right note moved later. No silence: the pause
+      // stretches up to kMaxPauseStretch, the left note holds on for the rest.
         EditSet e = e0;
         const double applied = moveNotes(e, a, {gap + 1}, 0.1);
         const TimeMap m = TimeMap::build(a, e);
         const double pause = a.notes[(size_t)gap + 1].startSec - a.notes[(size_t)gap].endSec;
-        std::printf("  pause %.4f s, note moved %.4f s, %d silence(s)\n", pause, applied, (int)m.silences().size());
+        const double pauseOut = (m.noteStartOut((size_t)gap + 1) - m.noteMainEndOut((size_t)gap)) / sr;
+        const double held = (m.noteMainEndOut((size_t)gap) - m.noteEndOut((size_t)gap)) / sr;
+        std::printf("  pause %.4f s -> %.4f s, note moved %.4f s, held %.4f s, %d silence(s)\n", pause, pauseOut, applied, held,
+                    (int)m.silences().size());
         CHECK(applied > 3 * kMinSilenceSec, "the note moved");
+        CHECK(m.silences().empty(), "no silence where the recording sounds");
+        CHECK(pauseOut <= kMaxPauseStretch * pause + 1e-4, "the pause stretched %.2f times", pauseOut / pause);
+        CHECK(std::abs(pauseOut + held - pause - applied) < 1e-3, "pause and held note take the move");
+    }
+    { // a real silence in the pause: the move goes into it; the release and the consonant keep their speed
+        const long at = (long)(0.5 * (a.notes[(size_t)gap].endSec + a.notes[(size_t)gap + 1].startSec) * sr);
+        std::vector<float> x(s.audio.begin(), s.audio.begin() + at);
+        x.insert(x.end(), (size_t)(0.15 * sr), 0.f);
+        x.insert(x.end(), s.audio.begin() + at, s.audio.end());
+        const Analysis b = analyze(x.data(), x.size(), sr);
+        int k = -1; // the pair around the inserted silence
+        for (int j = 0; j + 1 < (int)b.notes.size(); ++j)
+            if (b.notes[(size_t)j].endSec * sr < at && b.notes[(size_t)j + 1].startSec * sr > at + 0.15 * sr) k = j;
+        CHECK(k >= 0, "the pair around the silence");
+        if (k < 0) return;
+        EditSet e;
+        e.notes.resize(b.notes.size());
+        const double applied = moveNotes(e, b, {k + 1}, 0.1);
+        const TimeMap m = TimeMap::build(b, e);
+        std::printf("  a silent pause: note moved %.4f s, %d silence(s)\n", applied, (int)m.silences().size());
         CHECK(m.silences().size() == 1, "one silence");
         if (m.silences().size() != 1) return;
-        const double r = m.noteStartOut((size_t)gap + 1) / sr;
-        CHECK(std::abs(m.silences()[0].second / sr - (r - pause)) < 1e-6, "the silence ends where the pause begins");
-        CHECK(std::abs((m.silences()[0].second - m.silences()[0].first) / sr - applied) < 1e-3, "the silence is the move");
-        CHECK(std::abs(m.outToIn((r - 0.5 * pause) * sr) / sr - (a.notes[(size_t)gap + 1].startSec - 0.5 * pause)) < 1e-6,
-              "the pause plays at its own speed just before the note");
+        const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
+        CHECK(std::abs((s1 - s0) / sr - applied) < 1e-3, "the silence is the move");
+        CHECK(s0 > m.noteMainEndOut((size_t)k) + 0.02 * sr && s1 < m.noteStartOut((size_t)k + 1) - 0.02 * sr, "inside the pause");
+        const double l = m.noteMainEndOut((size_t)k) / sr, r = m.noteStartOut((size_t)k + 1) / sr;
+        CHECK(std::abs(m.outToIn((l + 0.01) * sr) / sr - (b.notes[(size_t)k].endSec + 0.01)) < 1e-6, "the release keeps its speed");
+        CHECK(std::abs(m.outToIn((r - 0.01) * sr) / sr - (b.notes[(size_t)k + 1].startSec - 0.01)) < 1e-6, "the consonant keeps its speed");
     }
     { // grown by less than the shortest silence: stretched as before
         EditSet e = e0;
@@ -1970,6 +1999,59 @@ static void testIntervalFix()
     }
 }
 
+// Consonants ('s' before notes) after time edits: the noise is copied as recorded, not
+// rebuilt from grains out of phase (that lost up to two thirds of its highs: "cut" consonants).
+static void testConsonantsKept()
+{
+    std::printf("[consonants] moved and stretched notes keep their consonants whole\n");
+    const double sr = 48000;
+    std::vector<test::SynthNote> mel = test::demoMelody();
+    for (size_t k = 1; k < mel.size(); ++k) mel[k].sibilantBefore = true;
+    const test::SynthResult s = test::synthesize(mel, sr);
+    const Analysis an = analyze(s.audio.data(), s.audio.size(), sr);
+    auto hp = [](const std::vector<float>& x) {
+        std::vector<double> y(x.size(), 0.0);
+        for (size_t i = 2; i < x.size(); ++i) y[i] = x[i] - 2.0 * x[i - 1] + x[i - 2];
+        return y;
+    };
+    auto energy = [](const std::vector<double>& y, double a, double b) {
+        double e = 0;
+        for (long i = std::max(0L, (long)a); i < std::min((long)y.size(), (long)b); ++i) e += y[(size_t)i] * y[(size_t)i];
+        return e;
+    };
+    const auto hin = hp(s.audio);
+    struct Case { const char* name; std::function<void(EditSet&)> edit; };
+    const std::vector<Case> cases = {
+        {"a note 60 ms later", [](EditSet& e) { e.notes[3].timeOffsetSec = 0.06; }},
+        {"a note 40 ms earlier", [](EditSet& e) { e.notes[6].timeOffsetSec = -0.04; }},
+        {"a note stretched into its pause", [](EditSet& e) { e.notes[5].stretch = 1.15; }},
+        {"a phrase 80 ms later", [](EditSet& e) { for (int i = 3; i <= 5; ++i) e.notes[(size_t)i].timeOffsetSec = 0.08; }},
+    };
+    for (const auto& c : cases) {
+        EditSet e;
+        e.notes.resize(an.notes.size());
+        c.edit(e);
+        const std::vector<float> out = render(s.audio.data(), s.audio.size(), an, e);
+        const TimeMap m = TimeMap::build(an, e);
+        const auto hout = hp(out);
+        double worst = 10, best = 0;
+        for (int i = 1; i < (int)an.notes.size(); ++i) {
+            int f0 = -1, f1 = -1;
+            for (int f = an.notes[(size_t)i - 1].endFrame; f < an.notes[(size_t)i].startFrame; ++f)
+                if (an.frames[(size_t)f].kind == FrameKind::Sibilant) { if (f0 < 0) f0 = f; f1 = f + 1; }
+            if (f0 < 0) continue;
+            // The level of the highs over the consonant, where the map puts it (it may be stretched).
+            const double a0 = f0 * (double)an.hop, a1 = f1 * (double)an.hop;
+            const double o0 = m.mainInToOut(a0), o1 = m.mainInToOut(a1);
+            const double pin = energy(hin, a0, a1) / (a1 - a0), pout = energy(hout, o0, o1) / std::max(1.0, o1 - o0);
+            worst = std::min(worst, pout / pin);
+            best = std::max(best, pout / pin);
+        }
+        std::printf("  %-34s consonants keep %.0f..%.0f %% of their highs\n", c.name, worst * 100, best * 100);
+        CHECK(worst > 0.85 && best < 1.25, "%s: a consonant kept %.0f..%.0f %% of its highs", c.name, worst * 100, best * 100);
+    }
+}
+
 // A melisma: the reference sings three notes on one vowel, the customer one smeared note.
 // F with an interval cuts the note where the reference changes notes; each piece goes to its own.
 static void testMelismaCuts()
@@ -2259,6 +2341,7 @@ int main()
     testThreadFix();
     testIntervalFix();
     testMelismaCuts();
+    testConsonantsKept();
     testTrackView();
     testTrackViewCut();
     testPins();

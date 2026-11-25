@@ -11,7 +11,8 @@ namespace glina {
 // analysis, synthesis, harmonies or mixing change the rendered audio of an existing
 // project: the plug-in keeps renders next to the DAW project and marks those made by
 // another version (they stay as they are until the user re-renders or edits the clip).
-inline constexpr int kRenderVersion = 3; // 2: gaps opened between notes are silent; 3: overlaps
+inline constexpr int kRenderVersion = 4; // 2: gaps opened between notes are silent; 3: overlaps;
+                                         // 4: consonants copied whole after time edits, overlays without a seam
 
 // Monotonic piecewise-linear mapping between input and output sample time.
 // Built from note timing edits; identity when nothing was moved/stretched.
@@ -72,6 +73,11 @@ private:
 // Shortest silence the time map opens (seconds): a gap that grows by less than this
 // stretches the audio between the notes instead.
 inline constexpr double kMinSilenceSec = 0.010;
+// A gap opened between notes becomes silence only inside a silent run of the recording this long.
+inline constexpr double kMinSilentRunSec = 0.020;
+// A pause with sound all through (a consonant, a glide) stretches at most this much when the notes
+// around it move apart; the note before it holds on for the rest.
+inline constexpr double kMaxPauseStretch = 1.5;
 // Fade into and out of a silence (seconds), in the audio on either side.
 inline constexpr double kSilenceFadeSec = 0.005;
 
