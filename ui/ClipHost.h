@@ -88,6 +88,8 @@ public:
     }
     // A short note for the status line (e.g. where an undo landed); empty = none.
     virtual juce::String noticeText() const { return {}; }
+    // A lasting problem the user must know about (e.g. edits that cannot be heard); empty = none.
+    virtual juce::String warningText() const { return {}; }
 
     // The whole timeline the overview strip shows, in the view's seconds: each item with its name and
     // notes, and the audio level every kLevelStep seconds. False: the editor uses the clip alone.

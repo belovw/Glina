@@ -86,6 +86,7 @@ public:
     bool restoredFromArchive = false; // next render is the first after loading the project
     bool renderFromDisk = false;   // the cache came from the project folder...
     int renderEngineVersion = kRenderVersion; // ...made by this engine version
+    juce::String renderError;      // the last render failed (why); empty once one succeeds
     void setCache(std::shared_ptr<const RenderCache> c);
     std::shared_ptr<const RenderCache> currentCache() const; // message thread
     juce::String sourceName() const;

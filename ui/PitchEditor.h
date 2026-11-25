@@ -232,6 +232,7 @@ private:
     juce::String editedName_;                                    // name of the track being edited
     juce::String trackSig_;                                      // detects added/removed tracks
     int trackPoll_ = 0;
+    juce::String lastWarning_; // host warning last shown in the status line
     bool pencil_ = false;
     juce::TextButton pencilBtn_, gridBtn_;
     juce::TextButton renderBtn_; // plug-in: render kept in the project folder

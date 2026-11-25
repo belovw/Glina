@@ -1,6 +1,7 @@
 #include "ReaperHost.h"
 
 #include <atomic>
+#include <cmath>
 #include <limits>
 
 JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wnon-virtual-dtor", "-Wzero-as-null-pointer-constant", "-Wunused-parameter",
@@ -36,6 +37,8 @@ namespace {
 using FnEnumProjects = void* (*)(int idx, char* projfnOutOptional, int projfnOutOptional_sz);
 using FnIsProjectDirty = int (*)(void* proj);
 using FnGetCursorPositionEx = double (*)(void* proj);
+using FnGetPlayStateEx = int (*)(void* proj);
+using FnGetPlayPositionEx = double (*)(void* proj);
 using FnCountTrackMediaItems = int (*)(void* track);
 using FnGetTrackMediaItem = void* (*)(void* track, int itemidx);
 using FnGetMediaItemInfo_Value = double (*)(void* item, const char* parmname);
@@ -44,10 +47,17 @@ using FnGetTrackName = bool (*)(void* track, char* bufOut, int bufOut_sz);
 using FnGetActiveTake = void* (*)(void* item);
 using FnGetMediaItemTake = void* (*)(void* item, int takeidx);
 using FnGetMediaItemNumTakes = int (*)(void* item);
+using FnTakeFX_GetCount = int (*)(void* take);
+using FnTakeFX_GetFXName = bool (*)(void* take, int fx, char* bufOut, int bufOut_sz);
+using FnTakeFX_GetEnabled = bool (*)(void* take, int fx);
+using FnTakeFX_GetOffline = bool (*)(void* take, int fx);
+using FnTakeFX_GetNamedConfigParm = bool (*)(void* take, int fx, const char* parmname, char* bufOut, int bufOut_sz);
 
 std::atomic<FnEnumProjects> enumProjects { nullptr };
 std::atomic<FnIsProjectDirty> isProjectDirty { nullptr };
 std::atomic<FnGetCursorPositionEx> getCursorPositionEx { nullptr };
+std::atomic<FnGetPlayStateEx> getPlayStateEx { nullptr };
+std::atomic<FnGetPlayPositionEx> getPlayPositionEx { nullptr };
 std::atomic<FnCountTrackMediaItems> countTrackMediaItems { nullptr };
 std::atomic<FnGetTrackMediaItem> getTrackMediaItem { nullptr };
 std::atomic<FnGetMediaItemInfo_Value> getMediaItemInfoValue { nullptr };
@@ -56,6 +66,11 @@ std::atomic<FnGetTrackName> getTrackName { nullptr };
 std::atomic<FnGetActiveTake> getActiveTake { nullptr };
 std::atomic<FnGetMediaItemTake> getMediaItemTake { nullptr };
 std::atomic<FnGetMediaItemNumTakes> getMediaItemNumTakes { nullptr };
+std::atomic<FnTakeFX_GetCount> takeFxCount { nullptr };
+std::atomic<FnTakeFX_GetFXName> takeFxName { nullptr };
+std::atomic<FnTakeFX_GetEnabled> takeFxEnabled { nullptr };
+std::atomic<FnTakeFX_GetOffline> takeFxOffline { nullptr };
+std::atomic<FnTakeFX_GetNamedConfigParm> takeFxConfig { nullptr };
 
 IReaperHostApplication* rh(void* p) { return static_cast<IReaperHostApplication*>(p); }
 
@@ -78,6 +93,10 @@ void HostLink::attach(Steinberg::FUnknown* hostContext)
         isProjectDirty = reinterpret_cast<FnIsProjectDirty>(rh(obj)->getReaperApi("IsProjectDirty"));
     if (getCursorPositionEx.load() == nullptr)
         getCursorPositionEx = reinterpret_cast<FnGetCursorPositionEx>(rh(obj)->getReaperApi("GetCursorPositionEx"));
+    if (getPlayStateEx.load() == nullptr)
+        getPlayStateEx = reinterpret_cast<FnGetPlayStateEx>(rh(obj)->getReaperApi("GetPlayStateEx"));
+    if (getPlayPositionEx.load() == nullptr)
+        getPlayPositionEx = reinterpret_cast<FnGetPlayPositionEx>(rh(obj)->getReaperApi("GetPlayPositionEx"));
     if (countTrackMediaItems.load() == nullptr)
         countTrackMediaItems = reinterpret_cast<FnCountTrackMediaItems>(rh(obj)->getReaperApi("CountTrackMediaItems"));
     if (getTrackMediaItem.load() == nullptr)
@@ -94,6 +113,16 @@ void HostLink::attach(Steinberg::FUnknown* hostContext)
         getMediaItemTake = reinterpret_cast<FnGetMediaItemTake>(rh(obj)->getReaperApi("GetMediaItemTake"));
     if (getMediaItemNumTakes.load() == nullptr)
         getMediaItemNumTakes = reinterpret_cast<FnGetMediaItemNumTakes>(rh(obj)->getReaperApi("GetMediaItemNumTakes"));
+    if (takeFxCount.load() == nullptr)
+        takeFxCount = reinterpret_cast<FnTakeFX_GetCount>(rh(obj)->getReaperApi("TakeFX_GetCount"));
+    if (takeFxName.load() == nullptr)
+        takeFxName = reinterpret_cast<FnTakeFX_GetFXName>(rh(obj)->getReaperApi("TakeFX_GetFXName"));
+    if (takeFxEnabled.load() == nullptr)
+        takeFxEnabled = reinterpret_cast<FnTakeFX_GetEnabled>(rh(obj)->getReaperApi("TakeFX_GetEnabled"));
+    if (takeFxOffline.load() == nullptr)
+        takeFxOffline = reinterpret_cast<FnTakeFX_GetOffline>(rh(obj)->getReaperApi("TakeFX_GetOffline"));
+    if (takeFxConfig.load() == nullptr)
+        takeFxConfig = reinterpret_cast<FnTakeFX_GetNamedConfigParm>(rh(obj)->getReaperApi("TakeFX_GetNamedConfigParm"));
 }
 
 void* HostLink::project() const
@@ -104,6 +133,11 @@ void* HostLink::project() const
 void* HostLink::track() const
 {
     return reaperHost_ != nullptr ? rh(reaperHost_)->getReaperParent(1) : nullptr;
+}
+
+void* HostLink::take() const
+{
+    return reaperHost_ != nullptr ? rh(reaperHost_)->getReaperParent(2) : nullptr;
 }
 
 bool available() { return enumProjects.load() != nullptr; }
@@ -147,7 +181,19 @@ double cursorSec(void* project)
     return f != nullptr && project != nullptr ? f(project) : std::numeric_limits<double>::quiet_NaN();
 }
 
-bool trackInfo(void* track, TrackInfo& out)
+bool transport(void* project, double& sec, bool& playing)
+{
+    const auto state = getPlayStateEx.load();
+    const auto play = getPlayPositionEx.load();
+    const auto cursor = getCursorPositionEx.load();
+    if (project == nullptr || state == nullptr || play == nullptr || cursor == nullptr) return false;
+    const int st = state(project); // &1 playing, &2 paused, &4 recording
+    playing = (st & 1) != 0 && (st & 2) == 0;
+    sec = (st & 3) != 0 ? play(project) : cursor(project);
+    return std::isfinite(sec);
+}
+
+bool trackInfo(void* track, TrackInfo& out, bool glina)
 {
     const auto count = countTrackMediaItems.load();
     const auto item = getTrackMediaItem.load();
@@ -176,8 +222,41 @@ bool trackInfo(void* track, TrackInfo& out)
                 if (takeAt(it, j) == active) number = j + 1;
         }
         out.itemTakes.push_back(number);
+        if (glina) out.itemGlina.push_back(activeTake != nullptr ? glinaOfTake(activeTake(it)) : GlinaFx::unknown);
     }
     return true;
+}
+
+GlinaFx glinaOfTake(void* take)
+{
+    const auto count = takeFxCount.load();
+    const auto enabled = takeFxEnabled.load();
+    if (take == nullptr || count == nullptr || enabled == nullptr) return GlinaFx::unknown;
+    const auto name = takeFxName.load();
+    const auto offline = takeFxOffline.load();
+    const auto config = takeFxConfig.load();
+    // Glina by its plug-in identity (a renamed instance keeps it), else by the shown name.
+    auto isGlina = [&](int fx) {
+        std::vector<char> buf(1024, 0);
+        for (const char* parm : {"fx_ident", "original_name"}) {
+            buf[0] = 0;
+            if (config != nullptr && config(take, fx, parm, buf.data(), (int)buf.size()) &&
+                juce::String::fromUTF8(buf.data()).containsIgnoreCase("glina"))
+                return true;
+        }
+        buf[0] = 0;
+        return name != nullptr && name(take, fx, buf.data(), (int)buf.size()) &&
+               juce::String::fromUTF8(buf.data()).containsIgnoreCase("glina");
+    };
+    GlinaFx best = GlinaFx::none;
+    const int n = count(take);
+    for (int fx = 0; fx < n; ++fx) {
+        if (!isGlina(fx)) continue;
+        if (offline != nullptr && offline(take, fx)) { if (best == GlinaFx::none) best = GlinaFx::offline; continue; }
+        if (enabled(take, fx)) return GlinaFx::on;
+        best = GlinaFx::bypassed;
+    }
+    return best;
 }
 
 } // namespace glina::plugin::reaper

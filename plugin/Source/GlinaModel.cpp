@@ -421,38 +421,59 @@ void GlinaDocumentController::startRender(GlinaAudioModification* mod)
     mod->restoredFromArchive = false;
     const juce::String name = mod->sourceName();
     pool.addJob([this, mod, data, doc, eff, version, alive, key, folders, firstAfterLoad, name] {
-        auto cache = std::make_shared<RenderCache>();
-        renderstore::Loaded saved;
-        const size_t maxLength = data->mono.size() + (size_t)(60.0 * data->sampleRate);
-        if (renderstore::find(folders, key, data->sampleRate, maxLength, saved)) {
-            cache->sampleRate = saved.sampleRate;
-            cache->left = std::move(saved.left);
-            cache->right = std::move(saved.right);
-            cache->version = saved.version;
-            cache->fromDisk = true;
-            juce::String msg;
-            msg << T("«") << name << T("»: рендер из папки проекта ") << saved.file.getFullPathName();
-            if (saved.version != kRenderVersion) msg << T(" (прежняя версия движка: r") << saved.version << T(", сейчас r") << kRenderVersion << ")";
-            logLine(msg);
-        } else {
-            if (firstAfterLoad && reaper::available()) {
+        // A job must not throw (the pool would swallow it and the clip would never render again).
+        std::shared_ptr<RenderCache> cache;
+        juce::String failure;
+        try {
+            cache = std::make_shared<RenderCache>();
+            renderstore::Loaded saved;
+            const size_t maxLength = data->mono.size() + (size_t)(60.0 * data->sampleRate);
+            if (renderstore::find(folders, key, data->sampleRate, maxLength, saved)) {
+                cache->sampleRate = saved.sampleRate;
+                cache->left = std::move(saved.left);
+                cache->right = std::move(saved.right);
+                cache->version = saved.version;
+                cache->fromDisk = true;
                 juce::String msg;
-                msg << T("«") << name << T("»: сохранённого рендера нет (ключ ") << renderstore::keyText(key) << T("), считаю заново; ")
-                    << (folders.empty() ? T("папка проекта неизвестна (проект не сохранён?)") : T("искал в:"));
-                for (const auto& f : folders) msg << " " << f.getFullPathName() << ";";
+                msg << T("«") << name << T("»: рендер из папки проекта ") << saved.file.getFullPathName();
+                if (saved.version != kRenderVersion) msg << T(" (прежняя версия движка: r") << saved.version << T(", сейчас r") << kRenderVersion << ")";
                 logLine(msg);
+            } else {
+                if (firstAfterLoad && reaper::available()) {
+                    juce::String msg;
+                    msg << T("«") << name << T("»: сохранённого рендера нет (ключ ") << renderstore::keyText(key) << T("), считаю заново; ")
+                        << (folders.empty() ? T("папка проекта неизвестна (проект не сохранён?)") : T("искал в:"));
+                    for (const auto& f : folders) msg << " " << f.getFullPathName() << ";";
+                    logLine(msg);
+                }
+                Mix m = renderMix(data->mono.data(), data->mono.size(), *eff, doc);
+                cache->sampleRate = data->sampleRate;
+                cache->left = std::move(m.left);
+                cache->right = std::move(m.right);
             }
-            Mix m = renderMix(data->mono.data(), data->mono.size(), *eff, doc);
-            cache->sampleRate = data->sampleRate;
-            cache->left = std::move(m.left);
-            cache->right = std::move(m.right);
+            cache->key = key;
+            cache->map = TimeMap::build(*eff, doc.edits);
+        } catch (const std::exception& e) {
+            cache.reset();
+            failure = juce::String::fromUTF8(e.what());
+        } catch (...) {
+            cache.reset();
+            failure = T("неизвестная ошибка");
         }
-        cache->key = key;
-        cache->map = TimeMap::build(*eff, doc.edits);
 
-        juce::MessageManager::callAsync([this, mod, cache, version, alive] {
+        juce::MessageManager::callAsync([this, mod, cache, version, alive, failure, name] {
             if (!*alive) return;
             mod->renderRunning = false;
+            if (cache == nullptr) {
+                // The last good render keeps playing; the editor says so until a render succeeds.
+                logLine(T("«") + name + T("»: рендер не удался (") + failure + T("), звучит прежний"));
+                mod->renderError = failure.isNotEmpty() ? failure : T("ошибка");
+                mod->renderedVersion = version;
+                modelChanged.sendChangeMessage();
+                if (mod->editVersion != version) startRender(mod);
+                return;
+            }
+            mod->renderError.clear();
             mod->setCache(cache);
             mod->renderedVersion = version;
             mod->renderFromDisk = cache->fromDisk;

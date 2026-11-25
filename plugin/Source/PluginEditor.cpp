@@ -171,6 +171,7 @@ bool PluginClip::summary(ClipHost::Summary& out) const
     if (!viewOn_) return false;
     out = {};
     out.t1 = viewEnd_ - viewStart_;
+    warningText(); // refreshes offStarts_ (at most twice a second)
     reaper::TrackInfo track; // the take numbers: REAPER's items at the same places as the regions
     const bool haveTrack = proc_.reaperTrack(track);
     for (const auto& it : viewItems_) {
@@ -184,6 +185,9 @@ bool PluginClip::summary(ClipHost::Summary& out) const
             for (size_t k = 0; k < track.itemStarts.size() && k < track.itemTakes.size(); ++k)
                 if (std::abs(track.itemStarts[k] - it.region->getStartInPlaybackTime()) < 0.005) { take = track.itemTakes[k]; break; }
         if (take > 0) name = juce::String(take) + " " + name;
+        if (std::any_of(offStarts_.begin(), offStarts_.end(),
+                        [&](double s) { return std::abs(s - it.region->getStartInPlaybackTime()) < 0.005; }))
+            name << T("  — Glina выключена в REAPER, правки не слышны");
         if (it.eff != nullptr) out.add(name, t0, t0 + (it.modEnd - it.modStart), *it.eff, offset);
     }
     return true;
@@ -269,6 +273,12 @@ void PluginClip::refreshView(bool force)
     if (!buildTrackView(pieces, primary, v)) { refuse(T("у айтемов трека разная частота дискретизации")); return; }
     viewHist_ = dc_ != nullptr ? &dc_->trackHistory(seq_) : nullptr; // the track's shared undo steps
     if (newTrack) openStep_.clear();
+    {
+        // One A/B for the whole view: an item left on the original (A/B pressed while it was
+        // edited alone) puts the view on the original, where the A/B button shows it.
+        const bool b = std::any_of(items.begin(), items.end(), [](const ViewItem& it) { return it.mod->bypass.load(); });
+        for (const auto& it : items) it.mod->bypass.store(b);
+    }
     view_ = std::move(v);
     viewPieces_ = std::move(pieces);
     viewItems_ = items;
@@ -292,6 +302,73 @@ void PluginClip::setBypassed(bool b)
     if (mod_ != nullptr) mod_->bypass.store(b);
 }
 
+// A/B of the track view: one switch for all its items. An item left on the original from
+// before (A/B pressed while it was edited alone) counts: the button shows it, one press clears all.
+bool PluginClip::isBypassed() const
+{
+    if (viewOn_)
+        return std::any_of(viewItems_.begin(), viewItems_.end(), [](const ViewItem& it) { return it.mod->bypass.load(); });
+    return mod_ != nullptr && mod_->bypass.load();
+}
+
+juce::String PluginClip::warningText() const
+{
+    const auto now = juce::Time::getMillisecondCounter();
+    if (warningMs_ != 0 && now - warningMs_ < 500) return warning_;
+    warningMs_ = now == 0 ? 1 : now;
+    juce::String w;
+    offStarts_.clear();
+    auto what = [](reaper::GlinaFx g) {
+        return g == reaper::GlinaFx::offline ? T("отключена (offline)") : T("выключена (bypass)");
+    };
+    auto off = [](reaper::GlinaFx g) { return g == reaper::GlinaFx::bypassed || g == reaper::GlinaFx::offline; };
+    if (viewOn_) {
+        reaper::TrackInfo track;
+        if (proc_.reaperTrack(track, true)) {
+            juce::StringArray names;
+            reaper::GlinaFx kind = reaper::GlinaFx::bypassed;
+            for (const auto& it : viewItems_) {
+                const double start = it.region->getStartInPlaybackTime();
+                for (size_t k = 0; k < track.itemStarts.size() && k < track.itemGlina.size(); ++k)
+                    if (std::abs(track.itemStarts[k] - start) < 0.005) {
+                        if (off(track.itemGlina[k])) {
+                            offStarts_.push_back(start);
+                            const char* nm = it.region->getName();
+                            names.add(nm != nullptr ? juce::String::fromUTF8(nm) : T("без имени"));
+                            kind = track.itemGlina[k];
+                        }
+                        break;
+                    }
+            }
+            if (names.size() == 1)
+                w << T("Glina ") << what(kind) << T(" в REAPER на айтеме «") << names[0] << T("» — его правки не слышны");
+            else if (names.size() > 1)
+                w << T("Glina выключена в REAPER на айтемах: ") << names.joinIntoString(", ") << T(" — их правки не слышны");
+        }
+    } else if (mod_ != nullptr) {
+        const auto g = proc_.ownTakeGlina();
+        if (off(g)) w << T("Glina на этом айтеме ") << what(g) << T(" в REAPER — правки не слышны");
+    }
+    if (w.isNotEmpty()) w << T(" (включите её в Take FX айтема)");
+    // A failed render: that item plays its previous render.
+    juce::StringArray failed;
+    if (viewOn_) {
+        for (const auto& it : viewItems_)
+            if (it.mod->renderError.isNotEmpty()) failed.add(it.mod->sourceName());
+    } else if (mod_ != nullptr && mod_->renderError.isNotEmpty()) {
+        failed.add(mod_->sourceName());
+    }
+    if (!failed.isEmpty())
+        w << (w.isEmpty() ? "" : " · ") << T("рендер не удался: ") << failed.joinIntoString(", ")
+          << T(" — звучит прежний; «Пересчитать трек» повторит");
+    if (w != warningLogged_) {
+        if (w.isNotEmpty()) logLine(w);
+        warningLogged_ = w;
+    }
+    warning_ = w;
+    return w;
+}
+
 juce::String PluginClip::busyText() const
 {
     if (mod_ == nullptr)
@@ -313,9 +390,9 @@ bool PluginClip::isRendering() const
 double PluginClip::playheadSec() const
 {
     if (region_ == nullptr) return -1;
-    const double song = proc_.playheadSec.load();
+    const double song = proc_.songSec();
     if (locatorSet_) {
-        if (!proc_.playing.load() && song == locatorHostSong_) return locatorSec_;
+        if (!proc_.songPlaying() && song == locatorHostSong_) return locatorSec_;
         locatorSet_ = false; // playing, or the host moved its own cursor
     }
     if (viewOn_) return song < viewStart_ || song > viewEnd_ ? -1 : song - viewStart_;
@@ -446,7 +523,7 @@ juce::ARARegionSequence* PluginClip::sequenceOfTrack(const reaper::TrackInfo& t)
 juce::ARAPlaybackRegion* PluginClip::itemAt(const std::vector<juce::ARAPlaybackRegion*>& items) const
 {
     if (items.empty()) return nullptr;
-    const double song = proc_.playheadSec.load();
+    const double song = proc_.songSec();
     for (auto* r : items)
         if (song >= r->getStartInPlaybackTime() && song <= r->getEndInPlaybackTime()) return r;
     return items.front();
@@ -676,7 +753,7 @@ void PluginClip::setPlayheadSec(double t)
     if (pc == nullptr || region_ == nullptr) return;
     pc->requestSetPlaybackPosition(std::max(0.0, toSong(t)));
     locatorSec_ = std::max(0.0, t);
-    locatorHostSong_ = proc_.playheadSec.load();
+    locatorHostSong_ = proc_.songSec();
     locatorSet_ = true;
 }
 

@@ -380,16 +380,14 @@ void Session::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
     const bool dry = bypass_.load() || p->rendered == nullptr;
     const std::vector<float>& mono = *p->mono;
     const Rendered* r = p->rendered.get();
-    const double end = r != nullptr ? (double)r->left.size() / r->sampleRate : (double)mono.size() / p->sampleRate;
+    const double end = std::max(r != nullptr ? (double)r->left.size() / r->sampleRate : 0.0, (double)mono.size() / p->sampleRate);
     double t = pos_.load();
     const double dt = 1.0 / deviceRate_;
     for (int i = 0; i < info.numSamples; ++i, t += dt) {
         if (dry) {
-            // A/B: the original at the same musical position (through the time map).
-            const double inPos = r != nullptr ? r->map.outToIn(t * r->sampleRate) * (p->sampleRate / r->sampleRate)
-                                              : t * p->sampleRate;
-            float s = cubicAt(mono.data(), mono.size(), inPos);
-            if (r != nullptr) s *= (float)r->map.gainAt(t * r->sampleRate, kSilenceFadeSec * r->sampleRate);
+            // A/B: the recording as it is (through the time map it would be sped up and slowed
+            // down wherever notes were moved or stretched: that is not the original).
+            const float s = cubicAt(mono.data(), mono.size(), t * p->sampleRate);
             L[i] = s;
             if (R) R[i] = s;
         } else {

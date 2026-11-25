@@ -52,11 +52,10 @@ bool GlinaPlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer, juce:
             if (t < playStart || t >= playEnd) continue;
             const double modT = modStart + (t - playStart) * ratio; // output (edited) time of the clip
             if (dry) {
-                // A/B and while rendering: original audio at the same musical position.
-                const double inPos = haveCache ? cache->map.outToIn(modT * cache->sampleRate) * (data.sampleRate / cache->sampleRate)
-                                               : modT * data.sampleRate;
-                float s = cubic(data.mono.data(), data.mono.size(), inPos);
-                if (haveCache) s *= (float)cache->map.gainAt(modT * cache->sampleRate, kSilenceFadeSec * cache->sampleRate);
+                // A/B (and before the first render): the recording as it is, where it is. Read
+                // through the time map it would be sped up and slowed down (pitch wobbling,
+                // jumps) wherever notes were moved or stretched: that is not the original.
+                const float s = cubic(data.mono.data(), data.mono.size(), modT * data.sampleRate);
                 mixL_[(size_t)i] += s;
                 mixR_[(size_t)i] += s;
             } else {

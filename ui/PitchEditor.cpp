@@ -608,6 +608,8 @@ public:
                 if (const auto n = ed.host_->noticeText(); n.isNotEmpty()) st << " · " << n;
             }
         }
+        const juce::String warning = ed.host_ != nullptr ? ed.host_->warningText() : juce::String();
+        if (warning.isNotEmpty()) st = st.isEmpty() ? warning : warning + " · " + st;
         if (st.isEmpty()) return;
         const juce::FontOptions font(11.5f);
         g.setFont(font);
@@ -615,7 +617,7 @@ public:
         auto box = getLocalBounds().toFloat().removeFromTop(kRulerH).removeFromRight(w);
         g.setColour(col::panel);
         g.fillRect(box);
-        g.setColour(ed.host_ != nullptr && ed.host_->isBypassed() ? col::warn : col::dim);
+        g.setColour(ed.host_ != nullptr && (ed.host_->isBypassed() || warning.isNotEmpty()) ? col::warn : col::dim);
         g.drawText(st, box.reduced(8, 0), juce::Justification::centredRight);
     }
 
@@ -3975,6 +3977,10 @@ void PitchEditor::timerCallback()
     if (host_ == nullptr) return;
     navigator_->repaint(); // the shown part and the playhead move with the view and the transport
     if (++trackPoll_ >= 30) { trackPoll_ = 0; pollTracks(); } // items added/removed in the DAW
+    if (trackPoll_ % 15 == 0) { // a lasting problem (e.g. Glina bypassed in the DAW) shows up without a click
+        const juce::String w = host_->warningText();
+        if (w != lastWarning_) { lastWarning_ = w; roll_->repaint(); navigator_->repaint(); }
+    }
     const bool busy = host_->analysis() == nullptr || host_->isRendering() || host_->busyText().isNotEmpty();
     const bool playing = host_->isPlaying();
     if (host_->analysis() != eff_) refresh();

@@ -45,11 +45,12 @@ public:
     juce::String busyText() const override;
     bool isRendering() const override;
     double playheadSec() const override;
-    bool isPlaying() const override { return proc_.playing.load(); }
+    bool isPlaying() const override { return proc_.songPlaying(); }
     bool canControlTransport() const override;
     void setPlaying(bool) override;
     void setPlayheadSec(double) override;
-    bool isBypassed() const override { return mod_ != nullptr && mod_->bypass.load(); }
+    juce::String warningText() const override;
+    bool isBypassed() const override;
     void setBypassed(bool b) override;
     // REAPER ignores ARA start/stop requests: space & Home go back to REAPER instead.
     bool handlesTransportKeys() const override { return false; }
@@ -133,6 +134,12 @@ private:
     juce::uint32 noticeMs_ = 0;
     double viewStart_ = 0, viewEnd_ = 0;  // project time of the view's start and end
     juce::String viewRefused_;            // why the last track could not be shown as a view (logged once)
+    // Items whose Glina REAPER bypasses or has offline (their edits are not heard): asked of
+    // REAPER at most twice a second, it is shown in the status line.
+    mutable juce::String warning_;
+    mutable std::vector<double> offStarts_; // project starts of the view's items REAPER does not play through Glina
+    mutable juce::uint32 warningMs_ = 0;
+    mutable juce::String warningLogged_;
 };
 
 class GlinaEditor final : public juce::AudioProcessorEditor,

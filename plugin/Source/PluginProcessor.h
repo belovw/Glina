@@ -41,9 +41,26 @@ public:
     void setIHostApplication(Steinberg::FUnknown* hostContext) override { hostLink_.attach(hostContext); }
     // REAPER's edit cursor in project seconds; NaN until REAPER tells us which project we are in.
     double editCursorSec() const { return reaper::cursorSec(hostLink_.project()); }
+    // The song position and transport the editor shows. REAPER's own when known: a Take FX is
+    // processed only while its own item plays, so its audio callbacks alone lose the playhead
+    // everywhere else on the track (and stay "playing" after a stop). Message thread.
+    double songSec() const
+    {
+        double sec = 0;
+        bool on = false;
+        return reaper::transport(hostLink_.project(), sec, on) ? sec : playheadSec.load();
+    }
+    bool songPlaying() const
+    {
+        double sec = 0;
+        bool on = false;
+        return reaper::transport(hostLink_.project(), sec, on) ? on : playing.load();
+    }
     bool hasReaperProject() const { return hostLink_.project() != nullptr; }
     // The REAPER track this FX sits on; false outside REAPER or before REAPER names it.
-    bool reaperTrack(reaper::TrackInfo& out) const { return reaper::trackInfo(hostLink_.track(), out); }
+    bool reaperTrack(reaper::TrackInfo& out, bool glina = false) const { return reaper::trackInfo(hostLink_.track(), out, glina); }
+    // Glina on this instance's own take, as REAPER has it (unknown for a Track FX).
+    reaper::GlinaFx ownTakeGlina() const { return reaper::glinaOfTake(hostLink_.take()); }
 
 protected:
     void didBindToARA() noexcept override;
