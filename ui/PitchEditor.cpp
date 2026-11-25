@@ -54,11 +54,15 @@ bool inScale(int m, const Key& k)
 }
 
 // Cursor for Alt+click (cut): a thin vertical bar with a gap at the cut point, outlined so
-// that it shows on both the light and the dark theme. Built once, on first use.
-juce::MouseCursor cutCursor()
+// that it shows on both the light and the dark theme.
+// Never keep such a cursor (or any image) in a static: on Windows an image lives on the graphics
+// card (Direct2D), and a static is destroyed only when the DLL is unloaded, at REAPER's exit,
+// where releasing it waits in the graphics driver forever and REAPER hangs in the task list.
+// The roll owns it (made on first use, gone with the window), drawn in a software image.
+juce::MouseCursor makeCutCursor()
 {
-    static const juce::MouseCursor cursor = [] {
-        juce::Image img(juce::Image::ARGB, 11, 25, true);
+    juce::Image img(juce::Image::ARGB, 11, 25, true, juce::SoftwareImageType());
+    {
         juce::Graphics g(img);
         const float x = 5.5f;
         g.setColour(juce::Colour(0xcc000000)); // outline
@@ -67,9 +71,8 @@ juce::MouseCursor cutCursor()
         g.setColour(juce::Colours::white);
         g.drawLine(x, 0.f, x, 10.f, 1.5f);
         g.drawLine(x, 14.f, x, 25.f, 1.5f);
-        return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
-    }();
-    return cursor;
+    }
+    return juce::MouseCursor(img, 5, 12); // hot spot at the gap: the cut point
 }
 void quiet(juce::Component& c) { c.setWantsKeyboardFocus(false); c.setMouseClickGrabsKeyboardFocus(false); }
 
@@ -1421,6 +1424,12 @@ public:
     juce::Point<float> viewFrom_;   // ViewPan / ViewZoom: where the drag started
     double startScroll_ = 0, startLo_ = 0, startHi_ = 0, startPps_ = 1; // the view at that moment
     juce::Point<float> pinAnchor_;  // PinNew: where the drag started, on this track's thread
+    std::unique_ptr<juce::MouseCursor> cutCursor_; // Alt over a note; owned here, never static (see makeCutCursor)
+    const juce::MouseCursor& cutCursor()
+    {
+        if (cutCursor_ == nullptr) cutCursor_ = std::make_unique<juce::MouseCursor>(makeCutCursor());
+        return *cutCursor_;
+    }
     std::vector<Pin> pinsBase_;     // PinEnd: the pins as the drag started (with the new one)
     bool pinFresh_ = false;         // PinEnd: the pin was made by this press (link editing)
     juce::Point<float> pinDown_;    // PinEnd: where that press was
