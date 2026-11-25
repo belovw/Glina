@@ -850,7 +850,10 @@ public:
         const float s = semi();
         for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
             const auto& gv = ed.ghosts_[gi];
-            const juce::Colour colour = col::ghost; // ghosts share one neutral colour; the edited track has the colour
+            // Ghosts share one neutral colour; the edited track has the colour. With links (N) the
+            // reference (the first ghost, where the links go) takes the links' colour, so it cannot
+            // be taken for this track's own grey traces (where notes were before the edits).
+            const juce::Colour colour = ed.linkGhost((int)gi) ? col::link : col::ghost;
             const auto& gh = gv.g;
             const double sh = ed.ghostShift_ ? ghostShift(gi) : 0.0;
             for (const auto& n : gh.notes) {
@@ -896,9 +899,9 @@ public:
         // The edited track: bright text on a bordered box. Ghosts: dimmer, no border.
         float y = c.getY() + 6.f;
         label(ed.editedName_, col::labelText, col::labelBox, y);
-        for (const auto& gv : ed.ghosts_) {
+        for (size_t gi = 0; gi < ed.ghosts_.size(); ++gi) {
             y += 24.f;
-            label(gv.name, col::ghostText, col::panel.withAlpha(0.85f), y);
+            label(ed.ghosts_[gi].name, ed.linkGhost((int)gi) ? col::link : col::ghostText, col::panel.withAlpha(0.85f), y);
         }
     }
 

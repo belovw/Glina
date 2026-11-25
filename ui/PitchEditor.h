@@ -181,6 +181,8 @@ private:
     bool ghostShift_ = false;                                     // ghosts drawn shifted (visual only)
     bool showLinks_ = false;
     bool editLinks_ = false;                         // link editing mode (notes are not touched)
+    // The ghost the links go to (the first shown one, while N is on): drawn in the links' colour.
+    bool linkGhost(int i) const { return showLinks_ && i == 0 && links_.ok; }
     juce::TextButton editLinksBtn_;
     MouseScheme scheme_;                             // wheel and drag actions by modifier keys
     int hoverPin_ = -1;                              // pin end under the pointer (Delete removes it)
