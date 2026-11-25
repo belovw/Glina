@@ -11,6 +11,12 @@
 namespace glina {
 
 // What a short analysis frame (hop ≈ 5 ms) contains.
+// Silence (or a breath) this long between two notes in the recording parts words or phrases:
+// separations there are hard by default (NoteEdit::sepBefore), and only inside such silence
+// does a gap opened by a time edit become silence (the render). Anything shorter (a plosive's
+// closure, a quiet joint of two syllables) is inside a word.
+inline constexpr double kWordGapSec = 0.100;
+
 enum class FrameKind : uint8_t {
     Silence = 0,   // below the noise floor
     Voiced  = 1,   // periodic voice (vowels, voiced consonants)
@@ -124,7 +130,10 @@ struct NoteEdit {
     AutoVibrato vibrato;
     // The separation from the previous note. Soft: the two are linked, a time edit of one
     // edge moves the other note's edge too (no gap opens, none closes). Hard: each moves alone.
-    // Auto: soft where they touch (gap under 5 ms), hard where there is a gap.
+    // Auto, as in Melodyne, by the recording: soft where the voice joins the two (they touch,
+    // or a glide or a consonant lies between them: one word), hard where silence or a breath of
+    // kWordGapSec or more separates them, or they lie in different items (and where they touch
+    // now, after edits, soft).
     enum class Sep : uint8_t { Auto = 0, Soft = 1, Hard = 2 };
     Sep sepBefore = Sep::Auto;
 };

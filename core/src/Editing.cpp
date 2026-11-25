@@ -202,15 +202,42 @@ std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e)
 double minNoteLength(const NoteTimes& t) { return minDur(t); }
 
 namespace {
+// True if in the recording the voice joins note i and i + 1 into one word: no silence or breath
+// of kWordGapSec or more between them, and the same item (track view).
+bool joinedInRecording(const Analysis& a, int i)
+{
+    if (i < 0 || i + 1 >= (int)a.notes.size()) return false;
+    const Note& l = a.notes[(size_t)i];
+    const Note& r = a.notes[(size_t)i + 1];
+    if (!a.segments.empty()) {
+        auto segOf = [&](const Note& m) {
+            const double mid = 0.5 * (m.startSec + m.endSec);
+            for (size_t s = 0; s < a.segments.size(); ++s)
+                if (mid >= a.segments[s].first && mid < a.segments[s].second) return (int)s;
+            return -1;
+        };
+        if (segOf(l) != segOf(r)) return false;
+    }
+    const double hopSec = (double)a.hop / a.sampleRate;
+    const int need = std::max(1, (int)std::ceil(kWordGapSec / hopSec));
+    int run = 0;
+    for (int f = std::max(0, l.endFrame); f < std::min(r.startFrame, (int)a.frames.size()); ++f) {
+        const FrameKind k = a.frames[(size_t)f].kind;
+        run = (k == FrameKind::Silence || k == FrameKind::Breath) ? run + 1 : 0;
+        if (run >= need) return false;
+    }
+    return true;
+}
+
 // Soft separation between note i and i + 1 in layout t (see NoteEdit::sepBefore).
-bool soft(const EditSet& e, const std::vector<NoteTimes>& t, int i)
+bool soft(const EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t, int i)
 {
     if (i < 0 || i + 1 >= (int)t.size()) return false;
     // A deleted note is not linked to its neighbours: its boundaries are hard, so it does not move with them.
     if ((size_t)i + 1 < e.notes.size() && (e.notes[(size_t)i].deleted || e.notes[(size_t)i + 1].deleted)) return false;
     const NoteEdit::Sep s = (size_t)i + 1 < e.notes.size() ? e.notes[(size_t)i + 1].sepBefore : NoteEdit::Sep::Auto;
     if (s != NoteEdit::Sep::Auto) return s == NoteEdit::Sep::Soft;
-    return std::abs(t[(size_t)i + 1].outStart - t[(size_t)i].outEnd) < 0.005;
+    return std::abs(t[(size_t)i + 1].outStart - t[(size_t)i].outEnd) < 0.005 || joinedInRecording(a, i);
 }
 } // namespace
 
@@ -224,7 +251,7 @@ Limits limitsOf(const Analysis& a, const std::vector<NoteTimes>& base, const Edi
 
 bool softSeparation(const EditSet& e, const Analysis& a, int i)
 {
-    return soft(e, noteTimes(a, e), i);
+    return soft(e, a, noteTimes(a, e), i);
 }
 
 bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, const std::vector<NoteTimes>& after)
@@ -242,7 +269,7 @@ std::vector<bool> softSeparations(const EditSet& e, const Analysis& a)
 {
     const std::vector<NoteTimes> t = noteTimes(a, e);
     std::vector<bool> out(t.empty() ? 0 : t.size() - 1);
-    for (size_t i = 0; i < out.size(); ++i) out[i] = soft(e, t, (int)i);
+    for (size_t i = 0; i < out.size(); ++i) out[i] = soft(e, a, t, (int)i);
     return out;
 }
 
@@ -339,7 +366,7 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
 
     // Across a soft separation the two notes move together. Across a hard one (by default
     // where there is a gap) only the note whose edge is dragged changes; the neighbour stays.
-    const bool touching = soft(e, base, left);
+    const bool touching = soft(e, a, base, left);
 
     const bool moveLeft = left >= 0 && (touching || !startEdge);
     // A selected note across a hard separation moves with the dragged edge too; unselected
@@ -380,7 +407,7 @@ double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, doub
 
     // Across a soft separation (by default where notes touch) the neighbour follows the move.
     // Across a hard one (by default where there is a gap) the neighbour stays put.
-    auto touch = [&](int i) { return soft(e, base, i); };
+    auto touch = [&](int i) { return soft(e, a, base, i); };
     auto make = [&](double d) {
         std::vector<NoteTimes> t = base;
         for (int i = 0; i < n; ++i) {
@@ -415,8 +442,8 @@ void resetNoteEdits(EditSet& e, const Analysis& a, const std::set<int>& notes)
         std::vector<NoteTimes> c = t;
         for (int i = b; i <= r; ++i) { c[(size_t)i].outStart = c[(size_t)i].inStart; c[(size_t)i].outEnd = c[(size_t)i].inEnd; }
         // A neighbour across a soft separation follows the run's edge, keeping the gap (none if they touch).
-        if (b > 0 && soft(e, t, b - 1)) c[(size_t)b - 1].outEnd = c[(size_t)b].outStart - (t[(size_t)b].outStart - t[(size_t)b - 1].outEnd);
-        if (r + 1 < n && soft(e, t, r)) c[(size_t)r + 1].outStart = c[(size_t)r].outEnd + (t[(size_t)r + 1].outStart - t[(size_t)r].outEnd);
+        if (b > 0 && soft(e, a, t, b - 1)) c[(size_t)b - 1].outEnd = c[(size_t)b].outStart - (t[(size_t)b].outStart - t[(size_t)b - 1].outEnd);
+        if (r + 1 < n && soft(e, a, t, r)) c[(size_t)r + 1].outStart = c[(size_t)r].outEnd + (t[(size_t)r + 1].outStart - t[(size_t)r].outEnd);
         if (noNewFaults(t, c, L)) t = c;
     }
 

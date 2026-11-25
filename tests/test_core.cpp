@@ -488,16 +488,16 @@ static void testBoundaryBlocks(const test::SynthResult& s, const Analysis& a, do
 
 static void testMoveNote(const test::SynthResult& s, const Analysis& a, double sr)
 {
-    std::printf("[move] move one note +50 ms: touching neighbours follow, across a gap they stay\n");
+    std::printf("[move] move one note +50 ms: linked neighbours follow, across a hard separation they stay\n");
     EditSet e;
     e.notes.resize(a.notes.size());
     const auto base = noteTimes(a, e);
+    const bool touchPrev = softSeparation(e, a, 2);
+    const bool touchNext = softSeparation(e, a, 3);
     const double applied = moveNotes(e, a, {3}, 0.05);
     const auto t = noteTimes(a, e);
     CHECK(std::abs(applied - 0.05) < 1e-9, "clamped to %.3f", applied);
     CHECK(std::abs(t[3].outStart - base[3].outStart - 0.05) < 1e-6, "note did not move");
-    const bool touchPrev = std::abs(base[3].outStart - base[2].outEnd) < 0.005;
-    const bool touchNext = std::abs(base[4].outStart - base[3].outEnd) < 0.005;
     CHECK(std::abs(t[2].outEnd - base[2].outEnd - (touchPrev ? 0.05 : 0.0)) < 1e-6 &&
               std::abs(t[2].outStart - base[2].outStart) < 1e-6,
           "previous note: touching=%d should lengthen only when touching", (int)touchPrev);
@@ -635,11 +635,12 @@ static void testConsonant(const test::SynthResult& s, const Analysis& a, double 
         if (a.noteOfFrame[(size_t)k] == 3 && a.frames[(size_t)k].f0 > 0)
             worst = std::max(worst, std::abs(curve[(size_t)k] - a.frames[(size_t)k].midi));
     CHECK(worst < 1e-6, "consonant pitch changed by %.3f st", worst);
-    // Gap rule: notes that do not touch. Dragging the end of note 2 moves only its end;
+    // A hard separation (words apart): dragging the end of note 2 moves only its end;
     // dragging the start of note 3 moves only its start; neighbours stay in place.
     EditSet g;
     g.notes.resize(a.notes.size());
     g.notes[2].stretch = 0.9; // shortens note 2: opens a gap between notes 2 and 3
+    g.notes[3].sepBefore = NoteEdit::Sep::Hard;
     const auto g0 = noteTimes(a, g);
     const double gap = g0[3].outStart - g0[2].outEnd;
     CHECK(gap > 0.04, "test setup: no gap (%.3f)", gap);
@@ -1040,7 +1041,16 @@ static void testSeparations(const Analysis& a)
     if (touch < 0 || gap < 0) { CHECK(false, "demo melody has both kinds of pairs"); return; }
 
     CHECK(softSeparation(e0, a, touch), "touching notes: soft by default");
-    CHECK(!softSeparation(e0, a, gap), "notes with a gap: hard by default");
+    CHECK(softSeparation(e0, a, gap), "a consonant between the notes (one word): soft by default");
+    { // silence (or a breath) of kWordGapSec between them in the recording: words apart, hard by default
+        Analysis q = a;
+        for (int f = q.notes[(size_t)gap].endFrame; f < q.notes[(size_t)gap + 1].startFrame; ++f) q.frames[(size_t)f].kind = FrameKind::Silence;
+        const double pause = q.notes[(size_t)gap + 1].startSec - q.notes[(size_t)gap].endSec;
+        CHECK(pause >= kWordGapSec, "test setup: pause %.3f s", pause);
+        CHECK(!softSeparation(e0, q, gap), "silence between the notes: hard by default");
+        for (int f = q.notes[(size_t)gap].endFrame; f < q.notes[(size_t)gap + 1].startFrame; ++f) q.frames[(size_t)f].kind = FrameKind::Breath;
+        CHECK(!softSeparation(e0, q, gap), "a breath between the notes: hard by default");
+    }
 
     { // soft (default): moving the right note drags the left note's end
         EditSet e = e0;
@@ -1068,10 +1078,11 @@ static void testSeparations(const Analysis& a)
         const auto v = noteTimes(a, e3);
         CHECK(std::abs(v[(size_t)touch + 1].outStart - t[(size_t)touch + 1].outStart) < 1e-9, "hard: edge drag leaves the neighbour");
     }
-    { // soft across a gap: the neighbour follows and the gap is kept
+    { // soft across a gap (a consonant, the default): the neighbour follows and the gap is kept
         EditSet e = e0;
-        toggleSeparation(e, a, gap);
-        CHECK(softSeparation(e, a, gap), "toggled to soft");
+        EditSet h = e0;
+        toggleSeparation(h, a, gap);
+        CHECK(!softSeparation(h, a, gap), "toggled to hard");
         moveNotes(e, a, {gap + 1}, 0.01);
         const auto u = noteTimes(a, e);
         const double g0 = t[(size_t)gap + 1].outStart - t[(size_t)gap].outEnd;
@@ -1085,13 +1096,13 @@ static void testSeparations(const Analysis& a)
         toggleSeparation(d.edits, a, gap);
         Document r;
         CHECK(deserialize(serialize(d), r), "reads back");
-        CHECK(r.edits.notes.size() == d.edits.notes.size() && !softSeparation(r.edits, a, touch) && softSeparation(r.edits, a, gap),
+        CHECK(r.edits.notes.size() == d.edits.notes.size() && !softSeparation(r.edits, a, touch) && !softSeparation(r.edits, a, gap),
               "separations survive save and load");
         Document plain;
         plain.edits = e0;
         CHECK(serialize(plain).find("seps") == std::string::npos, "nothing extra is written without separations");
         resetNoteEdits(r.edits, a, {touch, touch + 1, gap, gap + 1});
-        CHECK(!softSeparation(r.edits, a, touch) && softSeparation(r.edits, a, gap), "reset keeps separations");
+        CHECK(!softSeparation(r.edits, a, touch) && !softSeparation(r.edits, a, gap), "reset keeps separations");
     }
 }
 
@@ -1380,9 +1391,11 @@ static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double
         for (double o = g0; o + 0.010 * sr <= g1 - 0.05 * sr; o += 0.005 * sr) lowBefore = std::min(lowBefore, rms(o));
         CHECK(lowBefore > 0.6 * before, "the note holds on at its level (%.4f against %.4f)", lowBefore, before);
     }
-    { // a pause with sound all through (an 's'): the right note moved later. No silence: the pause
-      // stretches up to kMaxPauseStretch, the left note holds on for the rest.
+    { // a pause with sound all through (an 's'): the right note moved later across a hard separation
+      // (as F may pull it). No silence: the pause stretches up to kMaxPauseStretch, the left note
+      // holds on for the rest.
         EditSet e = e0;
+        e.notes[(size_t)gap + 1].sepBefore = NoteEdit::Sep::Hard;
         const double applied = moveNotes(e, a, {gap + 1}, 0.1);
         const TimeMap m = TimeMap::build(a, e);
         const double pause = a.notes[(size_t)gap + 1].startSec - a.notes[(size_t)gap].endSec;
@@ -1451,6 +1464,7 @@ static void testTimeFaults(const Analysis& a)
     {
         const auto t = noteTimes(a, bad);
         bad.notes[2].timeOffsetSec = -0.5 * (t[1].outEnd - t[1].outStart);
+        bad.notes[2].sepBefore = NoteEdit::Sep::Hard; // each moves alone
     }
     const double ov = worstOverlap(noteTimes(a, bad));
     CHECK(ov > 0.01, "setup: an overlap exists (%.4f)", ov);
@@ -1490,6 +1504,7 @@ static void testTimeFaults(const Analysis& a)
         e.notes.resize((size_t)n);
         std::set<int> tail;
         for (int i = 4; i < n; ++i) tail.insert(i);
+        e.notes[4].sepBefore = NoteEdit::Sep::Hard; // the tail moves alone
         const double applied = moveNotes(e, a, tail, 0.06);
         if (applied > 0.05) {
             auto t = noteTimes(a, e);

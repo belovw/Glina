@@ -151,7 +151,7 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         double sil0 = -1, sil1 = -1;
         if (const double extra = ao - lastOut - pauseIn; extra > minSilence && !lastDeleted) {
             const auto run = silentRun(lastIn, startIn);
-            if (run.second - run.first >= kMinSilentRunSec * sr) {
+            if (run.second - run.first >= kWordGapSec * sr) {
                 const double split = 0.5 * (run.first + run.second);
                 sil0 = lastOut + (split - lastIn);
                 sil1 = sil0 + extra;
