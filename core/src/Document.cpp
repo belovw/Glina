@@ -81,6 +81,47 @@ bool splitNote(Document& d, const Analysis& eff, int i, int frame)
     return true;
 }
 
+bool rereadNotes(Document& d, const Analysis& eff, const std::vector<NoteSpan>& autoSpans, int first, int last)
+{
+    const int n = (int)eff.notes.size();
+    if (first < 0 || last >= n || first > last) return false;
+    conform(d, eff);
+    const std::vector<NoteSpan> spans = d.edits.spans.empty() ? spansOf(eff) : d.edits.spans;
+    if ((int)spans.size() != n) return false;
+    const int nf = (int)eff.frames.size();
+    const int f0 = spans[(size_t)first].start, f1 = spans[(size_t)last].end;
+    const int lo = first > 0 ? spans[(size_t)first - 1].end : 0;
+    const int hi = last + 1 < n ? spans[(size_t)last + 1].start : nf;
+    constexpr int kMinFrames = 4; // ~20 ms, as for a split
+    // The automatic notes over the stretch, kept clear of the neighbours.
+    std::vector<NoteSpan> fresh;
+    for (const NoteSpan& s : autoSpans) {
+        if (s.end <= f0 || s.start >= f1) continue;
+        NoteSpan c{std::max(s.start, lo), std::min(s.end, hi)};
+        if (!fresh.empty()) c.start = std::max(c.start, fresh.back().end);
+        if (c.end - c.start >= kMinFrames) fresh.push_back(c);
+    }
+    std::vector<NoteSpan> s2(spans.begin(), spans.begin() + first);
+    s2.insert(s2.end(), fresh.begin(), fresh.end());
+    s2.insert(s2.end(), spans.begin() + last + 1, spans.end());
+    std::vector<NoteEdit> e2(d.edits.notes.begin(), d.edits.notes.begin() + first);
+    e2.resize(e2.size() + fresh.size());
+    e2.insert(e2.end(), d.edits.notes.begin() + last + 1, d.edits.notes.end());
+    for (auto& v : d.voices) {
+        if (v.noteMask.empty()) continue;
+        std::vector<uint8_t> m(v.noteMask.begin(), v.noteMask.begin() + first);
+        m.resize(m.size() + fresh.size(), 1);
+        m.insert(m.end(), v.noteMask.begin() + last + 1, v.noteMask.end());
+        v.noteMask = std::move(m);
+    }
+    const int e0 = fresh.empty() ? f0 : std::min(f0, fresh.front().start);
+    const int e1 = fresh.empty() ? f1 : std::max(f1, fresh.back().end);
+    d.edits.spans = std::move(s2);
+    d.edits.notes = std::move(e2);
+    eraseDrawn(d.edits, e0, e1);
+    return true;
+}
+
 std::vector<int> applyMelismaCuts(Document& d, const Analysis& eff, const std::vector<NoteCuts>& cutsIn,
                                   const std::function<const Analysis*()>& rebuild)
 {

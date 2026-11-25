@@ -308,6 +308,7 @@ public:
             if (args[i] == "--fix") { fix_ = true; continue; }
             if (args[i] == "--fix-undo") { fix_ = fixUndo_ = true; continue; }
             if (args[i] == "--links-edit-test") { linksEdit_ = true; continue; }
+            if (args[i] == "--reread-test") { reread_ = true; continue; }
             if (args[i] == "--interval" && i + 1 < args.size()) { interval_ = args[++i].getIntValue(); continue; } // box id: 2 unison, 3 third up...
             if (args[i] == "--light") continue;
             if (args[i] == "--toggle-theme") { ++toggleTheme_; continue; } // switch live, as the button does (check)
@@ -390,6 +391,7 @@ private:
                 return;
             }
             if (linksEdit_ && !linksEditDone_) { linksEditDone_ = true; linksEditTest(m); return; }
+            if (reread_ && !rereadDone_) { rereadDone_ = true; rereadTest(m); return; }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
                 demoDone_ = true;
@@ -409,6 +411,34 @@ private:
     // End-to-end check of editor actions through the real UI paths. Returns true when finished.
     // Link editing with the mouse (after --links): add by dragging a link, a click adds nothing,
     // add from the reference's thread, move a pin's end, Delete over a pin, undo.
+    // Alt+Delete: the selection read again from the recording, as new; Ctrl+Z brings the edits back.
+    static void rereadTest(MainComponent& m)
+    {
+        auto& ed = m.editor();
+        Session& s = m.session();
+        int fails = 0;
+        auto check = [&](bool ok, const char* what) { std::printf("%s %s\n", ok ? "PASS" : "FAIL", what); if (!ok) ++fails; };
+        auto notes = [&] { return s.analysis() != nullptr ? (int)s.analysis()->notes.size() : -1; };
+        const int n0 = notes();
+        ed.setSelection({0});
+        ed.keyPressed(juce::KeyPress(juce::KeyPress::upKey));                      // note 0 a semitone up
+        ed.setSelection({1, 2});
+        ed.keyPressed(juce::KeyPress('j', {}, 'j'));                              // notes 1 and 2 (touching) joined
+        check(notes() == n0 - 1, "setup: two notes joined");
+        check(s.document().edits.notes[0].pitchOffset != 0, "setup: note 0 moved up");
+        ed.setSelection({0, 1});
+        ed.keyPressed(juce::KeyPress(juce::KeyPress::deleteKey, juce::ModifierKeys::altModifier, 0));
+        check(notes() == n0, "Alt+Delete: the joined notes are found again");
+        check(s.document().edits.notes[0].pitchOffset == 0, "Alt+Delete: note 0 has no edit");
+        ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+        check(notes() == n0 - 1 && s.document().edits.notes[0].pitchOffset != 0, "Ctrl+Z: everything back");
+        ed.setSelection({});
+        const auto before = serialize(s.document());
+        ed.keyPressed(juce::KeyPress(juce::KeyPress::deleteKey, juce::ModifierKeys::altModifier, 0));
+        check(serialize(s.document()) == before, "nothing selected: nothing changes");
+        std::printf("REREAD: %d failure(s)\n", fails);
+    }
+
     static void linksEditTest(MainComponent& m)
     {
         auto& ed = m.editor();
@@ -797,6 +827,7 @@ private:
     juce::File shotFile_;
     int interval_ = 0; // --interval: the links' interval box id
     bool linksEdit_ = false, linksEditDone_ = false; // --links-edit-test
+    bool reread_ = false, rereadDone_ = false;       // --reread-test
     bool fixUndo_ = false; // --fix-undo: F, then one undo and a redo, note counts printed
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;

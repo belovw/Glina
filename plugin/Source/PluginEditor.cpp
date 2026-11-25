@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "RenderStore.h"
+#include "glina/Notes.h"
 
 #include <ARA_Library/Utilities/ARATimelineConversion.h>
 
@@ -622,6 +623,28 @@ std::vector<GlinaAudioModification*> modsOfTrack(juce::ARARegionSequence* seq)
     return out;
 }
 } // namespace
+
+std::vector<NoteSpan> PluginClip::automaticSpans() const
+{
+    std::vector<NoteSpan> out;
+    if (!viewOn_) {
+        if (mod_ == nullptr || !mod_->getGlinaSource()->data->analysisReady) return out;
+        return spansOf(mod_->getGlinaSource()->data->analysis);
+    }
+    // Track view: each item's automatic notes, placed on the view's frames as the view places them.
+    if (viewPending_ || view_.analysis == nullptr || view_.maps.size() != viewItems_.size()) return out;
+    for (size_t k = 0; k < viewItems_.size(); ++k) {
+        const auto* m = viewItems_[k].mod;
+        if (m == nullptr || !m->getGlinaSource()->data->analysisReady) continue;
+        const auto& mp = view_.maps[k];
+        for (const NoteSpan& s : spansOf(m->getGlinaSource()->data->analysis)) {
+            const NoteSpan v{s.start + mp.frameOffset, s.end + mp.frameOffset};
+            if (v.start >= mp.frameBegin && v.end <= mp.frameEnd) out.push_back(v);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const NoteSpan& a, const NoteSpan& b) { return a.start < b.start; });
+    return out;
+}
 
 int PluginClip::rerenderTrack()
 {

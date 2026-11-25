@@ -32,6 +32,7 @@ public:
     juce::ARARegionSequence* sequence() const { return seq_; }
 
     const Analysis* analysis() const override;
+    std::vector<NoteSpan> automaticSpans() const override;
     Document& document() override;
     ui::DocumentHistory& history() override;
     void recordEdit(const Document& before) override;

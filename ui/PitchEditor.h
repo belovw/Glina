@@ -86,6 +86,7 @@ private:
     void snapToScale();
     void applyCorrection();
     void resetNotes();
+    void rereadSelection(); // Alt+Delete: the selected notes read again from the recording, as new
     void toggleMuteSelection();
     void deleteSelection();
     void deleteBreathSelection();

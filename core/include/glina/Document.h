@@ -58,6 +58,12 @@ bool joinNotes(Document& d, const Analysis& eff, int note);
 // notes overlap is refused. Returns true if the layout changed.
 bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double outSec);
 
+// Notes `first`..`last` read again from the recording, as new: over the stretch they cover the
+// notes are laid out as the analysis finds them (`autoSpans`: the clip's automatic note layout,
+// in the frames of `eff`), with no edits, no layout changes and no pencil; the notes around keep
+// everything. A fresh note never reaches into a kept neighbour. False if nothing changed.
+bool rereadNotes(Document& d, const Analysis& eff, const std::vector<NoteSpan>& autoSpans, int first, int last);
+
 // Cuts notes where planMelismaCuts says (splitNote, so each piece keeps the note's edits).
 // `eff` is the analysis for `d` as it is; `rebuild` returns it again after each cut (the layout
 // changed). Returns, per note before the cuts, the index of its first piece; [n] = the new count.

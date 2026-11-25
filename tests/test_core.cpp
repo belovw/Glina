@@ -2078,6 +2078,52 @@ static void testIntervalFix()
     }
 }
 
+// Alt+Delete: the selected notes read again from the recording, as new; the rest keeps its edits.
+static void testReread(const Analysis& a)
+{
+    std::printf("[reread] selected notes read again as new; the notes around keep their edits\n");
+    const int n = (int)a.notes.size();
+    if (n < 6) { CHECK(false, "need 6 notes"); return; }
+    const std::vector<NoteSpan> autos = spansOf(a);
+    Document d;
+    conform(d, a);
+    for (auto& e : d.edits.notes) e.pitchOffset = 1.5;     // every note edited
+    d.edits.notes[1].timeOffsetSec = 0.01;
+    CHECK(splitNote(d, a, 3, (a.notes[3].startFrame + a.notes[3].endFrame) / 2), "setup: note 3 split");
+    Analysis eff = withLayout(a, d.edits.spans);
+    conform(d, eff);
+    d.edits.notes[4].pitchOffset = 2.5;                      // the second half edited apart
+    drawPitch(d.edits, eff, eff.notes[3].startFrame, std::vector<float>(6, 60.f));
+    CHECK(eff.notes.size() == a.notes.size() + 1, "setup: one more note");
+    // Read notes 3..4 (the two halves) again: one automatic note there, no edits, no pencil.
+    CHECK(rereadNotes(d, eff, autos, 3, 4), "re-read");
+    eff = withLayout(a, d.edits.spans);
+    conform(d, eff);
+    CHECK(eff.notes.size() == a.notes.size(), "the split is gone (%zu notes)", eff.notes.size());
+    CHECK(eff.notes[3].startFrame == a.notes[3].startFrame && eff.notes[3].endFrame == a.notes[3].endFrame, "note 3 as the analysis found it");
+    const NoteEdit plain{};
+    CHECK(d.edits.notes[3].pitchOffset == plain.pitchOffset && d.edits.notes[3].timeOffsetSec == plain.timeOffsetSec, "note 3 has no edits");
+    CHECK(d.edits.notes[2].pitchOffset == 1.5 && d.edits.notes[5].pitchOffset == 1.5 && d.edits.notes[1].timeOffsetSec == 0.01,
+          "the notes around keep their edits");
+    bool pencil = false;
+    for (int f = a.notes[3].startFrame; f < a.notes[3].endFrame; ++f)
+        if (!std::isnan(drawnDense(d.edits, (int)a.frames.size())[(size_t)f])) pencil = true;
+    CHECK(!pencil, "the pencil on the stretch is gone");
+    // A moved cut: the re-read note never reaches into a kept neighbour.
+    Document c;
+    conform(c, a);
+    c.edits.spans = spansOf(a);
+    const int cut = autos[2].end - 8; // note 3 took note 2's last 8 frames (a moved cut)
+    c.edits.spans[2].end = cut;
+    c.edits.spans[3].start = cut;
+    Analysis ce = withLayout(a, c.edits.spans);
+    conform(c, ce);
+    CHECK(rereadNotes(c, ce, autos, 2, 2), "re-read note 2 alone");
+    CHECK(c.edits.spans[2].end == cut && c.edits.spans[3].start == cut, "it stops at its kept neighbour (%d, %d)",
+          c.edits.spans[2].end, c.edits.spans[3].start);
+    std::printf("  re-read: %zu notes, note 2 ends at %d, note 3 starts at %d\n", c.edits.spans.size(), c.edits.spans[2].end, c.edits.spans[3].start);
+}
+
 // Random time, separation and pitch edits: every render ends, no shorter than the clip, and the
 // pitch edit is heard. (A noise grain sent back to its place looped for ever at a stretched
 // tail: the render never finished and the plug-in kept playing the old one.)
@@ -2497,6 +2543,7 @@ int main()
         testTransfer(a);
         testTimeFaults(a);
         testSeparations(a);
+        testReread(a);
         testMoveCut(a);
         testDeletedNeighbours(s, a);
         testSilentGaps(s, a, sr);

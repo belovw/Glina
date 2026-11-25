@@ -63,6 +63,9 @@ public:
     // Call after changing document(). `layoutChanged`: notes were split/joined
     // (the effective analysis must be rebuilt before analysis() is used again).
     virtual void documentChanged(bool layoutChanged) = 0;
+    // The clip's automatic note layout (as the analysis finds the notes, before any split, join
+    // or moved cut), in the frames of analysis(). Empty: not known.
+    virtual std::vector<NoteSpan> automaticSpans() const { return {}; }
 
     // ---- undo -----------------------------------------------------------------------
     // After an edit (documentChanged already called): `before` is the document as it was.

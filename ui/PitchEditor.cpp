@@ -260,6 +260,7 @@ public:
             "  D — убрать / вернуть дрейф       V — вибрато 100 → 50 → 0 %\n"
             "  S — разрезать под курсором       J — склеить выделенные\n"
             "  Del — сбросить правки нот        ← / → — соседняя нота (Shift — добавить)\n"
+            "  Alt+Del — перечитать выделенное как новое: ноты заново по записи, правки, разрезы и карандаш сброшены\n"
             "  Ctrl+A — все ноты    Esc — снять выделение\n"
             "  Ctrl+Z / Ctrl+Shift+Z — отмена / повтор\n"
             "  Пробел — пуск/стоп (в плагине — транспорт DAW)    B — сравнить с оригиналом (A/B)\n"
@@ -3092,7 +3093,7 @@ void PitchEditor::deleteBreathSelection()
     edit([this, zones](Document& d) { glina::deleteBreaths(d.edits, *eff_, zones); });
 }
 
-// Alt+Delete: removes the selected notes, leaving silence; their edges can be dragged back.
+// Ctrl+Delete: removes the selected notes, leaving silence; their edges can be dragged back.
 void PitchEditor::deleteSelection()
 {
     if (selection_.empty() || eff_ == nullptr) return;
@@ -3127,6 +3128,17 @@ void PitchEditor::toggleMuteSelection()
         // The consonant after the last note is the one in front of the next note.
         if (last + 1 < (int)d.edits.notes.size()) d.edits.notes[(size_t)last + 1].consMuted = m;
     });
+}
+
+void PitchEditor::rereadSelection()
+{
+    if (selection_.empty() || eff_ == nullptr || host_ == nullptr) return;
+    const std::vector<NoteSpan> autos = host_->automaticSpans();
+    if (autos.empty()) return;
+    const int first = *selection_.begin(), last = *selection_.rbegin();
+    bool changed = false;
+    edit([&](Document& d) { changed = rereadNotes(d, *eff_, autos, first, last); }, true);
+    if (changed) { selection_.clear(); refresh(); }
 }
 
 void PitchEditor::resetNotes()
@@ -3907,6 +3919,11 @@ bool PitchEditor::keyPressed(const juce::KeyPress& k)
     }
     if (code == juce::KeyPress::leftKey || code == juce::KeyPress::rightKey) {
         selectStep(code == juce::KeyPress::rightKey ? 1 : -1, mods.isShiftDown());
+        return true;
+    }
+    // Alt+Delete: the selected notes read again from the recording, as new (only the selection).
+    if (code == juce::KeyPress::deleteKey && mods.isAltDown()) {
+        if (!editLinks_) rereadSelection(); // link editing touches only links
         return true;
     }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) {

@@ -6,6 +6,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include "../ui/ClipHost.h"
+#include "glina/Notes.h"
 #include "glina/Renderer.h"
 
 #include <atomic>
@@ -33,6 +34,7 @@ public:
 
     // ---- ClipHost ------------------------------------------------------------------
     const Analysis* analysis() const override { return eff_.get(); }
+    std::vector<NoteSpan> automaticSpans() const override { return base_ != nullptr ? spansOf(*base_) : std::vector<NoteSpan>{}; }
     Document& document() override { return doc_; }
     ui::DocumentHistory& history() override { return history_; }
     void documentChanged(bool layoutChanged) override;
