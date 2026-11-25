@@ -110,6 +110,16 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
     size_t lastFirst = (size_t)-1;
     double lastAtt = 0, lastRel = 0;
     m.mainEnd_.reserve(a.notes.size());
+    // Linked (soft) separations, by the layout before this map (see softSeparations).
+    const std::vector<bool> softSep = softSeparations(e, a);
+    // The quietest frame inside input [x0, x1) (its centre, in samples); x0 if there is none.
+    auto quietestIn = [&](double x0, double x1) {
+        const double hop = (double)a.hop;
+        double best = x0, lowest = std::numeric_limits<double>::infinity();
+        for (int f = (int)std::ceil(x0 / hop); (f + 1) * hop <= x1 && f < (int)a.frames.size(); ++f)
+            if (a.frames[(size_t)f].rmsDb < lowest) { lowest = a.frames[(size_t)f].rmsDb; best = (f + 0.5) * hop; }
+        return best;
+    };
     // The longest run of silent frames inside input [x0, x1), as (start, end) in samples.
     auto silentRun = [&](double x0, double x1) {
         std::pair<double, double> best{0, 0};
@@ -139,20 +149,22 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         double ao = ai + ed.timeOffsetSec * sr;
         ao = std::max(ao, lastOut + squeeze * (ai - lastIn));
         if (ed.deleted) ao = std::max(lastOut + squeeze * (ai - lastIn), std::min(ao, cap[i]));
-        // Further from the audio before it than in the recording. Silence goes only where the
-        // recording is silent: into the middle of the longest silent run of the pause, so the
-        // last note's release and this note's consonant keep their sound and length. Where the
-        // voice goes on (notes that touched, a glide or a consonant inside a word) there is no
-        // break: the pause stretches up to kMaxPauseStretch and the last note holds on for the
-        // rest, as a singer holds the vowel. (A hard silence there broke words in the middle.)
+        // Further from the audio before it than in the recording. Silence goes where the
+        // recording is silent: into the middle of a silent run of kWordGapSec in the pause, so
+        // the last note's release and this note's consonant keep their sound and length. Inside
+        // a phrase (a soft separation) there is no other break: the pause stretches up to
+        // kMaxPauseStretch and the last note holds on for the rest, as a singer holds the vowel.
+        // Across a hard separation (phrases apart, or set so) each note keeps its own end: the
+        // silence goes into the quietest place of the pause.
         // seg: the map from (lastIn, lastOut) on: the pause (with a silence) and the note.
         std::vector<std::pair<double, double>> seg;
         const double pauseIn = std::max(0.0, startIn - lastIn);
         double sil0 = -1, sil1 = -1;
         if (const double extra = ao - lastOut - pauseIn; extra > minSilence && !lastDeleted) {
             const auto run = silentRun(lastIn, startIn);
-            if (run.second - run.first >= kWordGapSec * sr) {
-                const double split = 0.5 * (run.first + run.second);
+            const bool linked = i > 0 && i - 1 < softSep.size() && softSep[i - 1];
+            if (run.second - run.first >= kWordGapSec * sr || !linked) {
+                const double split = run.second > run.first ? 0.5 * (run.first + run.second) : quietestIn(lastIn, startIn);
                 sil0 = lastOut + (split - lastIn);
                 sil1 = sil0 + extra;
                 seg.emplace_back(split, sil0);

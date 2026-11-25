@@ -654,6 +654,15 @@ bool applyIntervalFix(EditSet& e, const Analysis& a, const std::vector<IntervalF
             if (i > 0 && moved[(size_t)i - 1] && touch(i - 1)) t[(size_t)i].outStart = t[(size_t)i - 1].outEnd;
             if (i + 1 < n && moved[(size_t)i + 1] && touch(i)) t[(size_t)i].outEnd = t[(size_t)i + 1].outStart;
         }
+        // Inside a phrase F opens no gap: where two linked notes were pulled apart, the left one
+        // reaches to the pause before the right one (the pause keeps its recorded length), so its
+        // box and its sound end in the same place. A consonant keeps its own length.
+        for (int i = 0; i + 1 < n; ++i) {
+            if (!touch(i) || (i < (int)e.notes.size() && e.notes[(size_t)i].consonant)) continue;
+            const double pause = std::max(0.0, base[(size_t)i + 1].outStart - base[(size_t)i].outEnd);
+            const double end = t[(size_t)i + 1].outStart - pause;
+            if (end > t[(size_t)i].outEnd + 1e-4) t[(size_t)i].outEnd = end;
+        }
         ok = placeNotes(e, a, t);
     }
     for (const IntervalFix& f : fixes)

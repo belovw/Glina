@@ -202,8 +202,8 @@ std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e)
 double minNoteLength(const NoteTimes& t) { return minDur(t); }
 
 namespace {
-// True if in the recording the voice joins note i and i + 1 into one word: no silence or breath
-// of kWordGapSec or more between them, and the same item (track view).
+// True if in the recording note i and i + 1 lie in one phrase: no silence or breath of
+// kPhraseGapSec or more between them, and the same item (track view).
 bool joinedInRecording(const Analysis& a, int i)
 {
     if (i < 0 || i + 1 >= (int)a.notes.size()) return false;
@@ -219,7 +219,7 @@ bool joinedInRecording(const Analysis& a, int i)
         if (segOf(l) != segOf(r)) return false;
     }
     const double hopSec = (double)a.hop / a.sampleRate;
-    const int need = std::max(1, (int)std::ceil(kWordGapSec / hopSec));
+    const int need = std::max(1, (int)std::ceil(kPhraseGapSec / hopSec));
     int run = 0;
     for (int f = std::max(0, l.endFrame); f < std::min(r.startFrame, (int)a.frames.size()); ++f) {
         const FrameKind k = a.frames[(size_t)f].kind;

@@ -11,11 +11,14 @@
 namespace glina {
 
 // What a short analysis frame (hop ≈ 5 ms) contains.
-// Silence (or a breath) this long between two notes in the recording parts words or phrases:
-// separations there are hard by default (NoteEdit::sepBefore), and only inside such silence
-// does a gap opened by a time edit become silence (the render). Anything shorter (a plosive's
-// closure, a quiet joint of two syllables) is inside a word.
+// Silence this long inside a pause between notes is a real pause (between words): a gap opened
+// there by a time edit becomes silence (the render). Shorter (a plosive's closure, a quiet
+// joint of two syllables) is inside a word.
 inline constexpr double kWordGapSec = 0.100;
+// Silence or a breath this long between two notes in the recording parts phrases: separations
+// there are hard by default (NoteEdit::sepBefore). Anything shorter (a pause between words of a
+// sentence, an 'h' the detector takes for a breath) keeps them soft.
+inline constexpr double kPhraseGapSec = 0.250;
 
 enum class FrameKind : uint8_t {
     Silence = 0,   // below the noise floor
@@ -130,10 +133,10 @@ struct NoteEdit {
     AutoVibrato vibrato;
     // The separation from the previous note. Soft: the two are linked, a time edit of one
     // edge moves the other note's edge too (no gap opens, none closes). Hard: each moves alone.
-    // Auto, as in Melodyne, by the recording: soft where the voice joins the two (they touch,
-    // or a glide or a consonant lies between them: one word), hard where silence or a breath of
-    // kWordGapSec or more separates them, or they lie in different items (and where they touch
-    // now, after edits, soft).
+    // Auto, by the recording: soft inside a phrase (the notes touch, or a glide, a consonant or a
+    // short pause between words lies between them), hard where silence or a breath of
+    // kPhraseGapSec or more parts them (a phrase ends), or they lie in different items (and where
+    // they touch now, after edits, soft).
     enum class Sep : uint8_t { Auto = 0, Soft = 1, Hard = 2 };
     Sep sepBefore = Sep::Auto;
 };

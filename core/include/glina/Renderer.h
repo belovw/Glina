@@ -11,9 +11,11 @@ namespace glina {
 // analysis, synthesis, harmonies or mixing change the rendered audio of an existing
 // project: the plug-in keeps renders next to the DAW project and marks those made by
 // another version (they stay as they are until the user re-renders or edits the clip).
-inline constexpr int kRenderVersion = 5; // 2: gaps opened between notes are silent; 3: overlaps;
+inline constexpr int kRenderVersion = 6; // 2: gaps opened between notes are silent; 3: overlaps;
                                          // 4: consonants copied whole after time edits, overlays without a seam;
-                                         // 5: silence only inside a pause of kWordGapSec, never inside a word
+                                         // 5: silence only inside a pause of kWordGapSec, never inside a word;
+                                         // 6: the vowel holds on only inside a phrase; across a hard separation the
+                                         //    silence goes into the quietest place of the pause
 
 // Monotonic piecewise-linear mapping between input and output sample time.
 // Built from note timing edits; identity when nothing was moved/stretched.

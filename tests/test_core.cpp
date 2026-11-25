@@ -1042,14 +1042,23 @@ static void testSeparations(const Analysis& a)
 
     CHECK(softSeparation(e0, a, touch), "touching notes: soft by default");
     CHECK(softSeparation(e0, a, gap), "a consonant between the notes (one word): soft by default");
-    { // silence (or a breath) of kWordGapSec between them in the recording: words apart, hard by default
+    { // a pause of kPhraseGapSec (silence or a breath) between them in the recording: phrases
+      // apart, hard by default; a shorter one (between words of a sentence): soft
         Analysis q = a;
-        for (int f = q.notes[(size_t)gap].endFrame; f < q.notes[(size_t)gap + 1].startFrame; ++f) q.frames[(size_t)f].kind = FrameKind::Silence;
-        const double pause = q.notes[(size_t)gap + 1].startSec - q.notes[(size_t)gap].endSec;
-        CHECK(pause >= kWordGapSec, "test setup: pause %.3f s", pause);
-        CHECK(!softSeparation(e0, q, gap), "silence between the notes: hard by default");
-        for (int f = q.notes[(size_t)gap].endFrame; f < q.notes[(size_t)gap + 1].startFrame; ++f) q.frames[(size_t)f].kind = FrameKind::Breath;
+        const double hopSec = (double)q.hop / q.sampleRate;
+        Note& l = q.notes[(size_t)gap];
+        const int r0 = q.notes[(size_t)gap + 1].startFrame;
+        auto pauseOf = [&](double sec, FrameKind k) {
+            l.endFrame = std::max(l.startFrame + 4, r0 - (int)std::ceil(sec / hopSec));
+            l.endSec = l.endFrame * hopSec;
+            for (int f = l.endFrame; f < r0; ++f) q.frames[(size_t)f].kind = k;
+        };
+        pauseOf(kPhraseGapSec + 0.02, FrameKind::Silence);
+        CHECK(!softSeparation(e0, q, gap), "a long silence between the notes: hard by default");
+        pauseOf(kPhraseGapSec + 0.02, FrameKind::Breath);
         CHECK(!softSeparation(e0, q, gap), "a breath between the notes: hard by default");
+        pauseOf(kPhraseGapSec - 0.08, FrameKind::Silence);
+        CHECK(softSeparation(e0, q, gap), "a short pause between words: soft by default");
     }
 
     { // soft (default): moving the right note drags the left note's end
@@ -1330,7 +1339,7 @@ static void testMoveCut(const Analysis& a)
 
 static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double sr)
 {
-    std::printf("[gaps] notes pulled apart: silence only where the recording is silent, no break inside a word\n");
+    std::printf("[gaps] notes pulled apart: no break inside a phrase; across a hard separation silence in the pause\n");
     const int n = (int)a.notes.size();
     EditSet e0;
     e0.notes.resize((size_t)n);
@@ -1352,63 +1361,90 @@ static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double
         moveNotes(e, a, {touch + 1}, 0.02);
         CHECK(TimeMap::build(a, e).silences().empty(), "soft move: no silence");
     }
-    { // hard: the left note's end pulled back 0.2 s; the right note stays. Inside a word (the
-      // notes touched): no break, the left note's release holds on to the right note.
+    auto rmsOf = [&](const std::vector<float>& y, double o0) {
+        double q = 0;
+        const long w = (long)(0.010 * sr);
+        for (long o = (long)o0; o < (long)o0 + w && o < (long)y.size(); ++o) q += (double)y[(size_t)o] * y[(size_t)o];
+        return std::sqrt(q / (double)w);
+    };
+    { // hard (set by hand) on touching notes: the left note's end pulled back 0.2 s, the right note
+      // stays; each note keeps its own end and the gap between them is silent, as in Melodyne
         EditSet e = e0;
         toggleSeparation(e, a, touch);
         const double applied = moveBoundary(e, a, touch, -0.2, {}, false);
         const TimeMap m = TimeMap::build(a, e);
         CHECK(applied < -0.19, "the edge moved (%.4f)", applied);
-        CHECK(m.silences().empty(), "touching notes pulled apart: no silence (%d)", (int)m.silences().size());
-        CHECK(std::abs(m.noteMainEndOut((size_t)touch) - m.noteStartOut((size_t)touch + 1)) < 2,
-              "the left note sounds up to the right one");
-        CHECK(std::abs(m.noteStartOut((size_t)touch + 1) / sr - t[(size_t)touch + 1].outStart) < 2.0 / sr, "the right note stays in place");
+        CHECK(m.silences().size() == 1, "hard: one silence (%d)", (int)m.silences().size());
+        if (m.silences().size() == 1) {
+            const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
+            std::printf("  hard touching pair: silence %.4f..%.4f s\n", s0 / sr, s1 / sr);
+            CHECK(std::abs(s0 - m.noteEndOut((size_t)touch)) < 1 && std::abs(s1 - m.noteStartOut((size_t)touch + 1)) < 1,
+                  "the silence is the gap between the notes");
+            CHECK(std::abs(m.noteStartOut((size_t)touch + 1) / sr - t[(size_t)touch + 1].outStart) < 2.0 / sr, "the right note stays in place");
+        }
+    }
+    { // soft (the default) touching notes pulled apart directly, as F may do: no break, the left
+      // note holds on to the right one (its middle; the transition keeps its speed)
+        EditSet e = e0;
+        NoteTimes l = t[(size_t)touch];
+        l.outEnd -= 0.2;
+        setNoteTimes(e.notes[(size_t)touch], l);
+        const TimeMap m = TimeMap::build(a, e);
+        CHECK(m.silences().empty(), "soft: no silence (%d)", (int)m.silences().size());
+        CHECK(std::abs(m.noteMainEndOut((size_t)touch) - m.noteStartOut((size_t)touch + 1)) < 2, "the left note sounds up to the right one");
         const std::vector<float> y = render(s.audio.data(), s.audio.size(), a, e);
         CHECK(y.size() == y0.size(), "the clip keeps its length");
-        // The level through the gap, in 10 ms windows, against the left note just before it.
-        auto rms = [&](double o0) {
-            double q = 0;
-            const long w = (long)(0.010 * sr);
-            for (long o = (long)o0; o < (long)o0 + w && o < (long)y.size(); ++o) q += (double)y[(size_t)o] * y[(size_t)o];
-            return std::sqrt(q / (double)w);
-        };
-        const double g0 = t[(size_t)touch].outEnd * sr + applied * sr, g1 = m.noteStartOut((size_t)touch + 1);
-        const double before = rms(g0 - 0.03 * sr);
+        const double g0 = l.outEnd * sr, g1 = m.noteStartOut((size_t)touch + 1);
+        const double before = rmsOf(y, g0 - 0.03 * sr);
         double low = 1e9;
-        for (double o = g0; o + 0.010 * sr <= g1; o += 0.005 * sr) low = std::min(low, rms(o));
-        // The recording's own dip at the joint (the transition), for comparison.
+        for (double o = g0; o + 0.010 * sr <= g1; o += 0.005 * sr) low = std::min(low, rmsOf(y, o));
         const double joint = a.notes[(size_t)touch].endSec * sr;
-        double dip = 1e9;
+        double dip = 1e9; // the recording's own dip at the joint (the transition)
         for (double o = joint - 0.05 * sr; o + 0.010 * sr <= joint + 0.01 * sr; o += 0.005 * sr) {
             double q = 0;
             for (long k = 0; k < (long)(0.010 * sr); ++k) q += (double)s.audio[(size_t)((long)o + k)] * s.audio[(size_t)((long)o + k)];
             dip = std::min(dip, std::sqrt(q / (0.010 * sr)));
         }
-        std::printf("  touching pair pulled apart: gap %.3f s, lowest level in it %.4f (note before %.4f, the joint's own dip %.4f)\n",
-                    (g1 - g0) / sr, low, before, dip);
+        std::printf("  soft touching pair pulled apart: lowest level in the gap %.4f (note before %.4f, the joint's own dip %.4f)\n",
+                    low, before, dip);
         CHECK(low > 0.6 * dip, "no break in the gap (%.4f against the joint's %.4f)", low, dip);
-        double lowBefore = 1e9; // the held part, before the transition
-        for (double o = g0; o + 0.010 * sr <= g1 - 0.05 * sr; o += 0.005 * sr) lowBefore = std::min(lowBefore, rms(o));
+        double lowBefore = 1e9;
+        for (double o = g0; o + 0.010 * sr <= g1 - 0.05 * sr; o += 0.005 * sr) lowBefore = std::min(lowBefore, rmsOf(y, o));
         CHECK(lowBefore > 0.6 * before, "the note holds on at its level (%.4f against %.4f)", lowBefore, before);
     }
-    { // a pause with sound all through (an 's'): the right note moved later across a hard separation
-      // (as F may pull it). No silence: the pause stretches up to kMaxPauseStretch, the left note
-      // holds on for the rest.
+    const double pause = a.notes[(size_t)gap + 1].startSec - a.notes[(size_t)gap].endSec;
+    { // a pause with sound (an 's') inside a phrase, the right note pulled later directly (as F):
+      // no silence; the pause stretches up to kMaxPauseStretch, the left note holds on for the rest
+        EditSet e = e0;
+        e.notes[(size_t)gap + 1].timeOffsetSec = 0.1;
+        const TimeMap m = TimeMap::build(a, e);
+        const double pauseOut = (m.noteStartOut((size_t)gap + 1) - m.noteMainEndOut((size_t)gap)) / sr;
+        const double held = (m.noteMainEndOut((size_t)gap) - m.noteEndOut((size_t)gap)) / sr;
+        std::printf("  soft: pause %.4f s -> %.4f s, held %.4f s, %d silence(s)\n", pause, pauseOut, held, (int)m.silences().size());
+        CHECK(m.silences().empty(), "no silence inside a phrase where the recording sounds");
+        CHECK(pauseOut <= kMaxPauseStretch * pause + 1e-4, "the pause stretched %.2f times", pauseOut / pause);
+        CHECK(std::abs(pauseOut + held - pause - 0.1) < 1e-3, "pause and held note take the move");
+    }
+    { // the same pause across a hard separation: the left note keeps its end; the silence goes into
+      // the quietest place of the pause, its release and the consonant keep their speed
         EditSet e = e0;
         e.notes[(size_t)gap + 1].sepBefore = NoteEdit::Sep::Hard;
         const double applied = moveNotes(e, a, {gap + 1}, 0.1);
         const TimeMap m = TimeMap::build(a, e);
-        const double pause = a.notes[(size_t)gap + 1].startSec - a.notes[(size_t)gap].endSec;
-        const double pauseOut = (m.noteStartOut((size_t)gap + 1) - m.noteMainEndOut((size_t)gap)) / sr;
-        const double held = (m.noteMainEndOut((size_t)gap) - m.noteEndOut((size_t)gap)) / sr;
-        std::printf("  pause %.4f s -> %.4f s, note moved %.4f s, held %.4f s, %d silence(s)\n", pause, pauseOut, applied, held,
-                    (int)m.silences().size());
+        std::printf("  hard: note moved %.4f s, %d silence(s)\n", applied, (int)m.silences().size());
         CHECK(applied > 3 * kMinSilenceSec, "the note moved");
-        CHECK(m.silences().empty(), "no silence where the recording sounds");
-        CHECK(pauseOut <= kMaxPauseStretch * pause + 1e-4, "the pause stretched %.2f times", pauseOut / pause);
-        CHECK(std::abs(pauseOut + held - pause - applied) < 1e-3, "pause and held note take the move");
+        CHECK(m.silences().size() == 1, "hard: one silence");
+        CHECK(std::abs(m.noteMainEndOut((size_t)gap) - m.noteEndOut((size_t)gap)) < 1, "the left note keeps its end");
+        if (m.silences().size() == 1) {
+            const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
+            CHECK(std::abs((s1 - s0) / sr - applied) < 1e-3, "the silence is the move");
+            CHECK(s0 >= m.noteMainEndOut((size_t)gap) - 1 && s1 <= m.noteStartOut((size_t)gap + 1) + 1, "inside the pause");
+            const double r = m.noteStartOut((size_t)gap + 1) / sr;
+            CHECK(std::abs(m.outToIn((r - 0.002) * sr) / sr - (a.notes[(size_t)gap + 1].startSec - 0.002)) < 1e-6,
+                  "the consonant keeps its speed before the note");
+        }
     }
-    { // a real silence in the pause: the move goes into it; the release and the consonant keep their speed
+    { // a real silence (kWordGapSec and more) in the pause, inside a phrase: a gap pulled open goes into it
         const long at = (long)(0.5 * (a.notes[(size_t)gap].endSec + a.notes[(size_t)gap + 1].startSec) * sr);
         std::vector<float> x(s.audio.begin(), s.audio.begin() + at);
         x.insert(x.end(), (size_t)(0.15 * sr), 0.f);
@@ -1421,13 +1457,28 @@ static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double
         if (k < 0) return;
         EditSet e;
         e.notes.resize(b.notes.size());
-        const double applied = moveNotes(e, b, {k + 1}, 0.1);
+        CHECK(softSeparation(e, b, k), "a 0.15 s silence between words: soft by default");
+        for (const double d : {-0.08, 0.08}) { // the right word dragged left / right: the left note follows
+            EditSet w = e;
+            const auto w0 = noteTimes(b, w);
+            const double applied = moveNotes(w, b, {k + 1}, d);
+            const auto w1 = noteTimes(b, w);
+            const TimeMap wm = TimeMap::build(b, w);
+            std::printf("  word dragged %+.2f s: applied %+.4f, left end %+.4f, overlays %zu, held %.4f s\n", d, applied,
+                        w1[(size_t)k].outEnd - w0[(size_t)k].outEnd, wm.overlays().size(),
+                        (wm.noteMainEndOut((size_t)k) - wm.noteEndOut((size_t)k)) / sr);
+            CHECK(std::abs(applied - d) < 1e-6, "the word moved (%.4f)", applied);
+            CHECK(std::abs(w1[(size_t)k].outEnd - w0[(size_t)k].outEnd - d) < 1e-6, "the left note's end follows");
+            CHECK(wm.overlays().empty(), "no overlay inside a sentence");
+            CHECK(std::abs(wm.noteMainEndOut((size_t)k) - wm.noteEndOut((size_t)k)) < 1, "the left note sounds to its box's end");
+        }
+        e.notes[(size_t)k + 1].timeOffsetSec = 0.1;
         const TimeMap m = TimeMap::build(b, e);
-        std::printf("  a silent pause: note moved %.4f s, %d silence(s)\n", applied, (int)m.silences().size());
+        std::printf("  a silent pause: %d silence(s)\n", (int)m.silences().size());
         CHECK(m.silences().size() == 1, "one silence");
         if (m.silences().size() != 1) return;
         const double s0 = m.silences()[0].first, s1 = m.silences()[0].second;
-        CHECK(std::abs((s1 - s0) / sr - applied) < 1e-3, "the silence is the move");
+        CHECK(std::abs((s1 - s0) / sr - 0.1) < 1e-3, "the silence is the move");
         CHECK(s0 > m.noteMainEndOut((size_t)k) + 0.02 * sr && s1 < m.noteStartOut((size_t)k + 1) - 0.02 * sr, "inside the pause");
         const double l = m.noteMainEndOut((size_t)k) / sr, r = m.noteStartOut((size_t)k + 1) / sr;
         CHECK(std::abs(m.outToIn((l + 0.01) * sr) / sr - (b.notes[(size_t)k].endSec + 0.01)) < 1e-6, "the release keeps its speed");
@@ -1926,6 +1977,18 @@ static void testIntervalFix()
         std::printf("    pitch: worst %.1f cents from the clean note; true starts: worst %.0f ms (before %.0f ms)\n", worstC,
                     worstT * 1000, before * 1000);
         CHECK(worstC < 1.0, "unison: a note %.1f cents from the reference's clean note", worstC);
+        { // inside a phrase F opens no gap: linked notes stay as far apart as recorded (or closer)
+            EditSet plain;
+            plain.notes.resize(a->notes.size());
+            const std::vector<bool> linked = softSeparations(plain, *a);
+            const auto b0 = noteTimes(*a, plain), b1 = noteTimes(*a, e);
+            double worstGap = 0;
+            for (size_t i = 0; i < linked.size(); ++i)
+                if (linked[i])
+                    worstGap = std::max(worstGap, (b1[i + 1].outStart - b1[i].outEnd) - (b0[i + 1].outStart - b0[i].outEnd));
+            std::printf("    linked pairs: a gap grew by %.1f ms at most\n", worstGap * 1000);
+            CHECK(worstGap < 1e-3, "F opened a gap of %.1f ms inside a phrase", worstGap * 1000);
+        }
         CHECK(worstT < 0.05 && worstT < before * 0.3, "unison: a note start %.0f ms from the reference's", worstT * 1000);
     }
     { // a third above, everything (taken as another part by the alignment: pulled anyway)
