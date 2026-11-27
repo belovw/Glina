@@ -30,6 +30,8 @@ public:
     void refreshView(bool force = false);
     bool trackView() const { return viewOn_; }
     juce::ARARegionSequence* sequence() const { return seq_; }
+    // A track's Glina items that REAPER plays (active takes), by where they start.
+    std::vector<juce::ARAPlaybackRegion*> itemsOf(juce::ARARegionSequence* seq) const;
 
     const Analysis* analysis() const override;
     std::vector<NoteSpan> automaticSpans() const override;
@@ -120,7 +122,7 @@ private:
                    playStart == o.playStart && modStart == o.modStart && modEnd == o.modEnd;
         }
     };
-    std::vector<ViewItem> viewItemsNow() const; // empty: no view (fewer than two items, or they don't fit)
+    std::vector<ViewItem> viewItemsNow() const; // the track's items (active takes) that fit a view
     bool viewOn_ = false;
     bool viewPending_ = false;           // the track has a view, but an item is still being analysed
     TrackView view_;

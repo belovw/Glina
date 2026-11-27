@@ -309,6 +309,7 @@ public:
             if (args[i] == "--fix-undo") { fix_ = fixUndo_ = true; continue; }
             if (args[i] == "--links-edit-test") { linksEdit_ = true; continue; }
             if (args[i] == "--reread-test") { reread_ = true; continue; }
+            if (args[i] == "--pause-test") { pause_ = true; continue; }
             if (args[i] == "--interval" && i + 1 < args.size()) { interval_ = args[++i].getIntValue(); continue; } // box id: 2 unison, 3 third up...
             if (args[i] == "--light") continue;
             if (args[i] == "--toggle-theme") { ++toggleTheme_; continue; } // switch live, as the button does (check)
@@ -392,6 +393,7 @@ private:
             }
             if (linksEdit_ && !linksEditDone_) { linksEditDone_ = true; linksEditTest(m); return; }
             if (reread_ && !rereadDone_) { rereadDone_ = true; rereadTest(m); return; }
+            if (pause_ && !pauseDone_) { pauseDone_ = true; pauseTest(m); return; }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
                 demoDone_ = true;
@@ -437,6 +439,43 @@ private:
         ed.keyPressed(juce::KeyPress(juce::KeyPress::deleteKey, juce::ModifierKeys::altModifier, 0));
         check(serialize(s.document()) == before, "nothing selected: nothing changes");
         std::printf("REREAD: %d failure(s)\n", fails);
+    }
+
+    // The pause dragged by itself, through the mouse: its middle moves it whole, its right edge
+    // stretches it; Ctrl+Z takes each back.
+    static void pauseTest(MainComponent& m)
+    {
+        auto& ed = m.editor();
+        Session& s = m.session();
+        int fails = 0;
+        auto check = [&](bool ok, const char* what) { std::printf("%s %s\n", ok ? "PASS" : "FAIL", what); if (!ok) ++fails; };
+        int i = -1;
+        for (int k = 1; k < ed.noteCountForTest() && i < 0; ++k)
+            if (ed.pauseRectForTest(k).getWidth() >= 24.f) i = k;
+        if (i < 0) { check(false, "a pause with consonants wide enough on screen"); std::printf("PAUSE: %d failure(s)\n", fails); return; }
+        const auto r = ed.pauseRectForTest(i);
+        const double pps = ed.pixelsPerSecondForTest();
+        const double end0 = ed.noteEndForTest(i - 1), start0 = ed.noteStartForTest(i), stop0 = ed.noteEndForTest(i);
+        std::printf("  pause before note %d: %.0f..%.0f px, notes %.3f | %.3f s\n", i, r.getX(), r.getRight(), end0, start0);
+        const auto before = serialize(s.document());
+        ed.dragForTest(r.getCentre(), r.getCentre().translated(6.f, 0.f)); // its middle: moved whole
+        const double dt = 6.0 / pps;
+        std::printf("  after the middle drag: %.3f | %.3f s (wanted +%.3f)\n", ed.noteEndForTest(i - 1), ed.noteStartForTest(i), dt);
+        check(std::abs(ed.noteEndForTest(i - 1) - end0 - dt) < 0.003 && std::abs(ed.noteStartForTest(i) - start0 - dt) < 0.003,
+              "middle dragged: both edges of the pause moved by the drag");
+        check(std::abs(ed.noteEndForTest(i) - stop0) < 0.003, "middle dragged: the next note still ends where it did");
+        ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+        check(serialize(s.document()) == before, "Ctrl+Z: the pause is back");
+        const auto r2 = ed.pauseRectForTest(i);
+        const juce::Point<float> edge(r2.getRight() - 2.f, r2.getCentreY());
+        ed.dragForTest(edge, edge.translated(6.f, 0.f)); // its right edge: stretched
+        const double dt2 = 6.0 / pps;
+        std::printf("  after the edge drag: %.3f | %.3f s (wanted +%.3f at the right)\n", ed.noteEndForTest(i - 1), ed.noteStartForTest(i), dt2);
+        check(std::abs(ed.noteEndForTest(i - 1) - end0) < 0.003, "right edge: the note before stays");
+        check(std::abs(ed.noteStartForTest(i) - start0 - dt2) < 0.003, "right edge: the next note starts later, the pause is longer");
+        ed.keyPressed(juce::KeyPress('z', juce::ModifierKeys::commandModifier, 'z'));
+        check(serialize(s.document()) == before, "Ctrl+Z: back again");
+        std::printf("PAUSE: %d failure(s)\n", fails);
     }
 
     static void linksEditTest(MainComponent& m)
@@ -828,6 +867,7 @@ private:
     int interval_ = 0; // --interval: the links' interval box id
     bool linksEdit_ = false, linksEditDone_ = false; // --links-edit-test
     bool reread_ = false, rereadDone_ = false;       // --reread-test
+    bool pause_ = false, pauseDone_ = false;         // --pause-test
     bool fixUndo_ = false; // --fix-undo: F, then one undo and a redo, note counts printed
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;

@@ -164,6 +164,7 @@ struct Pass {
     std::vector<std::pair<double, double>> pins; // (row, column)
     std::function<double(long)> centre;
     long B = 50;
+    double driftFree = 0, driftCost = 0; // columns free around the centre; cost per column beyond
 
     long iBeg = -1, iEnd = -1;
     std::vector<double> col; // mean reference column per aligned row
@@ -174,8 +175,10 @@ struct Pass {
         const long N = (long)T.size(), M = (long)R.size();
         const long W = 2 * B + 1;
         std::vector<long> start((size_t)N);
+        std::vector<double> mid((size_t)N);
         for (long i = 0; i < N; ++i) {
             const double c = centre(i);
+            mid[(size_t)i] = c;
             start[(size_t)i] = std::lround(c) - B;
             if (c >= 0 && c <= (double)M - 1) { if (iBeg < 0) iBeg = i; iEnd = i; }
         }
@@ -202,6 +205,7 @@ struct Pass {
             }
             for (const auto& p : pins)
                 if (std::lround(p.first) == i && std::abs((double)j - p.second) > 1.0) d += big;
+            if (driftCost > 0) d += (float)(driftCost * std::max(0.0, std::abs((double)j - mid[(size_t)i]) - driftFree));
             return d;
         };
 
@@ -224,12 +228,15 @@ struct Pass {
                 if (j < 0 || j >= M) continue;
                 const long x = (i - iBeg) * W + wv;
                 const float d = Dc[(size_t)x];
-                if (i == iBeg) { D[(size_t)x] = 2 * d; how[(size_t)x] = 3; continue; }
-                float best = Dv(i - 1, j - 1) + 2 * d;
+                // Every target row counts once, whatever the slope (a symmetric weighting would make
+                // paths that take fewer reference columns cheaper wherever the cost is flat, e.g.
+                // across a long silence, and the links would lag behind there).
+                if (i == iBeg) { D[(size_t)x] = d; how[(size_t)x] = 3; continue; }
+                float best = Dv(i - 1, j - 1) + d;
                 uint8_t h = 0;
-                const float b = Dv(i - 1, j - 2) + 2 * dc(i, j - 1) + d;
+                const float b = Dv(i - 1, j - 2) + 0.5f * (dc(i, j - 1) + d);
                 if (b < best) { best = b; h = 1; }
-                const float c = Dv(i - 2, j - 1) + 2 * dc(i - 1, j) + d;
+                const float c = Dv(i - 2, j - 1) + dc(i - 1, j) + d;
                 if (c < best) { best = c; h = 2; }
                 D[(size_t)x] = best;
                 how[(size_t)x] = h;
@@ -261,7 +268,7 @@ struct Pass {
         for (long r = 0; r < rows; ++r) if (cnt[(size_t)r]) col[(size_t)r] = sum[(size_t)r] / cnt[(size_t)r];
         for (long r = 1; r < rows; ++r) if (col[(size_t)r] < 0 && col[(size_t)r - 1] >= 0) col[(size_t)r] = col[(size_t)r - 1] + 1;
         for (long r = rows - 2; r >= 0; --r) if (col[(size_t)r] < 0 && col[(size_t)r + 1] >= 0) col[(size_t)r] = col[(size_t)r + 1] - 1;
-        cost = endV / (2.0 * (double)rows);
+        cost = endV / (double)rows;
         return true;
     }
 
@@ -383,6 +390,8 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
     p1.centre = [&](long i) { return diagonal((double)i, (double)F); };
     const double len = std::max(N, M) * step;
     p1.B = std::max(3L, std::lround(std::max({2.0, 0.05 * len, opt.bandSec}) / (step * F)));
+    p1.driftFree = opt.driftFreeSec / (step * F);
+    p1.driftCost = opt.driftCostPerSec * (step * F);
     const bool coarseOk = F > 1 && p1.run();
 
     // ---- pass 2: frame by frame, +-bandSec around the coarse path ---------------------------
@@ -393,6 +402,10 @@ Warp alignThreads(const std::vector<ThreadFrame>& tgtIn, const std::vector<Threa
     if (coarseOk) p2.centre = [&](long i) { return p1.colAt((double)i / F) * F; };
     else p2.centre = [&](long i) { return diagonal((double)i, 1.0); };
     p2.B = std::max(2L, std::lround(opt.bandSec / step));
+    if (!coarseOk) { // no first pass: the frame pass keeps to the coarse shift itself
+        p2.driftFree = opt.driftFreeSec / step;
+        p2.driftCost = opt.driftCostPerSec * step;
+    }
     if (!p2.run()) return w;
     const long iBeg = p2.iBeg, iEnd = p2.iEnd, rows = iEnd - iBeg + 1;
     const std::vector<double>& col = p2.col;

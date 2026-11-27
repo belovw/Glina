@@ -15,11 +15,6 @@ namespace glina {
 // there by a time edit becomes silence (the render). Shorter (a plosive's closure, a quiet
 // joint of two syllables) is inside a word.
 inline constexpr double kWordGapSec = 0.100;
-// Silence or a breath this long between two notes in the recording parts phrases: separations
-// there are hard by default (NoteEdit::sepBefore). Anything shorter (a pause between words of a
-// sentence, an 'h' the detector takes for a breath) keeps them soft.
-inline constexpr double kPhraseGapSec = 0.250;
-
 enum class FrameKind : uint8_t {
     Silence = 0,   // below the noise floor
     Voiced  = 1,   // periodic voice (vowels, voiced consonants)
@@ -132,11 +127,9 @@ struct NoteEdit {
     bool ownVibrato = false;   // true: `vibrato` below; false: the track's EditSet::autoVibrato
     AutoVibrato vibrato;
     // The separation from the previous note. Soft: the two are linked, a time edit of one
-    // edge moves the other note's edge too (no gap opens, none closes). Hard: each moves alone.
-    // Auto, by the recording: soft inside a phrase (the notes touch, or a glide, a consonant or a
-    // short pause between words lies between them), hard where silence or a breath of
-    // kPhraseGapSec or more parts them (a phrase ends), or they lie in different items (and where
-    // they touch now, after edits, soft).
+    // edge moves the other note's edge too (no gap opens, none closes; a pause between them
+    // moves along, with what is in it). Hard: each moves alone. Auto is soft (hard only between
+    // notes of different items in the track view): hard separations are the user's.
     enum class Sep : uint8_t { Auto = 0, Soft = 1, Hard = 2 };
     Sep sepBefore = Sep::Auto;
 };

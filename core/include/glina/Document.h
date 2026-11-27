@@ -61,7 +61,9 @@ bool moveCut(Document& d, const Analysis& eff, int note, bool startEdge, double 
 // Notes `first`..`last` read again from the recording, as new: over the stretch they cover the
 // notes are laid out as the analysis finds them (`autoSpans`: the clip's automatic note layout,
 // in the frames of `eff`), with no edits, no layout changes and no pencil; the notes around keep
-// everything. A fresh note never reaches into a kept neighbour. False if nothing changed.
+// everything. A fresh note never reaches into a kept neighbour. The stretch keeps its place in
+// time (a shift or stretch it had is carried over to the new notes, so a neighbour moved by an
+// edit never lies over them); "Сбросить" brings the timing back. False if nothing changed.
 bool rereadNotes(Document& d, const Analysis& eff, const std::vector<NoteSpan>& autoSpans, int first, int last);
 
 // Cuts notes where planMelismaCuts says (splitNote, so each piece keeps the note's edits).

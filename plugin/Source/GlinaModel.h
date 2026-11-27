@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 
 namespace glina::plugin {
 
@@ -114,8 +115,16 @@ public:
     // ---- renders kept in <project folder>/Glina (REAPER only) ------------------------
     // Plug-in instances bound to a document controller register their REAPER link, so the
     // controller knows which project it belongs to. Any thread; links unregister themselves.
-    static void registerHostLink(GlinaDocumentController* dc, reaper::HostLink* link);
+    // `ara`: the instance's ARA side (which playback regions it renders), for playedRegions().
+    static void registerHostLink(GlinaDocumentController* dc, reaper::HostLink* link,
+                                 juce::AudioProcessorARAExtension* ara = nullptr);
     static void unregisterHostLink(reaper::HostLink* link);
+    // The playback regions REAPER plays: those rendered by an instance sitting on the active take
+    // of its item. REAPER keeps a take's Glina, and its region on the track, when another take of
+    // the item is made active: that region is not heard, and must not take the active one's place.
+    // False when it cannot be told (not REAPER, an instance not knowing its take yet): then every
+    // region counts. Message thread.
+    bool playedRegions(std::set<const juce::ARAPlaybackRegion*>& out) const;
     bool canSaveRenders() const { return reaper::available(); }
     // Render the clip again with the current engine (drops a render from an older version).
     void rerender(GlinaAudioModification* mod);

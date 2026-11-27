@@ -244,6 +244,8 @@ public:
             "  Тянуть ноту вверх/вниз — высота (по полутонам; с Alt — плавно)\n"
             "  Тянуть ноту вбок — сдвиг во времени (соседи подстраиваются, остальное стоит)\n"
             "  Тянуть край ноты — граница с соседней нотой; выделенные ноты по обе стороны тянутся блоком\n"
+            "  Двойной клик по краю ноты — связь с соседней: мягкая (соседи тянутся вместе) / жёсткий разрез\n"
+            "  Серая зона паузы (согласные, дыхание): за середину — сдвинуть паузу целиком, за край — растянуть или сжать\n"
             "  Верхний угол края вверх/вниз — наклон: одна нота — вокруг другого края; выделенные — домиком, вершина у мыши\n"
             "  (Shift — тоньше; вбок от угла ничего не делает)\n"
             "  Карандаш (P): рисовать высоту; Shift — по полутонам; Alt или правая кнопка — стирать\n"
@@ -346,23 +348,17 @@ public:
     }
 
     // The separation under `p` on note `i`'s edge strip: the boundary with the neighbour on that
-    // side (its index on the left), if the neighbour is close (gap under kSepGapSec); else -1.
-    // The gap is wider than the threshold a separation can be made at, so a hard separation whose
-    // notes were pushed apart still shows and can be double-clicked back to soft.
-    static constexpr double kSepGapSec = 0.3;
+    // side (its index on the left), however long the pause between them, if both lie in one item;
+    // else -1.
     int boundaryAt(int i, juce::Point<float> p) const
     {
         const Zone z = zoneOf(i, p);
         const int b = (z == Zone::Left || z == Zone::CornerL) ? i - 1 : (z == Zone::Right || z == Zone::CornerR) ? i : -1;
-        return b >= 0 && b + 1 < (int)ed.eff_->notes.size() && separationGap(b) < kSepGapSec ? b : -1;
-    }
-    double separationGap(int b) const
-    {
-        return ed.noteStartSec(b + 1) - ed.noteEndSec(b);
+        return b >= 0 && b + 1 < (int)ed.eff_->notes.size() && notesInOneItem(*ed.eff_, b) ? b : -1;
     }
 
-    // Separations between close neighbours: soft (linked) a thin line between the two notes;
-    // hard (each moves alone) a bracket at each note's edge, as in Melodyne.
+    // Separations between neighbours: soft (linked) a thin line between the two notes; hard (each
+    // moves alone) a bracket at each note's edge, as in Melodyne.
     void drawSeparations(juce::Graphics& g, const Analysis& A, const Document& d)
     {
         const auto c = canvas();
@@ -371,7 +367,7 @@ public:
         const std::vector<bool> softSep = softSeparations(d.edits, A);
         auto deleted = [&](int i) { return i < (int)d.edits.notes.size() && d.edits.notes[(size_t)i].deleted; };
         for (int b = 0; b + 1 < n && b < (int)softSep.size(); ++b) {
-            if (separationGap(b) >= kSepGapSec) continue;
+            if (!notesInOneItem(A, b)) continue; // notes of different items are never linked
             if (deleted(b) || deleted(b + 1)) continue; // a deleted note has no separation to show
             const auto l = noteRect(b), r = noteRect(b + 1);
             if (r.getX() < c.getX() - 10 || l.getRight() > c.getRight() + 10) continue;
@@ -657,6 +653,21 @@ public:
         const float s = semi();
         const float y = yOf(ed.editedCentre(i));
         return {x0, y - s * 0.17f, std::max(0.f, x1 - x0), s * 0.34f};
+    }
+    // The part of a pause (the consonant zone of note `i`, after note i - 1) under `p`: its edges
+    // stretch the pause, its middle moves it whole. None: no pause there (the first note, or the
+    // note before lies in another item).
+    enum class PausePart { None, Body, Left, Right };
+    PausePart pausePartAt(int i, juce::Point<float> p) const
+    {
+        if (ed.eff_ == nullptr || i < 1 || !notesInOneItem(*ed.eff_, i - 1)) return PausePart::None;
+        const auto r = consRect(i);
+        if (!r.contains(p)) return PausePart::None;
+        if (r.getWidth() >= 16.f) {
+            if (p.x <= r.getX() + 5.f) return PausePart::Left;
+            if (p.x >= r.getRight() - 5.f) return PausePart::Right;
+        }
+        return PausePart::Body;
     }
     // The note whose consonant zone is under a point, or -1.
     int consonantAt(juce::Point<float> p) const
@@ -1159,6 +1170,12 @@ public:
         const int th = hitThread(e.position);
         if (th != hoverThread) { hoverThread = th; repaint(); }
         if (th >= 0) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; } // thread: hand
+        // A pause (its grey zone) comes first, as for a press: its edges stretch it, its middle moves it.
+        if (const int c = consonantAt(e.position); c >= 0 && !e.mods.isAnyModifierKeyDown()) {
+            const PausePart pp = pausePartAt(c, e.position);
+            if (pp == PausePart::Left || pp == PausePart::Right) { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
+            if (pp == PausePart::Body) { setMouseCursor(juce::MouseCursor::DraggingHandCursor); return; }
+        }
         const int i = hitNote(e.position);
         if (i < 0) { setMouseCursor(e.position.y < kRulerH ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor); return; }
         const Zone z = zoneOf(i, e.position);
@@ -1206,6 +1223,14 @@ public:
             const int cons = consonantAt(e.position);
             if (cons >= 0) {
                 ed.consSelection_ = {cons};
+                // A drag moves the pause it lies in (its middle) or stretches it (an edge).
+                const PausePart pp = pausePartAt(cons, e.position);
+                if (pp != PausePart::None) {
+                    gesture = pp == PausePart::Left ? G::PauseL : pp == PausePart::Right ? G::PauseR : G::PauseMove;
+                    pressed = cons - 1; // the note before the pause
+                    before = *ed.doc();
+                    movedAny = false;
+                }
                 repaint();
                 return;
             }
@@ -1360,6 +1385,19 @@ public:
             return;
         }
         if (gesture == G::PinNew) { repaint(); return; }
+        if (gesture == G::PauseMove || gesture == G::PauseL || gesture == G::PauseR) {
+            const float dx = e.getOffsetFromDragStart().toFloat().x;
+            if (!movedAny && std::abs(dx) < 3.f) return;
+            movedAny = true;
+            d->edits = before.edits;
+            const double dt = dx / ed.pps_;
+            if (gesture == G::PauseMove) movePause(d->edits, *ed.eff_, pressed, dt);
+            else stretchPause(d->edits, *ed.eff_, pressed, gesture == G::PauseR, dt);
+            changed = true;
+            ed.refreshCurves(false);
+            repaint();
+            return;
+        }
         const juce::Point<float> off = e.getOffsetFromDragStart().toFloat();
         switch (gesture) {
             case G::Ruler:
@@ -1389,6 +1427,9 @@ public:
                 return;
             }
             case G::None:
+            case G::PauseMove:
+            case G::PauseL:
+            case G::PauseR:
                 return;
             case G::Pitch:
             case G::Move:
@@ -1480,6 +1521,12 @@ public:
         }
         if (g0 == G::Draw || g0 == G::Erase) {
             if (changed) ed.commit(before);
+            changed = false;
+            return;
+        }
+        if (g0 == G::PauseMove || g0 == G::PauseL || g0 == G::PauseR) {
+            if (changed) ed.commit(before);
+            pressed = -1;
             changed = false;
             return;
         }
@@ -1651,7 +1698,8 @@ public:
     }
 
     PitchEditor& ed;
-    enum class G { None, Pending, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase, PinEnd, PinNew, ViewPan, ViewZoom };
+    enum class G { None, Pending, PendingCorner, Pitch, Move, StretchL, StretchR, Tilt, Smooth, Marquee, Ruler, Draw, Erase, PinEnd, PinNew, ViewPan, ViewZoom,
+                   PauseMove, PauseL, PauseR };
     DrawPt lastDraw;
     G gesture = G::None;
     bool tiltRight = true; // Tilt: the right edge moves (the left one stays)
@@ -3192,6 +3240,11 @@ void PitchEditor::layoutInspector()
 
 // ---- self-test hooks -------------------------------------------------------------------
 juce::Rectangle<float> PitchEditor::noteRectForTest(int i) const { return roll_->noteRect(i); }
+juce::Rectangle<float> PitchEditor::pauseRectForTest(int i) const
+{
+    if (eff_ == nullptr || i < 1 || i >= (int)eff_->notes.size() || !Roll::hasConsonant(*eff_, i)) return {};
+    return roll_->consRect(i);
+}
 
 juce::Point<float> PitchEditor::linkEndForTest(float x, bool ref) const { return roll_->linkEnd(roll_->secOf(x), ref); }
 

@@ -15,11 +15,12 @@ GlinaProcessor::~GlinaProcessor() { GlinaDocumentController::unregisterHostLink(
 void GlinaProcessor::didBindToARA() noexcept
 {
     juce::AudioProcessorARAExtension::didBindToARA();
-    // Lets the document controller find its REAPER project (for renders kept next to it).
+    // Lets the document controller find its REAPER project (for renders kept next to it) and
+    // tell which regions REAPER plays (those of active takes).
     GlinaDocumentController::registerHostLink(
         juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<GlinaDocumentController>(
             ARA::PlugIn::PlugInExtension::getDocumentController()),
-        &hostLink_);
+        &hostLink_, this);
 }
 
 void GlinaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)

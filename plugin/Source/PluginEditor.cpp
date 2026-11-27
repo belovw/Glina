@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace glina::plugin {
 
@@ -201,7 +202,13 @@ std::vector<PluginClip::ViewItem> PluginClip::viewItemsNow() const
     if (doc == nullptr) return out;
     const auto& all = doc->getRegionSequences();
     if (std::find(all.begin(), all.end(), seq_) == all.end()) return out; // track is gone
+    std::set<const juce::ARAPlaybackRegion*> played;
+    const bool known = dc_ != nullptr && dc_->playedRegions(played);
+    // A take REAPER does not play (another take of its item is active) is edited alone: in the
+    // view it would lie over the take that is heard.
+    if (known && region_ != nullptr && played.count(region_) == 0) return out;
     for (auto* r : glinaItemsOf(seq_)) {
+        if (known && played.count(r) == 0) continue; // inactive takes are not part of the track
         ViewItem it;
         it.region = r;
         it.mod = dynamic_cast<GlinaAudioModification*>(r->getAudioModification());
@@ -235,7 +242,14 @@ void PluginClip::refreshView(bool force)
         viewRefused_ = why;
     };
     const auto items = viewItemsNow();
-    if (items.size() < 2) { turnOff(); return; }
+    // Two items or more; or one the DAW plays only a part of (a trimmed item): the view shows just
+    // that part, as REAPER does, instead of the whole recording.
+    auto trimmed = [](const ViewItem& it) {
+        const auto* src = it.region->getAudioModification()->getAudioSource();
+        const double dur = src != nullptr ? src->getDuration() : 0.0;
+        return it.modStart > 0.02 || (dur > 0 && it.modEnd < dur - 0.02);
+    };
+    if (items.size() < 2 && !(items.size() == 1 && trimmed(items.front()))) { turnOff(); return; }
     for (const auto& it : items) {
         const double pd = it.region->getDurationInPlaybackTime(), md = it.region->getDurationInAudioModificationTime();
         if (std::abs(pd - md) > 1e-6) { refuse(T("у айтема изменена скорость воспроизведения")); return; }
@@ -346,10 +360,16 @@ juce::String PluginClip::warningText() const
                 w << T("Glina выключена в REAPER на айтемах: ") << names.joinIntoString(", ") << T(" — их правки не слышны");
         }
     } else if (mod_ != nullptr) {
-        const auto g = proc_.ownTakeGlina();
-        if (off(g)) w << T("Glina на этом айтеме ") << what(g) << T(" в REAPER — правки не слышны");
+        std::set<const juce::ARAPlaybackRegion*> played;
+        if (dc_ != nullptr && region_ != nullptr && dc_->playedRegions(played) && played.count(region_) == 0) {
+            w << T("Этот тэйк не активен в REAPER — его правки не слышны (сделайте его активным тэйком айтема)");
+        } else {
+            const auto g = proc_.ownTakeGlina();
+            if (off(g)) w << T("Glina на этом айтеме ") << what(g) << T(" в REAPER — правки не слышны")
+                          << T(" (включите её в Take FX айтема)");
+        }
     }
-    if (w.isNotEmpty()) w << T(" (включите её в Take FX айтема)");
+    if (viewOn_ && w.isNotEmpty()) w << T(" (включите её в Take FX айтема)");
     // A failed render: that item plays its previous render.
     juce::StringArray failed;
     if (viewOn_) {
@@ -482,6 +502,15 @@ std::vector<juce::ARAPlaybackRegion*> glinaItemsOf(juce::ARARegionSequence* seq)
 }
 } // namespace
 
+std::vector<juce::ARAPlaybackRegion*> PluginClip::itemsOf(juce::ARARegionSequence* seq) const
+{
+    auto rs = glinaItemsOf(seq);
+    std::set<const juce::ARAPlaybackRegion*> played;
+    if (dc_ == nullptr || !dc_->playedRegions(played)) return rs;
+    rs.erase(std::remove_if(rs.begin(), rs.end(), [&](auto* r) { return played.count(r) == 0; }), rs.end());
+    return rs;
+}
+
 juce::ARADocument* PluginClip::arDoc() const
 {
     if (dc_ == nullptr) return nullptr;
@@ -494,7 +523,7 @@ std::vector<juce::ARARegionSequence*> PluginClip::glinaSequences() const
     auto* doc = arDoc();
     if (doc == nullptr) return out;
     out.assign(doc->getRegionSequences().begin(), doc->getRegionSequences().end());
-    out.erase(std::remove_if(out.begin(), out.end(), [](auto* s) { return glinaItemsOf(s).empty(); }), out.end());
+    out.erase(std::remove_if(out.begin(), out.end(), [this](auto* s) { return itemsOf(s).empty(); }), out.end());
     std::stable_sort(out.begin(), out.end(), [](auto* a, auto* b) { return a->getOrderIndex() < b->getOrderIndex(); });
     return out;
 }
@@ -543,7 +572,7 @@ void PluginClip::followTrack()
     // The host replaced the item or switched its take: stay on this track. If the host only
     // recreated the region of the take we were editing, pick that take again; otherwise
     // fall back to the item under the playhead.
-    const auto items = glinaItemsOf(seq_);
+    const auto items = itemsOf(seq_);
     juce::ARAPlaybackRegion* pick = nullptr;
     if (lastMod_ != nullptr)
         for (auto* r : items)
@@ -587,7 +616,7 @@ bool PluginClip::thread(const juce::String& id, std::vector<ThreadFrame>& out) c
     for (auto* seq : glinaSequences()) {
         if (idOf(seq) != id) continue;
         out.clear();
-        auto items = glinaItemsOf(seq);
+        auto items = itemsOf(seq);
         std::stable_sort(items.begin(), items.end(),
                          [](auto* a, auto* b) { return a->getStartInPlaybackTime() < b->getStartInPlaybackTime(); });
         for (auto* r : items) {
@@ -609,7 +638,7 @@ bool PluginClip::trackKey(const juce::String& id, Key& out) const
     if (region_ == nullptr) return false;
     for (auto* seq : glinaSequences()) {
         if (idOf(seq) != id) continue;
-        auto items = glinaItemsOf(seq);
+        auto items = itemsOf(seq);
         std::stable_sort(items.begin(), items.end(),
                          [](auto* a, auto* b) { return a->getStartInPlaybackTime() < b->getStartInPlaybackTime(); });
         for (auto* r : items) {
@@ -631,7 +660,7 @@ bool PluginClip::ghost(const juce::String& id, Ghost& out) const
         // All items of the track at once, one after another with a break between them.
         out = Ghost{};
         bool any = false;
-        for (auto* r : glinaItemsOf(seq)) {
+        for (auto* r : itemsOf(seq)) {
             Ghost g;
             if (!ghostOfItem(r, g)) continue;
             if (any && !out.curve.empty())
@@ -657,7 +686,7 @@ void PluginClip::log(const juce::String& line) const
 void PluginClip::setEditedTrack(const juce::String& id)
 {
     for (auto* seq : glinaSequences())
-        if (idOf(seq) == id) { setRegion(itemAt(glinaItemsOf(seq))); return; }
+        if (idOf(seq) == id) { setRegion(itemAt(itemsOf(seq))); return; }
 }
 
 // ---- render kept in the project folder ------------------------------------------------
@@ -827,7 +856,7 @@ bool GlinaEditor::pinOwnRegion()
         auto* seq = clip_->sequenceOfTrack(t);
         if (seq == nullptr)
             return giveUp(T("трек «") + t.name + T("» №") + juce::String(t.number) + T(" не найден среди треков с Glina"));
-        const auto items = glinaItemsOf(seq);
+        const auto items = clip_->itemsOf(seq);
         double best = std::numeric_limits<double>::max();
         for (auto* r : items) {
             const double d = inside(r) ? 0.0

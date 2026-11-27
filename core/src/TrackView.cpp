@@ -1,4 +1,5 @@
 #include "glina/TrackView.h"
+#include "glina/Thread.h"
 
 #include "glina/Editing.h"
 #include "glina/Notes.h"
@@ -94,6 +95,20 @@ bool buildTrackView(const std::vector<TrackPiece>& pieces, int primary, TrackVie
     Document doc = pieces[(size_t)primary].doc;
     doc.edits.notes.clear();
     doc.edits.spans.clear();
+    // Link pins (made with the primary's reference) of every piece, in view time, each from the
+    // stretch the piece owns.
+    doc.pins.clear();
+    for (size_t k = 0; k < np; ++k) {
+        const Document& pd = pieces[k].doc;
+        if (pd.pins.empty() || pd.pinRef != pieces[(size_t)primary].doc.pinRef) continue;
+        const double shift = maps[k].frameOffset * hopSec;
+        for (Pin pin : pd.pins) {
+            pin.tgt += shift;
+            pin.ref += shift;
+            if (pin.tgt >= maps[k].frameBegin * hopSec && pin.tgt < maps[k].frameEnd * hopSec) doc.pins.push_back(pin);
+        }
+    }
+    std::sort(doc.pins.begin(), doc.pins.end(), [](const Pin& x, const Pin& y) { return x.tgt < y.tgt; });
     std::vector<float> draw((size_t)total, std::numeric_limits<float>::quiet_NaN());
     // Masks per voice of the view (the primary piece's voices), built note by note.
     std::vector<std::vector<uint8_t>> masks(doc.voices.size());
@@ -171,6 +186,13 @@ std::vector<Document> splitTrackView(const TrackView& view, const Document& edit
     const std::vector<float> vdraw = drawnDense(edited.edits, (int)v.frames.size());
     const Document& built = view.built;
     const bool voicesChanged = !sameVoices(edited.voices, built.voices);
+    auto samePins = [](const std::vector<Pin>& x, const std::vector<Pin>& y) {
+        if (x.size() != y.size()) return false;
+        for (size_t i = 0; i < x.size(); ++i)
+            if (x[i].tgt != y[i].tgt || x[i].ref != y[i].ref) return false;
+        return true;
+    };
+    const bool pinsChanged = !samePins(edited.pins, built.pins) || edited.pinRef != built.pinRef;
 
     for (size_t k = 0; k < pieces.size(); ++k) {
         const Analysis& a = *pieces[k].eff;
@@ -240,6 +262,26 @@ std::vector<Document> splitTrackView(const TrackView& view, const Document& edit
             if (std::isnan(dst) != std::isnan(src) || (!std::isnan(src) && dst != src)) { dst = src; drawChanged = true; }
         }
         if (drawChanged) setDrawnDense(d.edits, dense);
+
+        // Link pins changed in the view: the piece takes those over its stretch (back in its own
+        // time) and keeps its own elsewhere.
+        if (pinsChanged) {
+            const double shift = off * hopSec;
+            const double w0 = m.frameBegin * hopSec, w1 = m.frameEnd * hopSec;
+            std::vector<Pin> pins;
+            if (d.pinRef == edited.pinRef)
+                for (const Pin& pin : d.pins)
+                    if (pin.tgt + shift < w0 || pin.tgt + shift >= w1) pins.push_back(pin);
+            for (Pin pin : edited.pins)
+                if (pin.tgt >= w0 && pin.tgt < w1) {
+                    pin.tgt -= shift;
+                    pin.ref -= shift;
+                    pins.push_back(pin);
+                }
+            std::sort(pins.begin(), pins.end(), [](const Pin& x, const Pin& y) { return x.tgt < y.tgt; });
+            d.pins = std::move(pins);
+            d.pinRef = edited.pinRef;
+        }
 
         // Track-wide settings: only those changed in the view are written to every piece.
         auto take = [](auto& dst, const auto& now, const auto& was) { if (!(now == was)) dst = now; };

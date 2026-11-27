@@ -201,34 +201,20 @@ std::vector<NoteTimes> noteTimes(const Analysis& a, const EditSet& e)
 
 double minNoteLength(const NoteTimes& t) { return minDur(t); }
 
-namespace {
-// True if in the recording note i and i + 1 lie in one phrase: no silence or breath of
-// kPhraseGapSec or more between them, and the same item (track view).
-bool joinedInRecording(const Analysis& a, int i)
+bool notesInOneItem(const Analysis& a, int i)
 {
     if (i < 0 || i + 1 >= (int)a.notes.size()) return false;
-    const Note& l = a.notes[(size_t)i];
-    const Note& r = a.notes[(size_t)i + 1];
-    if (!a.segments.empty()) {
-        auto segOf = [&](const Note& m) {
-            const double mid = 0.5 * (m.startSec + m.endSec);
-            for (size_t s = 0; s < a.segments.size(); ++s)
-                if (mid >= a.segments[s].first && mid < a.segments[s].second) return (int)s;
-            return -1;
-        };
-        if (segOf(l) != segOf(r)) return false;
-    }
-    const double hopSec = (double)a.hop / a.sampleRate;
-    const int need = std::max(1, (int)std::ceil(kPhraseGapSec / hopSec));
-    int run = 0;
-    for (int f = std::max(0, l.endFrame); f < std::min(r.startFrame, (int)a.frames.size()); ++f) {
-        const FrameKind k = a.frames[(size_t)f].kind;
-        run = (k == FrameKind::Silence || k == FrameKind::Breath) ? run + 1 : 0;
-        if (run >= need) return false;
-    }
-    return true;
+    if (a.segments.empty()) return true;
+    auto segOf = [&](const Note& m) {
+        const double mid = 0.5 * (m.startSec + m.endSec);
+        for (size_t s = 0; s < a.segments.size(); ++s)
+            if (mid >= a.segments[s].first && mid < a.segments[s].second) return (int)s;
+        return -1;
+    };
+    return segOf(a.notes[(size_t)i]) == segOf(a.notes[(size_t)i + 1]);
 }
 
+namespace {
 // Soft separation between note i and i + 1 in layout t (see NoteEdit::sepBefore).
 bool soft(const EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t, int i)
 {
@@ -237,7 +223,9 @@ bool soft(const EditSet& e, const Analysis& a, const std::vector<NoteTimes>& t, 
     if ((size_t)i + 1 < e.notes.size() && (e.notes[(size_t)i].deleted || e.notes[(size_t)i + 1].deleted)) return false;
     const NoteEdit::Sep s = (size_t)i + 1 < e.notes.size() ? e.notes[(size_t)i + 1].sepBefore : NoteEdit::Sep::Auto;
     if (s != NoteEdit::Sep::Auto) return s == NoteEdit::Sep::Soft;
-    return std::abs(t[(size_t)i + 1].outStart - t[(size_t)i].outEnd) < 0.005 || joinedInRecording(a, i);
+    // Auto is soft: only the user makes hard separations. Notes of different items (track view)
+    // stay apart: each item is its own recording.
+    return notesInOneItem(a, i);
 }
 } // namespace
 
@@ -396,6 +384,59 @@ double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const st
     const double applied = limitDt(dt, lim, make);
     applyNoteTimes(e, a, make(applied));
     return applied;
+}
+
+namespace {
+// Places notes with one or two edges moved, the move clamped to what the layout allows; halves it
+// until placeNotes accepts (a consonant keeps its length, items and the clip bound the notes).
+double placeEdges(EditSet& e, const Analysis& a, int left, double dt, bool moveEnd, bool moveStart, double lo, double hi)
+{
+    dt = std::clamp(dt, lo, hi);
+    const std::vector<NoteTimes> base = noteTimes(a, e);
+    for (int tries = 0; tries < 12 && std::abs(dt) > 1e-5; ++tries, dt *= 0.5) {
+        std::vector<NoteTimes> t = base;
+        if (moveEnd) t[(size_t)left].outEnd += dt;
+        if (moveStart) t[(size_t)left + 1].outStart += dt;
+        EditSet trial = e;
+        if (placeNotes(trial, a, t)) { e = trial; return dt; }
+    }
+    return 0;
+}
+constexpr double kMinPauseSec = 0.010;
+} // namespace
+
+double movePause(EditSet& e, const Analysis& a, int left, double dt)
+{
+    const int n = (int)a.notes.size();
+    if (left < 0 || left + 1 >= n || dt == 0) return 0;
+    if (e.notes.size() < (size_t)n) e.notes.resize((size_t)n);
+    const std::vector<NoteTimes> t = noteTimes(a, e);
+    const NoteTimes& l = t[(size_t)left];
+    const NoteTimes& r = t[(size_t)left + 1];
+    // The left note keeps its minimal length, so does the right one.
+    const double lo = l.outStart + minNoteLength(l) - l.outEnd;
+    const double hi = r.outEnd - minNoteLength(r) - r.outStart;
+    return placeEdges(e, a, left, dt, true, true, std::min(0.0, lo), std::max(0.0, hi));
+}
+
+double stretchPause(EditSet& e, const Analysis& a, int left, bool rightEdge, double dt)
+{
+    const int n = (int)a.notes.size();
+    if (left < 0 || left + 1 >= n || dt == 0) return 0;
+    if (e.notes.size() < (size_t)n) e.notes.resize((size_t)n);
+    const std::vector<NoteTimes> t = noteTimes(a, e);
+    const NoteTimes& l = t[(size_t)left];
+    const NoteTimes& r = t[(size_t)left + 1];
+    const double pause = r.outStart - l.outEnd;
+    double lo, hi;
+    if (rightEdge) { // the next note's start: not into the pause's last 10 ms, the note keeps its length
+        lo = std::min(0.0, kMinPauseSec - pause);
+        hi = std::max(0.0, r.outEnd - minNoteLength(r) - r.outStart);
+    } else {         // the last note's end
+        lo = std::min(0.0, l.outStart + minNoteLength(l) - l.outEnd);
+        hi = std::max(0.0, pause - kMinPauseSec);
+    }
+    return placeEdges(e, a, left, dt, !rightEdge, rightEdge, lo, hi);
 }
 
 double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, double dt)

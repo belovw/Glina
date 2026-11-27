@@ -47,6 +47,7 @@ using FnGetTrackName = bool (*)(void* track, char* bufOut, int bufOut_sz);
 using FnGetActiveTake = void* (*)(void* item);
 using FnGetMediaItemTake = void* (*)(void* item, int takeidx);
 using FnGetMediaItemNumTakes = int (*)(void* item);
+using FnGetMediaItemTake_Item = void* (*)(void* take);
 using FnTakeFX_GetCount = int (*)(void* take);
 using FnTakeFX_GetFXName = bool (*)(void* take, int fx, char* bufOut, int bufOut_sz);
 using FnTakeFX_GetEnabled = bool (*)(void* take, int fx);
@@ -66,6 +67,7 @@ std::atomic<FnGetTrackName> getTrackName { nullptr };
 std::atomic<FnGetActiveTake> getActiveTake { nullptr };
 std::atomic<FnGetMediaItemTake> getMediaItemTake { nullptr };
 std::atomic<FnGetMediaItemNumTakes> getMediaItemNumTakes { nullptr };
+std::atomic<FnGetMediaItemTake_Item> getTakeItem { nullptr };
 std::atomic<FnTakeFX_GetCount> takeFxCount { nullptr };
 std::atomic<FnTakeFX_GetFXName> takeFxName { nullptr };
 std::atomic<FnTakeFX_GetEnabled> takeFxEnabled { nullptr };
@@ -113,6 +115,8 @@ void HostLink::attach(Steinberg::FUnknown* hostContext)
         getMediaItemTake = reinterpret_cast<FnGetMediaItemTake>(rh(obj)->getReaperApi("GetMediaItemTake"));
     if (getMediaItemNumTakes.load() == nullptr)
         getMediaItemNumTakes = reinterpret_cast<FnGetMediaItemNumTakes>(rh(obj)->getReaperApi("GetMediaItemNumTakes"));
+    if (getTakeItem.load() == nullptr)
+        getTakeItem = reinterpret_cast<FnGetMediaItemTake_Item>(rh(obj)->getReaperApi("GetMediaItemTake_Item"));
     if (takeFxCount.load() == nullptr)
         takeFxCount = reinterpret_cast<FnTakeFX_GetCount>(rh(obj)->getReaperApi("TakeFX_GetCount"));
     if (takeFxName.load() == nullptr)
@@ -225,6 +229,16 @@ bool trackInfo(void* track, TrackInfo& out, bool glina)
         if (glina) out.itemGlina.push_back(activeTake != nullptr ? glinaOfTake(activeTake(it)) : GlinaFx::unknown);
     }
     return true;
+}
+
+int takeActive(void* take)
+{
+    const auto itemOf = getTakeItem.load();
+    const auto active = getActiveTake.load();
+    if (take == nullptr || itemOf == nullptr || active == nullptr) return -1;
+    void* item = itemOf(take);
+    if (item == nullptr) return -1;
+    return active(item) == take ? 1 : 0;
 }
 
 GlinaFx glinaOfTake(void* take)

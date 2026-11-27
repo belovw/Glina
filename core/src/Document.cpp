@@ -90,6 +90,15 @@ bool rereadNotes(Document& d, const Analysis& eff, const std::vector<NoteSpan>& 
     if ((int)spans.size() != n) return false;
     const int nf = (int)eff.frames.size();
     const int f0 = spans[(size_t)first].start, f1 = spans[(size_t)last].end;
+    // Where the stretch plays now: the re-read notes stay there (only their pitch, layout and
+    // sound edits are dropped). Back at their recorded times they would lie over a neighbour that
+    // an edit (F, a drag) had moved: two notes at once.
+    const std::vector<NoteTimes> was = noteTimes(eff, d.edits);
+    const double w0 = was[(size_t)first].outStart, w1 = was[(size_t)last].outEnd;
+    const double i0 = was[(size_t)first].inStart, i1 = was[(size_t)last].inEnd;
+    const double k = i1 > i0 ? (w1 - w0) / (i1 - i0) : 1.0;
+    const double leftBound = first > 0 ? was[(size_t)first - 1].outEnd : -1e9;
+    const double rightBound = last + 1 < n ? was[(size_t)last + 1].outStart : 1e9;
     const int lo = first > 0 ? spans[(size_t)first - 1].end : 0;
     const int hi = last + 1 < n ? spans[(size_t)last + 1].start : nf;
     constexpr int kMinFrames = 4; // ~20 ms, as for a split
@@ -113,6 +122,18 @@ bool rereadNotes(Document& d, const Analysis& eff, const std::vector<NoteSpan>& 
         m.resize(m.size() + fresh.size(), 1);
         m.insert(m.end(), v.noteMask.begin() + last + 1, v.noteMask.end());
         v.noteMask = std::move(m);
+    }
+    // The new notes in the stretch's place: its shift and stretch carried over (none if it had none).
+    const double hopSec = (double)eff.hop / eff.sampleRate;
+    const bool moved = std::abs(w0 - i0) > 1e-6 || std::abs(w1 - i1) > 1e-6;
+    for (size_t j = 0; moved && j < fresh.size(); ++j) {
+        NoteTimes t;
+        t.inStart = fresh[j].start * hopSec;
+        t.inEnd = fresh[j].end * hopSec;
+        t.outStart = std::max(leftBound, w0 + (t.inStart - i0) * k);
+        t.outEnd = std::min(rightBound, w0 + (t.inEnd - i0) * k);
+        if (t.outEnd - t.outStart < 0.25 * (t.inEnd - t.inStart)) continue; // squeezed out: leave it as recorded
+        setNoteTimes(e2[(size_t)first + j], t);
     }
     const int e0 = fresh.empty() ? f0 : std::min(f0, fresh.front().start);
     const int e1 = fresh.empty() ? f1 : std::max(f1, fresh.back().end);

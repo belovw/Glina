@@ -37,6 +37,10 @@ public:
 
     // ---- self-test hooks (app --selftest): roll coordinates, synthetic mouse gestures ----
     juce::Rectangle<float> noteRectForTest(int note) const;
+    juce::Rectangle<float> pauseRectForTest(int note) const; // the consonant zone before `note`; empty = none
+    double noteStartForTest(int note) const { return noteStartSec(note); }
+    double noteEndForTest(int note) const { return noteEndSec(note); }
+    double pixelsPerSecondForTest() const { return pps_; }
     juce::Point<float> threadHandleForTest(int note) const; // join before `note`; (-1,-1) = none
     int hitThreadForTest(juce::Point<float> p) const;
     void zoomForTest(double pixelsPerSecond, double scrollSec);

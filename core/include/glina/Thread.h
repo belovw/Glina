@@ -47,6 +47,13 @@ struct AlignOptions {
     bool autoPart = true;    // unison asked, but the lines are > 1 semitone apart (octave folded): treat as another part
     int octave = kAutoOctave; // reference minus target, octaves
     static constexpr int kAutoOctave = 0x7fff;
+    // Leaving the coarse shift costs: free up to driftFreeSec, then driftCostPerSec per second of
+    // distance, per frame (1 = a whole mismatch of kind). Two tracks of one song are sung to the same
+    // backing: where nothing tells them apart (a long silence on one side, phrases that repeat, a
+    // part whose line only resembles the other) the links stay where the shift puts them instead of
+    // wandering off by seconds; a real drift still wins where the sound shows it.
+    double driftFreeSec = 0.3;
+    double driftCostPerSec = 0.3;
 };
 
 // Monotone, piecewise-linear target -> reference time map (slope 1 beyond its ends).

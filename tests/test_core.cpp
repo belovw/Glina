@@ -1025,6 +1025,68 @@ static void testTrackViewCut()
     CHECK(std::abs(got - expected) < 1e-6, "the part in item B continues the note (%.6f vs %.6f)", got, expected);
 }
 
+static void testPauses(const Analysis& a)
+{
+    std::printf("[pause] the pause dragged by itself: moved whole, or stretched by an edge\n");
+    const int n = (int)a.notes.size();
+    EditSet e0;
+    e0.notes.resize((size_t)n);
+    const auto t = noteTimes(a, e0);
+    int b = -1; // a pair with a real pause between, away from the ends
+    for (int k = 1; k + 2 < n && b < 0; ++k)
+        if (t[(size_t)k + 1].outStart - t[(size_t)k].outEnd > 0.06) b = k;
+    if (b < 0) { CHECK(false, "demo melody has a pause"); return; }
+    const double pause = t[(size_t)b + 1].outStart - t[(size_t)b].outEnd;
+    auto same = [&](const std::vector<NoteTimes>& u, int skip0, int skip1) {
+        for (int k = 0; k < n; ++k) {
+            if (k == skip0 || k == skip1) continue;
+            if (std::abs(u[(size_t)k].outStart - t[(size_t)k].outStart) > 1e-9 || std::abs(u[(size_t)k].outEnd - t[(size_t)k].outEnd) > 1e-9)
+                return false;
+        }
+        return true;
+    };
+    { // moved whole: both edges, the pause keeps its length, what is in it moves along
+        EditSet e = e0;
+        const double applied = movePause(e, a, b, 0.05);
+        const auto u = noteTimes(a, e);
+        CHECK(std::abs(applied - 0.05) < 1e-9, "move applied %.4f", applied);
+        CHECK(std::abs(u[(size_t)b].outEnd - t[(size_t)b].outEnd - 0.05) < 1e-6 &&
+                  std::abs(u[(size_t)b + 1].outStart - t[(size_t)b + 1].outStart - 0.05) < 1e-6,
+              "both edges of the pause moved");
+        CHECK(std::abs(u[(size_t)b + 1].outEnd - t[(size_t)b + 1].outEnd) < 1e-6 && same(u, b, b + 1),
+              "nothing else moved");
+        const double sr = a.sampleRate;
+        const double mid = 0.5 * (t[(size_t)b].inEnd + t[(size_t)b + 1].inStart) * sr;
+        const TimeMap m0 = TimeMap::build(a, e0), m1 = TimeMap::build(a, e);
+        const double moved = (m1.inToOut(mid) - m0.inToOut(mid)) / sr;
+        std::printf("  moved 50 ms: the middle of the pause moved %.1f ms\n", moved * 1000);
+        CHECK(std::abs(moved - 0.05) < 0.002, "the pause's sound moved %.4f s", moved);
+    }
+    { // stretched by its right edge: longer by 80 ms, the next note starts later and ends where it did
+        EditSet e = e0;
+        const double applied = stretchPause(e, a, b, true, 0.08);
+        const auto u = noteTimes(a, e);
+        const double p1 = u[(size_t)b + 1].outStart - u[(size_t)b].outEnd;
+        std::printf("  right edge +80 ms: pause %.1f -> %.1f ms\n", pause * 1000, p1 * 1000);
+        CHECK(std::abs(applied - 0.08) < 1e-9 && std::abs(p1 - pause - 0.08) < 1e-6, "pause longer by 80 ms");
+        CHECK(std::abs(u[(size_t)b + 1].outEnd - t[(size_t)b + 1].outEnd) < 1e-6 && same(u, b + 1, b + 1),
+              "the next note ends where it did, nothing else moved");
+    }
+    { // its left edge back by 30 ms: the last note ends earlier, the pause is longer
+        EditSet e = e0;
+        stretchPause(e, a, b, false, -0.03);
+        const auto u = noteTimes(a, e);
+        CHECK(std::abs(u[(size_t)b].outEnd - t[(size_t)b].outEnd + 0.03) < 1e-6 && same(u, b, b), "left edge back 30 ms");
+    }
+    { // squeezed far: the pause keeps ~10 ms
+        EditSet e = e0;
+        stretchPause(e, a, b, true, -5.0);
+        const auto u = noteTimes(a, e);
+        const double p1 = u[(size_t)b + 1].outStart - u[(size_t)b].outEnd;
+        CHECK(p1 > 0.009 && p1 < 0.012, "squeezed pause %.4f s", p1);
+    }
+}
+
 static void testSeparations(const Analysis& a)
 {
     std::printf("[separations] soft: the neighbour follows; hard: it stays; saved with the project\n");
@@ -1043,8 +1105,8 @@ static void testSeparations(const Analysis& a)
 
     CHECK(softSeparation(e0, a, touch), "touching notes: soft by default");
     CHECK(softSeparation(e0, a, gap), "a consonant between the notes (one word): soft by default");
-    { // a pause of kPhraseGapSec (silence or a breath) between them in the recording: phrases
-      // apart, hard by default; a shorter one (between words of a sentence): soft
+    { // a long pause (silence or a breath) between them in the recording: still soft by default,
+      // hard separations are the user's
         Analysis q = a;
         const double hopSec = (double)q.hop / q.sampleRate;
         Note& l = q.notes[(size_t)gap];
@@ -1054,12 +1116,14 @@ static void testSeparations(const Analysis& a)
             l.endSec = l.endFrame * hopSec;
             for (int f = l.endFrame; f < r0; ++f) q.frames[(size_t)f].kind = k;
         };
-        pauseOf(kPhraseGapSec + 0.02, FrameKind::Silence);
-        CHECK(!softSeparation(e0, q, gap), "a long silence between the notes: hard by default");
-        pauseOf(kPhraseGapSec + 0.02, FrameKind::Breath);
-        CHECK(!softSeparation(e0, q, gap), "a breath between the notes: hard by default");
-        pauseOf(kPhraseGapSec - 0.08, FrameKind::Silence);
-        CHECK(softSeparation(e0, q, gap), "a short pause between words: soft by default");
+        pauseOf(0.4, FrameKind::Silence);
+        CHECK(softSeparation(e0, q, gap), "a long silence between the notes: soft by default");
+        pauseOf(0.4, FrameKind::Breath);
+        CHECK(softSeparation(e0, q, gap), "a breath between the notes: soft by default");
+        // Notes of different items (track view) stay apart.
+        q.segments = {{0.0, 0.5 * (q.notes[(size_t)gap].endSec + q.notes[(size_t)gap + 1].startSec)},
+                      {0.5 * (q.notes[(size_t)gap].endSec + q.notes[(size_t)gap + 1].startSec), 1e9}};
+        CHECK(!softSeparation(e0, q, gap), "notes of different items: hard");
     }
 
     { // soft (default): moving the right note drags the left note's end
@@ -1772,6 +1836,72 @@ static void testThreadAlign()
         for (double t = 0.1; t < 4.0; t += 0.037) worst = std::max(worst, std::abs(w.unmap(w.map(t)) - t));
         CHECK(worst < 1e-6, "unmap is not the inverse of map (%.2e s)", worst);
     }
+    { // Two tracks of one song (track view): the reference sings a phrase ten times; the target, another
+      // part, sings it twice, is silent for four, sings two more and stops. Nothing tells the silent
+      // stretch apart and the phrase repeats: the links must still stay where the singing is.
+        const std::vector<test::SynthNote> mel = test::demoMelody();
+        const size_t M = mel.size();
+        auto times = [&](const std::vector<test::SynthNote>& one, int n) {
+            std::vector<test::SynthNote> v;
+            for (int k = 0; k < n; ++k) v.insert(v.end(), one.begin(), one.end());
+            return v;
+        };
+        std::vector<test::SynthNote> part = mel;
+        for (auto& n : part) n.midi += 5;
+        const test::SynthResult longRef = test::synthesize(times(mel, 10), sr, 30, 5.5, 2024);
+        const test::SynthResult tA = test::synthesize(times(part, 2), sr, 35, 5.8, 7);
+        const test::SynthResult tB = test::synthesize(times(part, 2), sr, 35, 5.8, 8);
+        const Analysis lra = analyze(longRef.audio.data(), longRef.audio.size(), sr);
+        const Analysis aA = analyze(tA.audio.data(), tA.audio.size(), sr);
+        const Analysis aB = analyze(tB.audio.data(), tB.audio.size(), sr);
+        const double offB = longRef.noteStart[6 * M] - tB.noteStart[0]; // B sings repeats 7 and 8
+        std::vector<ThreadFrame> tgt = thread(aA, 0.0);
+        for (const auto& f : thread(aB, offB)) { // the silent stretch between the two items
+            if (f.t <= tgt.back().t) continue;
+            while (f.t - tgt.back().t > 0.015) { ThreadFrame gap; gap.t = tgt.back().t + 0.010; tgt.push_back(gap); }
+            tgt.push_back(f);
+        }
+        auto worstStart = [&](const Warp& w) {
+            double e = 0;
+            for (size_t k = 0; k < 2 * M; ++k) {
+                e = std::max(e, std::abs(w.map(tA.noteStart[k]) - longRef.noteStart[k]));
+                e = std::max(e, std::abs(w.map(tB.noteStart[k] + offB) - longRef.noteStart[6 * M + k]));
+            }
+            return e;
+        };
+        const std::vector<ThreadFrame> lrT = thread(lra, 0.0);
+        AlignInfo inf;
+        const Warp w = alignThreads(tgt, lrT, {}, {}, &inf);
+        const double e = worstStart(w);
+        std::printf("  long silence, repeating phrase    note starts within %5.1f ms\n", e * 1000);
+        // The first note after the silence has nothing before it to line up by: it may land a few
+        // frames off; a lagging alignment puts it hundreds of ms (or a phrase) away.
+        CHECK(e < 0.08, "track view links wandered: a note start %.0f ms off", e * 1000);
+        if (e >= 0.08) {
+            std::printf("    coarse %.3f part %d octave %d; phrase %.2f s, B at %.2f s\n", inf.coarseSec, (int)inf.part, inf.octave,
+                        longRef.noteStart[M] - longRef.noteStart[0], offB);
+            for (size_t k = 0; k < 2 * M; ++k)
+                std::printf("    A%-2zu %+.3f   B%-2zu %+.3f\n", k, w.map(tA.noteStart[k]) - longRef.noteStart[k], k,
+                            w.map(tB.noteStart[k] + offB) - longRef.noteStart[6 * M + k]);
+        }
+    }
+    { // One held note of another part under a moving reference: nothing in it says where it goes, so
+      // the links keep to the coarse shift instead of sliding to wherever the reference holds still.
+        const test::SynthResult held = test::synthesize({test::SynthNote{62, 18.0, 0, false, 0}}, sr, 30, 5.5, 5);
+        const Analysis ha = analyze(held.audio.data(), held.audio.size(), sr);
+        const std::vector<test::SynthNote> phrase = test::demoMelody();
+        std::vector<test::SynthNote> moving;
+        for (int k = 0; k < 4; ++k) moving.insert(moving.end(), phrase.begin(), phrase.end());
+        const test::SynthResult mv = test::synthesize(moving, sr, 30, 5.5, 6);
+        const Analysis ma = analyze(mv.audio.data(), mv.audio.size(), sr);
+        AlignOptions o;
+        o.unison = false;
+        const Warp w = alignThreads(thread(ha, 0.0), thread(ma, 0.0), o);
+        double dev = 0;
+        for (double t = held.noteStart[0] + 1; t < held.noteEnd[0] - 1; t += 0.05) dev = std::max(dev, std::abs(w.map(t) - t));
+        std::printf("  a held note under a moving line   links within %5.0f ms of the shift\n", dev * 1000);
+        CHECK(dev < 0.3, "links slid %.0f ms away from the shift", dev * 1000);
+    }
 }
 
 static void testThreadFix()
@@ -2122,6 +2252,24 @@ static void testReread(const Analysis& a)
     CHECK(c.edits.spans[2].end == cut && c.edits.spans[3].start == cut, "it stops at its kept neighbour (%d, %d)",
           c.edits.spans[2].end, c.edits.spans[3].start);
     std::printf("  re-read: %zu notes, note 2 ends at %d, note 3 starts at %d\n", c.edits.spans.size(), c.edits.spans[2].end, c.edits.spans[3].start);
+    { // A moved stretch (F, a drag), its left neighbour moved with it: the re-read notes stay where the
+      // stretch plays, never back under the neighbour (two notes at once, as on 15-Kayrat 1527).
+        Document m;
+        conform(m, a);
+        for (int i = 2; i < n; ++i) m.edits.notes[(size_t)i].timeOffsetSec = 0.15;
+        const auto before = noteTimes(a, m.edits);
+        CHECK(rereadNotes(m, a, autos, 3, 4), "re-read a moved stretch");
+        Analysis me = withLayout(a, m.edits.spans);
+        conform(m, me);
+        const auto t = noteTimes(me, m.edits);
+        bool overlap = false;
+        for (size_t i = 0; i + 1 < t.size(); ++i)
+            if (t[i + 1].outStart < t[i].outEnd - 1e-6) overlap = true;
+        CHECK(!overlap, "no notes at once after re-reading a moved stretch");
+        CHECK(std::abs(t[3].outStart - before[3].outStart) < 0.006, "the re-read stretch stays where it played (%.3f vs %.3f)",
+              t[3].outStart, before[3].outStart);
+        CHECK(m.edits.notes[3].pitchOffset == 0, "its pitch edit is gone");
+    }
 }
 
 // Random time, separation and pitch edits: every render ends, no shorter than the clip, and the
@@ -2344,6 +2492,46 @@ static void testPins()
     CHECK(serialize(r) == serialize(d), "pins round trip differs");
 }
 
+static void testTrimmedItem()
+{
+    std::printf("[track view] one trimmed item: only its heard part, notes outside untouched, pins back in clip time\n");
+    const double sr = 48000;
+    const test::SynthResult sa = test::synthesize(test::demoMelody(), sr);
+    auto eff = std::make_shared<const Analysis>(analyze(sa.audio.data(), sa.audio.size(), sr));
+    const int n = (int)eff->notes.size();
+    if (n < 6) { CHECK(false, "need notes"); return; }
+    // The item plays notes 2..n-3 (trimmed at both ends), starting at 10 s in the project.
+    const double w0 = 0.5 * (eff->notes[1].endSec + eff->notes[2].startSec);
+    const double w1 = 0.5 * (eff->notes[(size_t)n - 3].endSec + eff->notes[(size_t)n - 2].startSec);
+    std::vector<TrackPiece> pieces(1);
+    pieces[0].eff = eff;
+    pieces[0].winStart = w0;
+    pieces[0].winEnd = w1;
+    pieces[0].placeSec = -w0; // view time 0 = where the item starts
+    conform(pieces[0].doc, *eff);
+    pieces[0].doc.edits.notes[0].pitchOffset = 0.7; // outside the heard part
+    pieces[0].doc.pinRef = "ref";
+    pieces[0].doc.pins = {Pin{eff->notes[0].startSec, eff->notes[0].startSec + 0.01}}; // outside too
+    TrackView v;
+    if (!buildTrackView(pieces, 0, v) || v.analysis == nullptr) { CHECK(false, "view not built"); return; }
+    CHECK((int)v.analysis->notes.size() == n - 4, "only the heard notes (%zu of %d)", v.analysis->notes.size(), n);
+    CHECK(v.doc.pins.empty(), "a pin outside the heard part is not shown");
+    Document d = v.doc;
+    d.edits.notes[0].pitchOffset = 1.0; // the item's note 2
+    d.pins = {Pin{0.4, 0.45}};
+    const auto docs = splitTrackView(v, d, pieces);
+    if (docs.size() != 1) { CHECK(false, "split back"); return; }
+    CHECK(docs[0].edits.notes[2].pitchOffset == 1.0, "the edit went to note 2");
+    CHECK(docs[0].edits.notes[0].pitchOffset == 0.7, "the note outside keeps its edit");
+    const double hopSec = (double)eff->hop / sr;
+    bool kept = false, back = false;
+    for (const Pin& p : docs[0].pins) {
+        if (std::abs(p.tgt - eff->notes[0].startSec) < 1e-9) kept = true;
+        if (std::abs(p.tgt - (0.4 + w0)) < hopSec && std::abs(p.ref - (0.45 + w0)) < hopSec) back = true;
+    }
+    CHECK(kept && back && docs[0].pinRef == "ref", "pins: the outside one kept, the new one in clip time (%zu pins)", docs[0].pins.size());
+}
+
 static void testTrackView()
 {
     std::printf("[track view] items of a track as one clip: notes, round trip, edits back to their item\n");
@@ -2512,6 +2700,7 @@ int main()
     testConsonantsKept();
     testRenderFuzz();
     testTrackView();
+    testTrimmedItem();
     testTrackViewCut();
     testPins();
     for (double sr : {44100.0, 48000.0}) {
@@ -2543,6 +2732,7 @@ int main()
         testTransfer(a);
         testTimeFaults(a);
         testSeparations(a);
+        testPauses(a);
         testReread(a);
         testMoveCut(a);
         testDeletedNeighbours(s, a);

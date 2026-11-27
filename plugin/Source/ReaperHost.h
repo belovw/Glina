@@ -67,5 +67,7 @@ bool transport(void* project, double& sec, bool& playing);
 bool trackInfo(void* track, TrackInfo& out, bool glina = false);
 // Glina in the take FX of `take` (enabled if any Glina there is enabled).
 GlinaFx glinaOfTake(void* take);
+// 1: `take` is the active take of its item (the one REAPER plays); 0: another take is; -1: unknown.
+int takeActive(void* take);
 
 } // namespace glina::plugin::reaper

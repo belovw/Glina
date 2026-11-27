@@ -49,6 +49,17 @@ bool placeNotes(EditSet& e, const Analysis& a, std::vector<NoteTimes> t);
 double moveBoundary(EditSet& e, const Analysis& a, int left, double dt, const std::set<int>& selection,
                     bool startEdge = false, bool overlap = false);
 
+// ---- the pause between two notes (dragged by itself) ------------------------------------
+// The pause between note `left` and `left + 1`, moved by `dt` seconds as a whole: the end of
+// `left` and the start of `left + 1` move together, what lies in the pause moves along (its
+// length stays). Returns the dt applied (0 if nothing could move).
+double movePause(EditSet& e, const Analysis& a, int left, double dt);
+// One edge of that pause moved by `dt` seconds (`rightEdge`: the start of `left + 1`, else the
+// end of `left`): the pause gets longer or shorter. Longer, silence goes into its quiet middle and
+// its consonants keep their speed; shorter, it is squeezed. The pause keeps at least ~10 ms.
+// Returns the dt applied.
+double stretchPause(EditSet& e, const Analysis& a, int left, bool rightEdge, double dt);
+
 // Move notes (each contiguous run of `notes`) by `dt` seconds together with
 // the consonant before them; the neighbouring notes absorb the change.
 double moveNotes(EditSet& e, const Analysis& a, const std::set<int>& notes, double dt);
@@ -60,6 +71,8 @@ bool noNewLayoutFaults(const Analysis& a, const std::vector<NoteTimes>& before, 
 bool noNewLayoutFaults(const Analysis& a, const EditSet& e, const std::vector<NoteTimes>& before,
                        const std::vector<NoteTimes>& after);
 
+// True if notes `i` and `i + 1` lie in the same item (always outside the track view).
+bool notesInOneItem(const Analysis& a, int i);
 // True if the separation between note `i` and `i + 1` is soft (see NoteEdit::sepBefore).
 bool softSeparation(const EditSet& e, const Analysis& a, int i);
 // The same for every boundary at once: element i is the separation between note i and i + 1.

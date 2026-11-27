@@ -22,11 +22,16 @@ uint64_t renderKeyOf(uint64_t contentHash, const Document& d)
     return renderstore::key(contentHash, serialize(k));
 }
 
-// Plug-in instances (their REAPER link) bound to each document controller.
+// Plug-in instances (their REAPER link and ARA side) bound to each document controller.
+struct InstanceLink {
+    GlinaDocumentController* dc = nullptr;
+    reaper::HostLink* link = nullptr;
+    juce::AudioProcessorARAExtension* ara = nullptr;
+};
 std::mutex linksMutex;
-std::vector<std::pair<GlinaDocumentController*, reaper::HostLink*>>& hostLinks()
+std::vector<InstanceLink>& hostLinks()
 {
-    static std::vector<std::pair<GlinaDocumentController*, reaper::HostLink*>> links;
+    static std::vector<InstanceLink> links;
     return links;
 }
 } // namespace
@@ -192,15 +197,36 @@ GlinaDocumentController::~GlinaDocumentController()
     pool.removeAllJobs(true, 20000);
     const std::lock_guard<std::mutex> lk(linksMutex);
     auto& links = hostLinks();
-    links.erase(std::remove_if(links.begin(), links.end(), [this](const auto& e) { return e.first == this; }), links.end());
+    links.erase(std::remove_if(links.begin(), links.end(), [this](const auto& e) { return e.dc == this; }), links.end());
 }
 
-void GlinaDocumentController::registerHostLink(GlinaDocumentController* dc, reaper::HostLink* link)
+void GlinaDocumentController::registerHostLink(GlinaDocumentController* dc, reaper::HostLink* link,
+                                               juce::AudioProcessorARAExtension* ara)
 {
     const std::lock_guard<std::mutex> lk(linksMutex);
     auto& links = hostLinks();
-    links.erase(std::remove_if(links.begin(), links.end(), [link](const auto& e) { return e.second == link; }), links.end());
-    if (dc != nullptr) links.emplace_back(dc, link);
+    links.erase(std::remove_if(links.begin(), links.end(), [link](const auto& e) { return e.link == link; }), links.end());
+    if (dc != nullptr) links.push_back({dc, link, ara});
+}
+
+bool GlinaDocumentController::playedRegions(std::set<const juce::ARAPlaybackRegion*>& out) const
+{
+    out.clear();
+    if (!reaper::available()) return false;
+    const std::lock_guard<std::mutex> lk(linksMutex);
+    bool known = false;
+    for (const auto& l : hostLinks()) {
+        if (l.dc != this || l.ara == nullptr) continue;
+        auto* pr = l.ara->getPlaybackRenderer<juce::ARAPlaybackRenderer>();
+        if (pr == nullptr) continue;
+        const auto& regions = pr->getPlaybackRegions<juce::ARAPlaybackRegion>();
+        if (regions.empty()) continue; // a Track FX, or not bound yet
+        const int active = reaper::takeActive(l.link->take());
+        if (active < 0) return false;  // an instance that does not know its take yet: can't tell
+        known = true;
+        if (active == 1) out.insert(regions.begin(), regions.end());
+    }
+    return known;
 }
 
 void GlinaDocumentController::unregisterHostLink(reaper::HostLink* link) { registerHostLink(nullptr, link); }
@@ -209,9 +235,9 @@ void* GlinaDocumentController::reaperProject() const
 {
     {
         const std::lock_guard<std::mutex> lk(linksMutex);
-        for (const auto& [dc, link] : hostLinks())
-            if (dc == this)
-                if (void* p = link->project()) return p;
+        for (const auto& l : hostLinks())
+            if (l.dc == this)
+                if (void* p = l.link->project()) return p;
     }
     const auto open = reaper::openProjects();
     return open.size() == 1 ? open.front() : nullptr; // no instance knows yet: only safe with one tab
