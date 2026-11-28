@@ -1,5 +1,6 @@
 #include "glina/Renderer.h"
 #include "glina/Editing.h"
+#include "glina/Notes.h"
 
 #include <algorithm>
 #include <limits>
@@ -204,8 +205,14 @@ TimeMap TimeMap::build(const Analysis& a, const EditSet& e)
         seg.emplace_back(ai, ao);
         // Only the steady middle of a note is stretched: the attack and the
         // transition into the next note keep their timing, so transients stay crisp.
+        // The consonants at the note's edges (see attachConsonants) belong to the attack and the
+        // release: a stretch never lengthens them.
         const double din = bi - ai, dout = bo - ao;
-        const double att = std::min(0.040 * sr, 0.30 * din), rel = std::min(0.030 * sr, 0.20 * din);
+        const NoteSpan vs = voicedSpan(a, (int)i);
+        const double head = std::clamp((vs.start - 0.5) * a.hop - ai, 0.0, din);
+        const double tail = std::clamp(bi - (vs.end - 0.5) * a.hop, 0.0, din - head);
+        const double vin = din - head - tail;
+        const double att = head + std::min(0.040 * sr, 0.30 * vin), rel = tail + std::min(0.030 * sr, 0.20 * vin);
         if (!ed.deleted && std::abs(dout - din) > 1 && dout - att - rel > 0.15 * (din - att - rel)) {
             seg.emplace_back(ai + att, ao + att);
             seg.emplace_back(bi - rel, bo - rel);
@@ -356,13 +363,14 @@ double TimeMap::gainAt(double t, double fade) const
 static bool addAutoVibrato(const Analysis& a, const TimeMap& map, const AutoVibrato& v, uint32_t seed, int ni,
                            std::vector<float>* pitch, std::vector<float>* gain)
 {
-    const Note& nt = a.notes[(size_t)ni];
+    const NoteSpan nt = voicedSpan(a, ni); // the voice: the consonants at the note's edges have no vibrato
     const double sr = a.sampleRate;
-    const double t0 = map.inToOut(nt.startFrame * (double)a.hop) / sr;
-    double t1 = map.inToOut(nt.endFrame * (double)a.hop) / sr;
-    // A silence opened at the note's end: the vibrato fades out before it, as at the clip's end.
-    if (map.silenceBetween(nt.endSec * sr - 1, nt.endFrame * (double)a.hop))
-        t1 = map.inToOutBefore(nt.endSec * sr) / sr + 0.5 * a.hop / sr;
+    const double t0 = map.inToOut(nt.start * (double)a.hop) / sr;
+    double t1 = map.inToOut(nt.end * (double)a.hop) / sr;
+    // A silence opened at the voice's end: the vibrato fades out before it, as at the clip's end.
+    const double endIn = (nt.end - 0.5) * a.hop;
+    if (map.silenceBetween(endIn - 1, nt.end * (double)a.hop))
+        t1 = map.inToOutBefore(endIn) / sr + 0.5 * a.hop / sr;
     const double rate = std::clamp(v.rateHz, 0.5, 20.0);
     const double delay = std::max(0.0, v.delayMs / 1000.0);
     if (t1 - t0 <= delay) return false;
@@ -375,7 +383,7 @@ static bool addAutoVibrato(const Analysis& a, const TimeMap& map, const AutoVibr
     double phase = M_PI * (1.0 + hashRand(seed, note, 0xFFFFu)); // own start phase per note and track
     double prevT = t0 + delay;
     const int nf = (int)a.frames.size();
-    for (int k = std::max(0, nt.startFrame); k < std::min(nt.endFrame, nf); ++k) {
+    for (int k = std::max(0, nt.start); k < std::min(nt.end, nf); ++k) {
         const double t = map.inToOut(k * (double)a.hop) / sr;
         const double tn = t - t0;
         if (tn < delay) continue;
@@ -421,6 +429,9 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         }
     }
 
+    // Drift and vibrato fade in over the voiced edges of a note (its consonants have no pitch).
+    std::vector<NoteSpan> voiced(a.notes.size());
+    for (size_t i = 0; i < a.notes.size(); ++i) voiced[i] = voicedSpan(a, (int)i);
     for (int k = 0; k < nf; ++k) {
         const Frame& f = a.frames[k];
         const int ni = a.noteOfFrame.empty() ? -1 : a.noteOfFrame[k];
@@ -433,7 +444,7 @@ Controls buildControls(const Analysis& a, const EditSet& e)
         const NoteEdit& ed = ni < (int)e.notes.size() ? e.notes[ni] : kNoEdit;
         const Note& nt = a.notes[ni];
         // Drift/vibrato edits fade in over the note edges so natural glides survive.
-        const double edge = std::min(k - nt.startFrame + 0.5, nt.endFrame - k - 0.5);
+        const double edge = std::min(k - voiced[(size_t)ni].start + 0.5, voiced[(size_t)ni].end - k - 0.5);
         const double t = std::clamp(edge / taper, 0.0, 1.0);
         const double w = 0.5 - 0.5 * std::cos(M_PI * t);
         const double drift = 1.0 + (ed.driftAmount - 1.0) * w;
@@ -601,13 +612,19 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         return fr < deletedFrame.size() && deletedFrame[fr];
     };
     // In an overlay (which may carry the pause before its note): a muted consonant and deleted
-    // breaths there are left out, as the main map silences them.
+    // breaths there are left out, as the main map silences them. A muted consonant is all the sound
+    // between the voices of the two notes: the pause and the consonants that belong to the notes on
+    // either side (see attachConsonants). Deleted breaths: the breath in the pause only.
     std::vector<char> quietFrame(a.frames.size(), 0);
     for (size_t i = 0; i < e.notes.size() && i < a.notes.size(); ++i) {
         if (!e.notes[i].consMuted && !e.notes[i].breathDeleted) continue;
+        if (e.notes[i].consMuted) {
+            const int from = std::max(0, i > 0 ? voicedSpan(a, (int)i - 1).end : 0);
+            for (int f = from; f < std::min(voicedSpan(a, (int)i).start, (int)quietFrame.size()); ++f) quietFrame[(size_t)f] = 1;
+        }
         const int from = std::max(0, i > 0 ? a.notes[i - 1].endFrame : 0);
         for (int f = from; f < std::min(a.notes[i].startFrame, (int)quietFrame.size()); ++f)
-            if (e.notes[i].consMuted || a.frames[(size_t)f].kind == FrameKind::Breath) quietFrame[(size_t)f] = 1;
+            if (a.frames[(size_t)f].kind == FrameKind::Breath) quietFrame[(size_t)f] = 1;
     }
     auto quiet = [&](double pos) {
         const size_t fr = (size_t)std::max(0.0, pos / a.hop);
@@ -741,7 +758,10 @@ std::vector<float> render(const float* x, size_t n, const Analysis& a, const Edi
         // out; zeroing there would cut into the neighbour. In its place it is silenced as muted.
         if (e.notes[i].deleted && map.noteEndOut(i) - map.noteStartOut(i) < 0.5 * (a.notes[i].endSec - a.notes[i].startSec) * a.sampleRate)
             continue;
-        const double s0 = i > 0 ? map.noteMainEndOut(i - 1) : 0.0, s1 = map.noteStartOut(i);
+        // With the consonants of both neighbours (see quietFrame above).
+        double s0 = i > 0 ? map.noteMainEndOut(i - 1) : 0.0, s1 = map.noteStartOut(i);
+        if (i > 0) s0 = std::min(s0, std::max(map.noteStartOut(i - 1), map.mainInToOut((voicedSpan(a, (int)i - 1).end - 0.5) * a.hop)));
+        s1 = std::max(s1, std::min(map.noteEndOut(i), map.mainInToOut((voicedSpan(a, (int)i).start - 0.5) * a.hop)));
         if (s1 <= s0) continue;
         const long b = std::max(0L, (long)std::floor(s0 - fade));
         const long end = std::min((long)acc.size(), (long)std::ceil(s1 + fade));

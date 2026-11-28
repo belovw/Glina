@@ -18,4 +18,8 @@ Analysis withLayout(const Analysis& base, const std::vector<NoteSpan>& spans);
 // Current layout as spans (from the analysis' notes).
 std::vector<NoteSpan> spansOf(const Analysis& a);
 
+// The voiced part of note `i` (frames [first, last + 1) with a pitch), without the consonants
+// at its edges (see attachConsonants); the whole note if it has no voiced frame.
+NoteSpan voicedSpan(const Analysis& a, int i);
+
 } // namespace glina

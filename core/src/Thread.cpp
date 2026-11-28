@@ -1,4 +1,5 @@
 #include "glina/Thread.h"
+#include "glina/Notes.h"
 #include "glina/Editing.h"
 #include "glina/Renderer.h"
 #include "glina/Tuning.h"
@@ -474,9 +475,10 @@ std::vector<NoteFix> planPitchFix(const Analysis& a, const EditSet& e, const std
             if (!std::isnan(drawn[(size_t)k])) edited = true;
         f.edited = edited;
         if (edited || ed.consonant || ed.deleted || info.part) { out.push_back(f); continue; }
-        // The middle of the note (glides at its ends belong to the transitions).
-        const int len = n.endFrame - n.startFrame;
-        const int k0 = n.startFrame + len / 5, k1 = n.endFrame - len / 5;
+        // The middle of the note's voice (glides at its ends belong to the transitions).
+        const NoteSpan vs = voicedSpan(a, i);
+        const int len = vs.end - vs.start;
+        const int k0 = vs.start + len / 5, k1 = vs.end - len / 5;
         std::vector<float> d;
         int voiced = 0;
         for (int k = std::max(0, k0); k < std::min(k1, nf); ++k) {
@@ -549,13 +551,13 @@ std::vector<IntervalFix> planIntervalFix(const Analysis& a, const EditSet& e, co
         if (ed.deleted) continue; // silent: F leaves it as it is
         IntervalFix f;
         f.note = i;
-        const Note& nt = a.notes[(size_t)i];
 
         // Pitch: the reference over the note's middle (glides at the ends belong to the transitions).
         if (!ed.consonant) {
-            const int len = nt.endFrame - nt.startFrame;
-            const int k0 = len >= 5 ? nt.startFrame + len / 5 : nt.startFrame;
-            const int k1 = len >= 5 ? nt.endFrame - len / 5 : nt.endFrame;
+            const NoteSpan vs = voicedSpan(a, i); // the voice, without the consonants at its edges
+            const int len = vs.end - vs.start;
+            const int k0 = len >= 5 ? vs.start + len / 5 : vs.start;
+            const int k1 = len >= 5 ? vs.end - len / 5 : vs.end;
             int voiced = 0;
             for (int k = std::max(0, k0); k < std::min(k1, nf); ++k) if (a.frames[(size_t)k].f0 > 0) ++voiced;
             std::vector<float> d;

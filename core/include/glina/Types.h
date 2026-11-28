@@ -110,12 +110,14 @@ struct NoteEdit {
     double formantShift = 0;   // semitones, 0 = natural formants
     double gainDb = 0;
     bool muted = false;        // silent, but kept in place (shown as a ghost); harmonies follow
-    bool consMuted = false;    // the unvoiced sound (consonant) before this note is silent
+    // The unvoiced sound between the previous note's voice and this one's is silent: the pause and
+    // the consonants at the two notes' edges (see attachConsonants).
+    bool consMuted = false;
     // Deleted (Alt+Delete): silent and not drawn, its audio kept. Dragging an edge that touches
     // it brings it back (restoreDeleted). Set together with muted and consMuted.
     bool deleted = false;
-    // The breath (Breath frames) in the unvoiced sound before this note is deleted: silent and
-    // hidden, its consonants kept. Dragging this note's left edge brings it back.
+    // The breath (Breath frames) in the pause before this note is deleted: silent and hidden, the
+    // consonants (in the notes) kept. Dragging this note's left edge brings it back.
     bool breathDeleted = false;
     double timeOffsetSec = 0;  // move note in time
     double stretch = 1;        // note duration multiplier

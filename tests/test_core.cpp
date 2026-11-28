@@ -1515,9 +1515,11 @@ static void testSilentGaps(const test::SynthResult& s, const Analysis& a, double
         x.insert(x.end(), (size_t)(0.15 * sr), 0.f);
         x.insert(x.end(), s.audio.begin() + at, s.audio.end());
         const Analysis b = analyze(x.data(), x.size(), sr);
-        int k = -1; // the pair around the inserted silence
+        int k = -1; // the pair around the inserted silence (by their voices: the halves of the 's' it cut
+                    // are consonants of the notes on either side now)
+        const double hop = b.hop;
         for (int j = 0; j + 1 < (int)b.notes.size(); ++j)
-            if (b.notes[(size_t)j].endSec * sr < at && b.notes[(size_t)j + 1].startSec * sr > at + 0.15 * sr) k = j;
+            if (voicedSpan(b, j).end * hop < at && voicedSpan(b, j + 1).start * hop > at + 0.15 * sr) k = j;
         CHECK(k >= 0, "the pair around the silence");
         if (k < 0) return;
         EditSet e;
@@ -2689,6 +2691,122 @@ static void testTrackView()
     }
 }
 
+// A word-final consonant, a pause with a breath, and a consonant right before the next vowel: each
+// consonant belongs to its note (muted, moved and stretched with it); the breath stays in the pause.
+static void testConsonantsAttached(double sr)
+{
+    std::printf("[consonants attached] consonants belong to their notes, the breath to the pause\n");
+    const test::SynthResult s = test::synthesize({{57, 0.5, 0, false, 0}, {60, 0.5, 0, false, 0}}, sr);
+    const size_t b = (size_t)std::lround(s.noteStart[1] * sr);
+    double vowel = 0; // rms of the second vowel
+    for (size_t k = b + (size_t)(0.1 * sr); k < b + (size_t)(0.4 * sr); ++k) vowel += (double)s.audio[k] * s.audio[k];
+    vowel = std::sqrt(vowel / (0.3 * sr));
+    uint32_t rng = 777;
+    auto noise = [&]() { rng = rng * 1664525u + 1013904223u; return ((rng >> 8) / 8388608.0) - 1.0; };
+    // Noise of `sec` at `db` below the vowel (rms), with 3 ms ramps; `high`: high-passed (a sibilant).
+    auto burst = [&](std::vector<float>& x, double sec, double db, bool high) {
+        const size_t n = (size_t)std::lround(sec * sr);
+        std::vector<double> v(n);
+        double lp = 0, q = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const double w = noise();
+            lp = high ? 0.6 * lp + 0.4 * w : 0.85 * lp + 0.15 * w;
+            v[i] = high ? w - lp : lp;
+            q += v[i] * v[i];
+        }
+        const double g = vowel * std::pow(10.0, -db / 20.0) / std::sqrt(q / (double)n);
+        const double ramp = 0.003 * sr;
+        for (size_t i = 0; i < n; ++i) x.push_back((float)(g * v[i] * std::min({1.0, (i + 1) / ramp, (n - i) / ramp})));
+    };
+    std::vector<float> x(s.audio.begin(), s.audio.begin() + (long)b);
+    const double codaIn = x.size() / sr;
+    burst(x, 0.08, 14, true); // 'с' at the end of the first word
+    const double codaOut = x.size() / sr;
+    x.insert(x.end(), (size_t)(0.05 * sr), 0.f);
+    const double breathIn = x.size() / sr;
+    burst(x, 0.16, 36, false); // a breath
+    const double breathOut = x.size() / sr;
+    x.insert(x.end(), (size_t)(0.05 * sr), 0.f);
+    const double consIn = x.size() / sr;
+    burst(x, 0.05, 16, true); // a consonant into the vowel
+    x.insert(x.end(), s.audio.begin() + (long)b, s.audio.end());
+    const Analysis a = analyze(x.data(), x.size(), sr);
+    int k = -1; // the note after the pause, by its voice
+    for (int j = 1; j < (int)a.notes.size(); ++j)
+        if (voicedSpan(a, j).start * (double)a.hop / sr > consIn && voicedSpan(a, j - 1).end * (double)a.hop / sr < codaIn + 0.01) k = j;
+    CHECK(k > 0, "the two notes around the pause");
+    if (k <= 0) return;
+    const Note& L = a.notes[(size_t)k - 1];
+    const Note& R = a.notes[(size_t)k];
+    std::printf("  'с' %.3f-%.3f, breath %.3f-%.3f, consonant from %.3f: notes end %.3f, start %.3f\n", codaIn, codaOut,
+                breathIn, breathOut, consIn, L.endSec, R.startSec);
+    CHECK(std::abs(R.startSec - consIn) < 0.012, "the note starts with its consonant (%.3f, consonant %.3f)", R.startSec, consIn);
+    CHECK(L.endSec > codaOut - 0.012 && L.endSec < breathIn, "the word ends with its 'с' (%.3f)", L.endSec);
+    CHECK(R.startSec > breathOut, "the breath stays in the pause");
+
+    auto rms = [&](const std::vector<float>& y, double t0, double t1) {
+        double q = 0;
+        const long i0 = (long)(t0 * sr), i1 = std::min((long)y.size(), (long)(t1 * sr));
+        for (long i = i0; i < i1; ++i) q += (double)y[(size_t)i] * y[(size_t)i];
+        return std::sqrt(q / std::max(1L, i1 - i0));
+    };
+    const double consRms = rms(x, consIn + 0.005, consIn + 0.045), breathRms = rms(x, breathIn + 0.02, breathOut - 0.02);
+    const double codaRms = rms(x, codaIn + 0.01, codaOut - 0.01);
+    { // the note muted: its consonant goes with it, the breath stays
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        e.notes[(size_t)k].muted = true;
+        const std::vector<float> y = render(x.data(), x.size(), a, e);
+        const double c = rms(y, consIn + 0.005, consIn + 0.045), br = rms(y, breathIn + 0.02, breathOut - 0.02);
+        std::printf("  note muted: consonant %.5f -> %.6f, breath %.5f -> %.5f\n", consRms, c, breathRms, br);
+        CHECK(c < 0.01 * consRms, "the muted note's consonant is silent");
+        CHECK(br > 0.7 * breathRms, "the breath still sounds");
+    }
+    { // the word before muted: its 'с' goes with it
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        e.notes[(size_t)k - 1].muted = true;
+        const std::vector<float> y = render(x.data(), x.size(), a, e);
+        const double c = rms(y, codaIn + 0.01, codaOut - 0.01);
+        CHECK(c < 0.01 * codaRms, "the muted word's final 'с' is silent (%.6f of %.5f)", c, codaRms);
+    }
+    { // the consonants muted (the zone): both consonants and the breath, the vowels sound
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        e.notes[(size_t)k].consMuted = true;
+        const std::vector<float> y = render(x.data(), x.size(), a, e);
+        const double c = rms(y, consIn + 0.005, consIn + 0.045), br = rms(y, breathIn + 0.02, breathOut - 0.02);
+        const double cd = rms(y, codaIn + 0.01, codaOut - 0.01), v = rms(y, consIn + 0.15, consIn + 0.4);
+        std::printf("  zone muted: 'с' %.6f, breath %.6f, consonant %.6f, vowel %.5f (%.5f)\n", cd, br, c, v, rms(x, consIn + 0.15, consIn + 0.4));
+        CHECK(c < 0.01 * consRms && br < 0.01 * breathRms && cd < 0.01 * codaRms, "the consonants and the breath are silent");
+        CHECK(v > 0.9 * rms(x, consIn + 0.15, consIn + 0.4), "the vowel sounds");
+    }
+    const double hop = a.hop, startIn = R.startSec * sr;
+    { // the note moved: its consonant comes along, right before its vowel, at its own speed
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        e.notes[(size_t)k].timeOffsetSec = 0.1;
+        const TimeMap m = TimeMap::build(a, e);
+        const double o = m.noteStartOut((size_t)k);
+        double worst = 0;
+        for (double d = 0.005; d < 0.045; d += 0.005) worst = std::max(worst, std::abs(m.outToIn(o + d * sr) - (startIn + d * sr)));
+        std::printf("  moved 0.1 s: the consonant plays from %.4f s, %.2f ms off at most\n", o / sr, worst / sr * 1000);
+        CHECK(std::abs(o / sr - R.startSec - 0.1) < 1e-3, "the note moved");
+        CHECK(worst < 0.5, "the consonant moved with the note");
+    }
+    { // the note stretched: its consonant is not
+        EditSet e;
+        e.notes.resize(a.notes.size());
+        e.notes[(size_t)k].stretch = 1.6;
+        const TimeMap m = TimeMap::build(a, e);
+        const double o = m.noteStartOut((size_t)k);
+        const double head = (voicedSpan(a, k).start - 0.5) * hop - startIn;
+        const double slope = (m.outToIn(o + head) - m.outToIn(o)) / head;
+        std::printf("  stretched x1.6: the consonant (%.0f ms) plays at x%.3f\n", head / sr * 1000, 1.0 / slope);
+        CHECK(std::abs(slope - 1.0) < 1e-3, "the consonant keeps its speed");
+    }
+}
+
 int main()
 {
     testSines();
@@ -2703,6 +2821,7 @@ int main()
     testTrimmedItem();
     testTrackViewCut();
     testPins();
+    for (double sr : {44100.0, 48000.0}) testConsonantsAttached(sr);
     for (double sr : {44100.0, 48000.0}) {
         std::printf("=== synthetic singer @ %.0f Hz ===\n", sr);
         const test::SynthResult s = test::synthesize(test::demoMelody(), sr);

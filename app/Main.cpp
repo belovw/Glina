@@ -310,6 +310,11 @@ public:
             if (args[i] == "--links-edit-test") { linksEdit_ = true; continue; }
             if (args[i] == "--reread-test") { reread_ = true; continue; }
             if (args[i] == "--pause-test") { pause_ = true; continue; }
+            if (args[i] == "--view" && i + 2 < args.size()) { // --view <from sec> <pixels per second>
+                viewSec_ = args[++i].getDoubleValue();
+                viewPps_ = args[++i].getDoubleValue();
+                continue;
+            }
             if (args[i] == "--interval" && i + 1 < args.size()) { interval_ = args[++i].getIntValue(); continue; } // box id: 2 unison, 3 third up...
             if (args[i] == "--light") continue;
             if (args[i] == "--toggle-theme") { ++toggleTheme_; continue; } // switch live, as the button does (check)
@@ -394,6 +399,7 @@ private:
             if (linksEdit_ && !linksEditDone_) { linksEditDone_ = true; linksEditTest(m); return; }
             if (reread_ && !rereadDone_) { rereadDone_ = true; rereadTest(m); return; }
             if (pause_ && !pauseDone_) { pauseDone_ = true; pauseTest(m); return; }
+            if (viewPps_ > 0 && !viewDone_) { viewDone_ = true; m.editor().zoomForTest(viewPps_, viewSec_); settled_ = 0; return; }
             if (selftest_) { if (!selfTestStep(m)) return; selftest_ = false; if (shotFile_ == juce::File()) { quit(); return; } }
             if (demo_ && !demoDone_) {
                 demoDone_ = true;
@@ -868,6 +874,8 @@ private:
     bool linksEdit_ = false, linksEditDone_ = false; // --links-edit-test
     bool reread_ = false, rereadDone_ = false;       // --reread-test
     bool pause_ = false, pauseDone_ = false;         // --pause-test
+    double viewSec_ = 0, viewPps_ = 0;               // --view
+    bool viewDone_ = false;
     bool fixUndo_ = false; // --fix-undo: F, then one undo and a redo, note counts printed
     bool demo_ = false, demoDone_ = false, selftest_ = false, links_ = false, linksShown_ = false, fix_ = false, fixDone_ = false;
     juce::File refFile_;

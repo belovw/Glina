@@ -131,6 +131,18 @@ std::vector<NoteSpan> spansOf(const Analysis& a)
     return s;
 }
 
+NoteSpan voicedSpan(const Analysis& a, int i)
+{
+    const Note& m = a.notes[(size_t)i];
+    const int nf = (int)a.frames.size();
+    int s = std::clamp(m.startFrame, 0, nf), e = std::clamp(m.endFrame, s, nf);
+    const int s0 = s, e0 = e;
+    while (s < e && a.frames[(size_t)s].f0 <= 0) ++s;
+    while (e > s && a.frames[(size_t)e - 1].f0 <= 0) --e;
+    if (s >= e) return {s0, e0};
+    return {s, e};
+}
+
 Analysis withLayout(const Analysis& base, const std::vector<NoteSpan>& spans)
 {
     if (spans.empty()) return base;

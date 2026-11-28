@@ -330,9 +330,83 @@ Analysis analyze(const float* x, size_t n, double sr, const AnalysisParams& P, I
         k = e;
     }
 
+    attachConsonants(a, P);
     a.key = detectKey(a);
     a.marks = placePitchMarks(x, n, a, std::max(16.0, P.unvoicedMarkMs / 1000.0 * sr));
     return a;
+}
+
+void attachConsonants(Analysis& a, const AnalysisParams& P)
+{
+    const int nf = (int)a.frames.size();
+    const int n = (int)a.notes.size();
+    if (n == 0 || nf == 0 || a.sampleRate <= 0) return;
+    if (a.noteOfFrame.size() != (size_t)nf) a.noteOfFrame.assign((size_t)nf, -1);
+    const double hopSec = (double)a.hop / a.sampleRate;
+    // A note's level by the voiced frames next to the pause (up to 30), the loud ones (75th percentile).
+    auto levelNear = [&](int from, int to, bool fromEnd) {
+        std::vector<double> v;
+        for (int k = 0; k < to - from && v.size() < 30; ++k) {
+            const int f = fromEnd ? to - 1 - k : from + k;
+            if (a.frames[(size_t)f].f0 > 0) v.push_back(a.frames[(size_t)f].rmsDb);
+        }
+        if (v.empty()) return -1e9;
+        std::sort(v.begin(), v.end());
+        return v[v.size() * 3 / 4];
+    };
+    // A run of frames is a consonant if it is not too long for one.
+    auto consonant = [&](int s, int e) {
+        int sib = 0;
+        for (int f = s; f < e; ++f) sib += a.frames[(size_t)f].kind == FrameKind::Sibilant;
+        return (e - s) * hopSec <= (2 * sib > e - s ? P.sibilantMaxSec : P.consMaxSec) + 1e-9;
+    };
+    auto setStart = [&](Note& m, int f) { m.startFrame = f; m.startSec = f * hopSec - 0.5 * hopSec; };
+    auto setEnd = [&](Note& m, int f) { m.endFrame = f; m.endSec = f * hopSec - 0.5 * hopSec; };
+    // The gaps are taken from the original edges: a note is changed only at the gaps beside it.
+    std::vector<std::pair<int, int>> edges;
+    for (const Note& m : a.notes) edges.emplace_back(m.startFrame, m.endFrame);
+    for (int i = 0; i <= n; ++i) { // the gap in front of note i (i == n: after the last note)
+        const int g0 = std::clamp(i > 0 ? edges[(size_t)i - 1].second : 0, 0, nf);
+        const int g1 = std::clamp(i < n ? edges[(size_t)i].first : nf, g0, nf);
+        if (g1 <= g0) continue;
+        double L = -1e9;
+        if (i > 0) L = std::max(L, levelNear(edges[(size_t)i - 1].first, g0, true));
+        if (i < n) L = std::max(L, levelNear(g1, edges[(size_t)i].second, false));
+        if (L < -1e8) continue;
+        std::vector<char> pause((size_t)(g1 - g0));
+        for (int f = g0; f < g1; ++f)
+            pause[(size_t)(f - g0)] = a.frames[(size_t)f].kind == FrameKind::Silence || a.frames[(size_t)f].rmsDb <= L - P.consPauseDb;
+        // A short dip between sounds (between a consonant and the vowel, a closure) is not a pause;
+        // a short blip of sound inside a pause does not end it.
+        auto bridge = [&](char val, int maxLen) {
+            for (int s = 0; s < (int)pause.size();) {
+                if (pause[(size_t)s] != val) { ++s; continue; }
+                int e = s;
+                while (e < (int)pause.size() && pause[(size_t)e] == val) ++e;
+                if (s > 0 && e < (int)pause.size() && e - s < maxLen)
+                    for (int k = s; k < e; ++k) pause[(size_t)k] = (char)!val;
+                s = e;
+            }
+        };
+        bridge(1, std::max(1, (int)std::lround(P.consMinPauseSec / hopSec)));
+        bridge(0, 2);
+        int p0 = -1, p1 = -1;
+        for (int k = 0; k < (int)pause.size(); ++k)
+            if (pause[(size_t)k]) { if (p0 < 0) p0 = k; p1 = k + 1; }
+        if (p0 < 0) continue; // no pause: a consonant inside a word stays between its notes
+        p0 += g0;
+        p1 += g0;
+        if (i > 0 && p0 > g0 && consonant(g0, p0)) {
+            Note& m = a.notes[(size_t)i - 1];
+            for (int f = g0; f < p0; ++f) a.noteOfFrame[(size_t)f] = i - 1;
+            setEnd(m, p0);
+        }
+        if (i < n && g1 > p1 && consonant(p1, g1)) {
+            Note& m = a.notes[(size_t)i];
+            for (int f = p1; f < g1; ++f) a.noteOfFrame[(size_t)f] = i;
+            setStart(m, p1);
+        }
+    }
 }
 
 } // namespace glina

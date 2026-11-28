@@ -623,11 +623,13 @@ public:
         return (float)std::clamp((db - (ed.levelRef_ - 36.0)) / 36.0, 0.16, 1.0);
     }
 
-    // Unvoiced sound (consonant) in front of note i: from the end of note i-1 up to note i.
+    // Unvoiced sound (consonants, breath) between the voices of note i-1 and note i: in the pause
+    // between them, or a consonant at the edge of either note (see attachConsonants). Its zone lies
+    // in the pause; muted (consMuted), all of it is silent.
     static bool hasConsonant(const Analysis& A, int i)
     {
-        const int from = i > 0 ? A.notes[(size_t)i - 1].endFrame : 0;
-        const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
+        const int from = i > 0 ? voicedSpan(A, i - 1).end : 0;
+        const int to = std::min(voicedSpan(A, i).start, (int)A.frames.size());
         for (int k = std::max(0, from); k < to; ++k) {
             const FrameKind kd = A.frames[(size_t)k].kind;
             if (kd == FrameKind::Sibilant || kd == FrameKind::Breath) return true;
@@ -637,17 +639,21 @@ public:
     juce::Rectangle<float> consRect(int i) const
     {
         float x0 = i > 0 ? xOf(ed.noteEndSec(i - 1)) : canvas().getX();
-        // Start the zone at the first non-silent frame, so the pause before a consonant stays empty.
+        // Start the zone at the first non-silent frame of the pause (its breath), so the silence
+        // before it stays empty. A silent pause (the consonants are in the notes): its last 0.3 s.
         if (ed.eff_ != nullptr && i < (int)ed.eff_->notes.size()) {
             const Analysis& A = *ed.eff_;
             const int from = std::max(0, i > 0 ? A.notes[(size_t)i - 1].endFrame : 0);
             const int to = std::min(A.notes[(size_t)i].startFrame, (int)A.frames.size());
             const double hopSec = (double)A.hop / A.sampleRate;
+            bool sound = false;
             for (int f = from; f < to; ++f) {
                 if (A.frames[(size_t)f].kind == FrameKind::Silence) continue;
                 x0 = std::max(x0, xOf(ed.outSec(f * hopSec)));
+                sound = true;
                 break;
             }
+            if (!sound) x0 = std::max(x0, xOf(ed.noteStartSec(i) - 0.3));
         }
         const float x1 = xOf(ed.noteStartSec(i));
         const float s = semi();
@@ -763,9 +769,30 @@ public:
             for (size_t k = 1; k < top.size(); ++k) p.lineTo(top[k].x, yc - top[k].y);
             for (size_t k = top.size() - 1; k >= 1; --k) p.lineTo(top[k].x, yc + top[k].y);
             p.closeSubPath();
-            // Muted: a faint ghost of the note, kept in place.
-            g.setColour(fill.withAlpha(e.muted ? 0.14f : sel ? 0.62f : 0.36f));
-            g.fillPath(p);
+            // Muted: a faint ghost of the note, kept in place. Its consonants (the unvoiced sound
+            // at its edges) muted with the zone beside them: those parts of the blob are faint too.
+            const NoteSpan vs = voicedSpan(A, i);
+            const bool headQuiet = !e.muted && vs.start > n.startFrame && e.consMuted;
+            const bool tailQuiet = !e.muted && vs.end < n.endFrame && i + 1 < (int)d.edits.notes.size() &&
+                                   d.edits.notes[(size_t)i + 1].consMuted;
+            const float hx = xOf(ed.outSec((vs.start - 0.5) * hopSec)), tx = xOf(ed.outSec((vs.end - 0.5) * hopSec));
+            const auto band = [&](float x0, float x1) {
+                return juce::Rectangle<float>(x0, box.getY() - s, x1 - x0, box.getHeight() + 2 * s).getSmallestIntegerContainer();
+            };
+            {
+                juce::Graphics::ScopedSaveState keep(g);
+                if (headQuiet) g.excludeClipRegion(band(box.getX() - 2, hx));
+                if (tailQuiet) g.excludeClipRegion(band(tx, box.getRight() + 2));
+                g.setColour(fill.withAlpha(e.muted ? 0.14f : sel ? 0.62f : 0.36f));
+                g.fillPath(p);
+            }
+            for (int part = 0; part < 2; ++part) {
+                if (part == 0 ? !headQuiet : !tailQuiet) continue;
+                juce::Graphics::ScopedSaveState keep(g);
+                g.reduceClipRegion(part == 0 ? band(box.getX() - 2, hx) : band(tx, box.getRight() + 2));
+                g.setColour(fill.withAlpha(0.14f));
+                g.fillPath(p);
+            }
             // Thin, quiet outline: the fill carries the colour. Selected: the note's own colour,
             // lighter, a little thicker.
             g.setColour(e.muted ? fill.withAlpha(0.45f) : sel ? fill.interpolatedWith(col::lift, 0.4f) : fill.withAlpha(0.6f));
@@ -3266,6 +3293,18 @@ void PitchEditor::zoomForTest(double pixelsPerSecond, double scrollSec)
 {
     pps_ = pixelsPerSecond;
     scroll_ = scrollSec;
+    fitted_ = true;
+    // Vertically: the notes in view, with a margin.
+    if (eff_ != nullptr && roll_->canvas().getWidth() > 0) {
+        const double t1 = scrollSec + roll_->canvas().getWidth() / pps_;
+        double lo = 1e9, hi = -1e9;
+        for (int i = 0; i < (int)eff_->notes.size(); ++i)
+            if (noteEndSec(i) > scrollSec && noteStartSec(i) < t1) {
+                lo = std::min(lo, eff_->notes[(size_t)i].centerMidi);
+                hi = std::max(hi, eff_->notes[(size_t)i].centerMidi);
+            }
+        if (lo <= hi) { lo_ = lo - 4; hi_ = hi + 4; }
+    }
     roll_->repaint();
 }
 
