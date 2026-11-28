@@ -101,19 +101,24 @@ public:
         std::vector<Item> items;
         std::vector<float> level; // 0..1 per kLevelStep, from the start of the timeline
 
-        // Adds an item whose analysis `a` lies at `offset` on the view's timeline.
+        // Adds an item whose analysis `a` lies at `offset` on the view's timeline. Only the part
+        // inside the item [itemT0, itemT1] is shown, as in the editor: a trimmed item's source
+        // goes on beyond its edges, under the items that follow it.
         void add(const juce::String& name, double itemT0, double itemT1, const Analysis& a, double offset)
         {
             Item it;
             it.t0 = itemT0;
             it.t1 = itemT1;
             it.name = name;
-            for (const auto& n : a.notes) it.notes.push_back({offset + n.startSec, offset + n.endSec, n.centerMidi});
+            for (const auto& n : a.notes) {
+                const double n0 = std::max(itemT0, offset + n.startSec), n1 = std::min(itemT1, offset + n.endSec);
+                if (n1 > n0) it.notes.push_back({n0, n1, n.centerMidi});
+            }
             items.push_back(it);
             t1 = std::max(t1, itemT1);
             for (const auto& f : a.frames) {
                 const double t = offset + f.timeSec;
-                if (t < 0) continue;
+                if (t < 0 || t < itemT0 || t >= itemT1) continue;
                 const size_t k = (size_t)(t / kLevelStep);
                 if (k >= level.size()) level.resize(k + 1, 0.f);
                 level[k] = std::max(level[k], juce::jlimit(0.f, 1.f, (f.rmsDb + 60.f) / 50.f));
